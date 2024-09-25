@@ -64,16 +64,15 @@ Validators are executed in the order they are written in most contexts, but the 
 
 Other fields are referenced by their name after a `$` prefix.
 
-- `=(<$field>)` equal to another field
-- `!=(<$field>)` not equal to another field
-- `>(<$field>)` greater than another field
-- `<($field>)` less than another field
-- `>=(<$field>)` greater than or equal to another field
-- `<=(<$field>)` less than or equal to another field
+- `eq(<$field>)` equal to another field
+- `neq(<$field>)` not equal to another field
+- `gt(<$field>)` greater than another field
+- `lt($field>)` less than another field
+- `min(<$field>)` greater than or equal to another field
+- `max(<$field>)` less than or equal to another field
 - `in(<$field>)` is in another field
 - `not in(<$field>)` is not in another field
-- `if(<$field> ([+-]<validator>)*)`	can be used on bool fields
+- `if(_ , <$field> ([+-]<validator>)*)`	can be used on bool fields
 - `if(<validator>*, <$field> ([+-]<validator>)*)` can be used on any field with the appropriate validators
 - `elseif(<$field> ([+-]<validator>)*)` can be used right after `if` to specify the else if condition
 - `else(<$field> ([+-]<validator>)*)` can be used right after `if` to specify the else condition
-
