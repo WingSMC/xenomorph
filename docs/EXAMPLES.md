@@ -50,16 +50,18 @@ type AllInterfaces = SomeOtherInterface + set ActuatorInterface
 ## Structs & Enums
 
 ```ts
-type UserType = enum {
+type UserType = {
 	Admin: -1
 	Basic: 1
 	Premium: 2
 }
 
 type User = {
-	_id: string /^[a-f0-9]{24}$/ @SQL:primary
+	_id:
+		| string @Mongo:id /^[a-f0-9]{24}$/
+		| u64 @SQL:primary
 	name: string /^[A-Z]{3,5}_[0-9]{1,3}$/
-	
+
 	age: u8 @max(125)
 	utype: UserType
 	languageFilter: bool @if($age +@min(16)) @else($age +@min(12))

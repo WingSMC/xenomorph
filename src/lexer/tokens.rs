@@ -4,8 +4,8 @@ pub enum Token {
 
     TypeKeyword,
     Set,
-    Tuple,
-    
+    Enum,
+
     Literal,
     Regex,
     

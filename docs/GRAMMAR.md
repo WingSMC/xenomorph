@@ -17,7 +17,7 @@
 ## Complex types
 
 - Struct: `{...}` or with [generics](#Generics)  `<Generics>` `{}`
-- Enum object `enum {...}` or with types or literals
+- Enum object `enum ... = {...}` or with types or literals
 - Enum lists: `[a, b, c]` with literals or with types `(<Types>)[]` or `[string, i32]`
 
 ## Builtin validators:
