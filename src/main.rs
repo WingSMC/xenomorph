@@ -5,12 +5,22 @@ mod lexer {
     pub mod lexer;
 }
 
-fn main() -> std::io::Result<()> {
+fn main() {
     let args: Vec<String> = env::args().collect();
     dbg!(args);
-    lexer::lexer::tokenizer();
 
-    let path = env::current_dir()?;
-    println!("The current directory is {}", path.display());
-    Ok(())
+    let file = "asd".to_string();
+    let result = lexer::lexer::tokenizer(&file);
+
+    match result {
+        Err((e, _)) => {
+            println!("Error: {}", e);
+        }
+
+        Ok(tokens) => {
+            for token in tokens {
+                println!("{:?}", token);
+            }
+        }
+    }
 }

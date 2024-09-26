@@ -1,4 +1,6 @@
 
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Token {
     Identifier,
 
