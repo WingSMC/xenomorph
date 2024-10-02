@@ -23,6 +23,7 @@ pub enum Token<'src> {
     Comma(TokenData<'src>),
     Colon(TokenData<'src>),
     Semicolon(TokenData<'src>),
+
     Plus(TokenData<'src>),
     Minus(TokenData<'src>),
     Asterix(TokenData<'src>),
@@ -32,6 +33,7 @@ pub enum Token<'src> {
 
     At(TokenData<'src>),
     Eq(TokenData<'src>),
+    Neq(TokenData<'src>),
     Caret(TokenData<'src>),
     SymmDiff(TokenData<'src>),
 
