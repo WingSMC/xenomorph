@@ -119,7 +119,6 @@ impl<'src> Lexer<'src> {
                 },
                 // TODO regex & number & symmdiff & neq
                 _ => return Err((NOT_RECOGNIZED, self.location)),
-                
             });
         }
 
