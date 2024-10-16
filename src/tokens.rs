@@ -1,22 +1,29 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TokenData<'src> {
     pub v: &'src str,
-    pub src_index: usize,
     pub l: usize,
     pub c: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
+pub enum NumberType {
+    Int(bool, u8), // signed, size
+    Float(u8),
+    // BigInt,
+    // Real,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Token<'src> {
     Identifier(TokenData<'src>),
     Type(TokenData<'src>),
     Set(TokenData<'src>),
 
-    Number(TokenData<'src>),
+    Number(TokenData<'src>, NumberType),
     String(TokenData<'src>),
     Regex(TokenData<'src>),
 
+    Not(TokenData<'src>),
     Or(TokenData<'src>),
     And(TokenData<'src>),
     Dot(TokenData<'src>),
@@ -27,7 +34,6 @@ pub enum Token<'src> {
     Plus(TokenData<'src>),
     Minus(TokenData<'src>),
     Asterix(TokenData<'src>),
-    Slash(TokenData<'src>),
     Backslash(TokenData<'src>),
     Dollar(TokenData<'src>),
 

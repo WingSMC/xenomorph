@@ -4,13 +4,14 @@ type Color = [
   	"blue"
 ]
 
-//type Person = {
-//	name: string
-//	age: number
-//	favoriteColor: Color
-//}
+type Person = {
+	name: string
+	age: number
+	favoriteColor: Color
+}
 
 // ignore this comment
 
+a  b <> < > ! != - + . , : ; ( ) [ ] { } = > < & |
 
-
+100 3.141592653 0.1 0.0 0.

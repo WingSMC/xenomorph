@@ -54,7 +54,7 @@ Validators are executed in the order they are written in most contexts, but the 
 
 ### String
 
-- `/regex/flags`
+- `/regex/`
 - `minlen(<number>)`
 - `maxlen(<number>)`
 - `len(<number>)`
