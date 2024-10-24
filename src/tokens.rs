@@ -14,6 +14,7 @@ pub enum NumberType {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum Token<'src> {
     Identifier(TokenData<'src>),
     Type(TokenData<'src>),

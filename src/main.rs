@@ -1,8 +1,11 @@
+use lexer::Lexer;
+use parser::Parser;
 use std::env;
 use std::fs;
 
 mod lexer;
 mod parser;
+mod parser_expr;
 mod tokens;
 
 fn main() {
@@ -16,7 +19,7 @@ fn main() {
         Ok(s) => s,
     };
 
-    let mut lexer = lexer::Lexer::new(&c);
+    let mut lexer = Lexer::new(&c);
     let result = lexer.tokenize();
 
     match result {
@@ -26,7 +29,9 @@ fn main() {
         }
         Ok(tokens) => {
             dbg!(&tokens);
-            parser::parse(&tokens);
+            let mut p = Parser::new(tokens);
+            let ast = p.parse();
+            dbg!(&ast);
         }
     }
 }
