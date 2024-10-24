@@ -16,9 +16,8 @@
 
 ## Complex types
 
-- Struct: `{...}` or with [generics](#Generics)  `<Generics>` `{}`
-- Enum object `enum ... = {...}` or with types or literals
-- Enum lists: `[a, b, c]` with literals or with types `(<Types>)[]` or `[string, i32]`
+- Structs/Enums: `{...}` or with [generics](#Generics)  `<Generics>` `{}`
+- Lists/Tuples: `[a, b, c]` with literals or with types `(<Types>)[]` or `[string, i32]`
 
 ## Builtin validators:
 
@@ -28,7 +27,7 @@ Validators are executed in the order they are written in most contexts, but the 
 
 ## Validation operators
 
-- `(...)` for grouping validators
+- `( )` for grouping validators
 - `not` inverts the result e.g. `not empty`
 - `or` or `|`
 - `xor` or `^`
@@ -41,8 +40,8 @@ Validators are executed in the order they are written in most contexts, but the 
 - `in(<enum, list>)` is in enumeration/list
 - `empty` for strings and arrays
 - Range: `a..b` or `a.<b` or `a<.b` or `a<.<b` where `a` and `b` are `<number> or <string>`
-- `only(<list>)` restrict fields to plugins
-- `exclude(<list>)` opposite of `only`
+- `only(<plugin_list>)` restrict fields to plugins
+- `exclude(<plugin_list>)` opposite of `only`
 
 ### Number / Integer / BigInt / Float / Decimal validation
 
@@ -70,9 +69,9 @@ Other fields are referenced by their name after a `$` prefix.
 - `lt($field>)` less than another field
 - `min(<$field>)` greater than or equal to another field
 - `max(<$field>)` less than or equal to another field
-- `in(<$field>)` is in another field
+- `in(<$field>)` is in another field (list)
 - `not in(<$field>)` is not in another field
-- `if(_ , <$field> ([+-]<validator>)*)`	can be used on bool fields
-- `if(<validator>*, <$field> ([+-]<validator>)*)` can be used on any field with the appropriate validators
-- `elseif(<$field> ([+-]<validator>)*)` can be used right after `if` to specify the else if condition
+- `if(_ , (<$field> ([+-]<validator>)*)*)`	can be used on bool fields
+- `if(<validator>*, (<$field> ([+-]<validator>)*)*)` can be used on any field with the appropriate validators
+- `elseif(<validator>*, <$field> (([+-]<validator>)*)*)` can be used right after `if` to specify the else if condition
 - `else(<$field> ([+-]<validator>)*)` can be used right after `if` to specify the else condition

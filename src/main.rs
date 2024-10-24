@@ -25,7 +25,8 @@ fn main() {
             println!("Location: {:?}", loc);
         }
         Ok(tokens) => {
-            dbg!(tokens);
+            dbg!(&tokens);
+            parser::parse(&tokens);
         }
     }
 }
