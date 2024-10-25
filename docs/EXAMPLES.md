@@ -65,7 +65,7 @@ type User = {
 		| @Mongo:id(string) /^[a-f0-9]{24}$/
 		| @SQL:primary(u64),
 	name: string /^[A-Z]{3,5}_[0-9]{1,3}$/ @len(5..20),
-	age: u8 @min(13) @max(127) @if(min(18), $adultContent +false),
+	age: u8 @min(13) @max(127) @if(lt(18), $adultContent +false),
 	utype: UserType,
 	// if tests the languageFilter boolean value implicitly
 	// so a validator expression is not needed
