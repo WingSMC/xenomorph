@@ -30,8 +30,17 @@ fn main() {
         Ok(tokens) => {
             dbg!(&tokens);
             let mut p = Parser::new(tokens);
-            let ast = p.parse();
-            dbg!(&ast);
+            let parser_result = p.parse();
+
+            match parser_result {
+                Err(e) => {
+                    println!("Error: {}", e);
+                    p.print_location();
+                }
+                Ok(ast) => {
+                    dbg!(&ast);
+                }
+            }
         }
     }
 }

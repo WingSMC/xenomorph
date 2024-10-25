@@ -30,46 +30,12 @@ impl<'src> Parser<'src> {
     }
 
     pub fn print_location(&self) {
-        if self.current == 0 {
-            println!("No tokens have been parsed yet");
+        if self.current == self.tokens.len() {
+            println!("Everything is parsed!");
         }
 
-        let token = &self.tokens[self.current - 1];
-        use Token::*;
-        match token {
-            EOF => println!("EOF"),
-            Number(l, _)
-            | Identifier(l)
-            | Type(l)
-            | Set(l)
-            | String(l)
-            | Regex(l)
-            | Not(l)
-            | Or(l)
-            | And(l)
-            | Dot(l)
-            | Comma(l)
-            | Colon(l)
-            | Semicolon(l)
-            | Plus(l)
-            | Minus(l)
-            | Asterix(l)
-            | Backslash(l)
-            | Dollar(l)
-            | At(l)
-            | Eq(l)
-            | Neq(l)
-            | Caret(l)
-            | SymmDiff(l)
-            | Gt(l)
-            | Lt(l)
-            | LParen(l)
-            | RParen(l)
-            | LCurly(l)
-            | RCurly(l)
-            | LBracket(l)
-            | RBracket(l) => println!("{}:{}:{}", l.l, l.c, l.v),
-        };
+        let token = &self.tokens[self.current];
+        println!("Current token: {:?}", token);
     }
 }
 
@@ -138,10 +104,20 @@ impl<'src> Parser<'src> {
         Ok(Expr::Struct(fields))
     }
 
+    fn parse_string_literal(&mut self) -> Result<Expr<'src>, &'static str> {
+        let token_data = self.next().unwrap();
+        if let Token::String(token_data) = token_data {
+            Ok(Expr::StringLiteral(token_data.v))
+        } else {
+            Err("Expected a string literal")
+        }
+    }
+
     fn parse_expr(&mut self) -> Result<Expr<'src>, &'static str> {
         match self.peek() {
             Some(Token::Identifier(_)) => self.parse_identifier(),
             Some(Token::Number(_, _)) => self.parse_number(),
+            Some(Token::String(_)) => self.parse_string_literal(),
             Some(Token::LBracket(_)) => self.parse_list(),
             Some(Token::LCurly(_)) => self.parse_struct(),
             _ => Err("Unexpected token while parsing expression"),
