@@ -29,7 +29,7 @@ impl<'src> Parser<'src> {
         Ok(ast)
     }
 
-    pub fn get_location(&self) {
+    pub fn print_location(&self) {
         if self.current == 0 {
             println!("No tokens have been parsed yet");
         }
