@@ -19,9 +19,9 @@ type Tuple = [
 
 // You can validate tuple fields
 type EventTuple = [
-	EventList
-	(string @len(15..300) | null)
-	number // Price
+	EventList,
+	string @len(15..300) | null,
+	number, // Price
 ]
 ```
 
@@ -50,11 +50,6 @@ type AllInterfaces = SomeOtherInterface + set ActuatorInterface
 ## Structs & Enums
 
 ```ts
-type UserType = {
-	Admin: -1,
-	Basic: 1,
-	Premium: 2,
-}
 
 type User = {
 	// by default it will use string for other targets
@@ -74,6 +69,11 @@ type User = {
 }
 
 // Action user contains algebraic data just like rust enums
+type UserType = {
+	Admin(-1),
+	Basic(1),
+	Premium(2),
+}
 type Action = {
 	// DeleteUser contains same type as User._id, it's
 	// own type is an auto generated integer much like in rust

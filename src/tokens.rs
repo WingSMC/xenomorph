@@ -22,7 +22,6 @@ pub enum Token<'src> {
     Number(TokenData<'src>, NumberType),
     String(TokenData<'src>),
     Regex(TokenData<'src>),
-
     Not(TokenData<'src>),
     Or(TokenData<'src>),
     And(TokenData<'src>),
