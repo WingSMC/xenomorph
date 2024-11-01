@@ -14,44 +14,43 @@ pub enum NumberType {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Token<'src> {
-    Identifier(TokenData<'src>),
-    Type(TokenData<'src>),
-    Set(TokenData<'src>),
+pub enum TokenVariant {
+    Identifier,
+    Type,
+    Set,
 
-    Number(TokenData<'src>, NumberType),
-    String(TokenData<'src>),
-    Regex(TokenData<'src>),
+    Number,
+    String,
+    Regex,
+    Not,
+    Or,
+    And,
+    Dot,
+    Comma,
+    Colon,
+    Semicolon,
 
-    Not(TokenData<'src>),
-    Or(TokenData<'src>),
-    And(TokenData<'src>),
-    Dot(TokenData<'src>),
-    Comma(TokenData<'src>),
-    Colon(TokenData<'src>),
-    Semicolon(TokenData<'src>),
+    Plus,
+    Minus,
+    Asterix,
+    Backslash,
+    Dollar,
 
-    Plus(TokenData<'src>),
-    Minus(TokenData<'src>),
-    Asterix(TokenData<'src>),
-    Backslash(TokenData<'src>),
-    Dollar(TokenData<'src>),
+    At,
+    Eq,
+    Neq,
+    Caret,
+    SymmDiff,
 
-    At(TokenData<'src>),
-    Eq(TokenData<'src>),
-    Neq(TokenData<'src>),
-    Caret(TokenData<'src>),
-    SymmDiff(TokenData<'src>),
+    Gt,
+    Lt,
 
-    Gt(TokenData<'src>),
-    Lt(TokenData<'src>),
-
-    LParen(TokenData<'src>),
-    RParen(TokenData<'src>),
-    LCurly(TokenData<'src>),
-    RCurly(TokenData<'src>),
-    LBracket(TokenData<'src>),
-    RBracket(TokenData<'src>),
-
-    EOF,
+    LParen,
+    RParen,
+    LCurly,
+    RCurly,
+    LBracket,
+    RBracket,
 }
+
+pub type Token<'src> = (TokenVariant, TokenData<'src>);

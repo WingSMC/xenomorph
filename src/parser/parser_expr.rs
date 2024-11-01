@@ -2,11 +2,11 @@
 pub enum Expr<'src> {
     TypeDef {
         name: &'src str,
-        value: Box<Expr<'src>>,
+        t: Box<Expr<'src>>,
     },
     List(Vec<Expr<'src>>),
-    Set(Vec<Expr<'src>>),
     Struct(Vec<(String, Expr<'src>)>),
+
     Enum(Vec<(String, Expr<'src>)>),
     Identifier(&'src str),
     Number(i64),
@@ -18,11 +18,17 @@ pub enum Expr<'src> {
     SymmetricDifference(Box<Expr<'src>>, Box<Expr<'src>>),
 }
 
+pub enum ComplexType {
+    List,
+    Struct,
+    Enum,
+}
+
 use std::fmt;
 impl<'src> fmt::Display for Expr<'src> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Expr::TypeDef { name, value } => write!(f, "type {} = {}", name, value),
+            Expr::TypeDef { name, t } => write!(f, "type {} = {}", name, t),
             Expr::List(elements) => {
                 let elements_str = elements
                     .iter()
@@ -30,14 +36,6 @@ impl<'src> fmt::Display for Expr<'src> {
                     .collect::<Vec<String>>()
                     .join(", ");
                 write!(f, "[{}]", elements_str)
-            }
-            Expr::Set(elements) => {
-                let elements_str = elements
-                    .iter()
-                    .map(|e| e.to_string())
-                    .collect::<Vec<String>>()
-                    .join(", ");
-                write!(f, "set [{}]", elements_str)
             }
             Expr::Struct(fields) => {
                 let fields_str = fields

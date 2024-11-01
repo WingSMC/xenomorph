@@ -1,4 +1,4 @@
-use crate::tokens::{NumberType, Token, TokenData};
+use crate::tokens::{Token, TokenData, TokenVariant};
 use std::{iter::Peekable, str::Chars};
 
 static NOT_RECOGNIZED: &str = "Token not recognized";
@@ -98,31 +98,31 @@ impl<'src> Lexer<'src> {
                     continue;
                 }
                 'a'..='z' | 'A'..='Z' | '_' => self.consume_word(),
-                '@' => Token::At(self.single_char_token_next()),
-                ':' => Token::Colon(self.single_char_token_next()),
-                '$' => Token::Dollar(self.single_char_token_next()),
-                '|' => Token::Or(self.single_char_token_next()),
-                '&' => Token::And(self.single_char_token_next()),
+                '@' => (TokenVariant::At, self.single_char_token_next()),
+                ':' => (TokenVariant::Colon, self.single_char_token_next()),
+                '$' => (TokenVariant::Dollar, self.single_char_token_next()),
+                '|' => (TokenVariant::Or, self.single_char_token_next()),
+                '&' => (TokenVariant::And, self.single_char_token_next()),
                 '0'..='9' => self.consume_number(),
                 '"' => self.consume_string()?,
-                '.' => Token::Dot(self.single_char_token_next()),
-                '(' => Token::LParen(self.single_char_token_next()),
-                ')' => Token::RParen(self.single_char_token_next()),
-                ',' => Token::Comma(self.single_char_token_next()),
-                '{' => Token::LCurly(self.single_char_token_next()),
-                '}' => Token::RCurly(self.single_char_token_next()),
-                '[' => Token::LBracket(self.single_char_token_next()),
-                ']' => Token::RBracket(self.single_char_token_next()),
+                '.' => (TokenVariant::Dot, self.single_char_token_next()),
+                '(' => (TokenVariant::LParen, self.single_char_token_next()),
+                ')' => (TokenVariant::RParen, self.single_char_token_next()),
+                ',' => (TokenVariant::Comma, self.single_char_token_next()),
+                '{' => (TokenVariant::LCurly, self.single_char_token_next()),
+                '}' => (TokenVariant::RCurly, self.single_char_token_next()),
+                '[' => (TokenVariant::LBracket, self.single_char_token_next()),
+                ']' => (TokenVariant::RBracket, self.single_char_token_next()),
                 '<' => self.consume_lt_or_symdiff(),
-                '>' => Token::Gt(self.single_char_token_next()),
-                ';' => Token::Semicolon(self.single_char_token_next()),
-                '+' => Token::Plus(self.single_char_token_next()),
-                '-' => Token::Minus(self.single_char_token_next()),
-                '*' => Token::Asterix(self.single_char_token_next()),
-                '^' => Token::Caret(self.single_char_token_next()),
-                '=' => Token::Eq(self.single_char_token_next()),
+                '>' => (TokenVariant::Gt, self.single_char_token_next()),
+                ';' => (TokenVariant::Semicolon, self.single_char_token_next()),
+                '+' => (TokenVariant::Plus, self.single_char_token_next()),
+                '-' => (TokenVariant::Minus, self.single_char_token_next()),
+                '*' => (TokenVariant::Asterix, self.single_char_token_next()),
+                '^' => (TokenVariant::Caret, self.single_char_token_next()),
+                '=' => (TokenVariant::Eq, self.single_char_token_next()),
                 '!' => self.consume_not_or_neq(),
-                '\\' => Token::Backslash(self.single_char_token_next()),
+                '\\' => (TokenVariant::Backslash, self.single_char_token_next()),
                 '/' => match self.consume_comment_or_regex()? {
                     Some(t) => t,
                     None => continue,
@@ -131,7 +131,6 @@ impl<'src> Lexer<'src> {
             });
         }
 
-        tokens.push(Token::EOF);
         Ok(tokens)
     }
 
@@ -157,9 +156,9 @@ impl<'src> Lexer<'src> {
         };
 
         match word.as_str() {
-            "type" => Token::Type(token_data),
-            "set" => Token::Set(token_data),
-            _ => Token::Identifier(token_data),
+            "type" => (TokenVariant::Type, token_data),
+            "set" => (TokenVariant::Set, token_data),
+            _ => (TokenVariant::Identifier, token_data),
         }
     }
 
@@ -181,7 +180,8 @@ impl<'src> Lexer<'src> {
 
         while let Some(c) = self.next() {
             if c == '/' {
-                return Ok(Some(Token::Regex(
+                return Ok(Some((
+                    TokenVariant::Regex,
                     TokenData::from_loc_to_but_not_including_lexer(&initial_loc, &self),
                 )));
             }
@@ -197,10 +197,10 @@ impl<'src> Lexer<'src> {
         while let Some(c) = self.next() {
             match c {
                 '"' => {
-                    return Ok(Token::String(TokenData::from_loc_to_but_not_including_lexer(
-                        &initial_loc,
-                        &self,
-                    )))
+                    return Ok((
+                        TokenVariant::String,
+                        TokenData::from_loc_to_but_not_including_lexer(&initial_loc, &self),
+                    ))
                 }
                 _ => continue,
             }
@@ -216,12 +216,15 @@ impl<'src> Lexer<'src> {
         match self.peek() {
             Some('>') => {
                 self.next();
-                Token::SymmDiff(TokenData::from_loc_to_but_not_including_lexer(
-                    &initial_loc,
-                    &self,
-                ))
+                (
+                    TokenVariant::SymmDiff,
+                    TokenData::from_loc_to_but_not_including_lexer(&initial_loc, &self),
+                )
             }
-            _ => Token::Lt(TokenData::at_loc_in_lexer(&initial_loc, &self)),
+            _ => (
+                TokenVariant::Lt,
+                TokenData::at_loc_in_lexer(&initial_loc, &self),
+            ),
         }
     }
 
@@ -232,39 +235,30 @@ impl<'src> Lexer<'src> {
         match self.peek() {
             Some('=') => {
                 self.next();
-                Token::Neq(TokenData::from_loc_to_but_not_including_lexer(
-                    &initial_loc,
-                    &self,
-                ))
+                (
+                    TokenVariant::Neq,
+                    TokenData::from_loc_to_but_not_including_lexer(&initial_loc, &self),
+                )
             }
-            _ => Token::Not(TokenData::at_loc_in_lexer(&initial_loc, &self)),
+            _ => (
+                TokenVariant::Not,
+                TokenData::at_loc_in_lexer(&initial_loc, &self),
+            ),
         }
     }
 
     fn consume_number(&mut self) -> Token<'src> {
         let initial_loc = self.location_snapshot();
-        let mut number_str = String::new();
-        let mut is_float = false;
 
         while let Some(&c) = self.peek() {
             match c {
-                '0'..='9' => {
-                    number_str.push(self.next().unwrap());
-                }
-                '.' => {
-                    is_float = true;
-                    number_str.push(self.next().unwrap());
+                '0'..='9' | '.' => {
+                    self.next().unwrap();
                 }
                 _ => break,
             }
         }
 
-        let token_data = TokenData::from_loc_to_but_not_including_lexer(&initial_loc, &self);
-
-        if is_float {
-            Token::Number(token_data, NumberType::Float(64))
-        } else {
-            Token::Number(token_data, NumberType::Int(false, 64))
-        }
+        (TokenVariant::Number, TokenData::from_loc_to_but_not_including_lexer(&initial_loc, &self))
     }
 }
