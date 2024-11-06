@@ -1,0 +1,5 @@
+type Color = [
+	"red" @minlen("asd") @maxlen("bsd"),
+  	"green",
+  	"blue",
+]

@@ -10,7 +10,7 @@ mod tokens;
 fn main() {
     let mut filepath = env::current_exe().unwrap();
     filepath.pop();
-    filepath.push("../../tests/examples/lexer/1.xen");
+    filepath.push("../../tests/examples/parser/p1.xen");
     let contents = fs::read_to_string(filepath);
 
     let c = match contents {
@@ -30,12 +30,12 @@ fn main() {
         Ok(tokens) => tokens,
     };
 
-    dbg!(&tokens);
-    let mut p = Parser::new(tokens);
+    //dbg!(&tokens);
+    let mut p = Parser::new(&tokens);
     let parser_result = p.parse();
 
     match parser_result {
         Err(e) => println!("Error: {}", e),
-        Ok(ast) => drop(dbg!(&ast)),
+        Ok(ast) => drop(dbg!("{:?}", ast)),
     };
 }

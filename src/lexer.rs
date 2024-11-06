@@ -158,6 +158,9 @@ impl<'src> Lexer<'src> {
         match word.as_str() {
             "type" => (TokenVariant::Type, token_data),
             "set" => (TokenVariant::Set, token_data),
+            "enum" => (TokenVariant::Enum, token_data),
+            "true" => (TokenVariant::True, token_data),
+            "false" => (TokenVariant::False, token_data),
             _ => (TokenVariant::Identifier, token_data),
         }
     }

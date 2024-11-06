@@ -9,19 +9,19 @@ Lets say we have two lists, one of string literals (literals can be considered s
 Usually in place of the types you can use the right side of the `=` operators.
 
 ```ts
-type ActuatorInterface = ["axles" "vehicle" "wheel-individual"]
+type ActuatorInterface = ["axles", "vehicle", "wheel-individual"]
 type Tuple = [
-	ActuatorInterface
-	string
-	number
-	number
+	ActuatorInterface,
+	string,
+	number,
+	number,
 ]
 
 // You can validate tuple fields
 type EventTuple = [
-	EventList
-	(string @len(15..300) | null)
-	number // Price
+	EventList,
+	string @len(15..300) | null,
+	number,
 ]
 ```
 
@@ -33,7 +33,7 @@ You can constrain lists and do operations on them.
 	- `<>` symmetric difference: `(a \ b) + (b \ a)` same as `(a + b) \ (a * b)`
 - `+` concatenation (union for sets)
 
-The `set` keyword produces and error in declarations but when used on pre-existing types it just creates a new types without the duplicates.
+The `set` keyword produces and error in declarations with duplicates, but when used on pre-existing types it just creates new types without the duplicates.
 
 ```ts
 type SomeIncorrectSet = set ["axles" "service-request" "axles"] // -> Error
