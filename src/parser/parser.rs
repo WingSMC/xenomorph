@@ -1,5 +1,5 @@
 use super::parser_expr::{Declaration, Expr, Literal, NumberType};
-use crate::tokens::{format_token_opt, Token, TokenData, TokenVariant};
+use crate::tokens::{Token, TokenData, TokenVariant};
 
 pub struct Parser<'src> {
     pub tokens: &'src Vec<Token<'src>>,
@@ -14,20 +14,15 @@ impl<'src> Parser<'src> {
         let mut ast = Vec::new();
 
         while self.is_not_eof() {
-            ast.push(self.parse_type_declaration()?);
+            ast.push(self.parse_declaration()?);
         }
 
         Ok(ast)
     }
 
-    fn peek(&self) -> Option<&Token<'src>> {
-        self.tokens.get(self.current)
-    }
-
     fn is_not_eof(&self) -> bool {
         self.current < self.tokens.len() - 1
     }
-
     fn next(&mut self) -> Result<&'src Token<'src>, String> {
         let d = self.tokens.get(self.current);
         match d {
@@ -38,56 +33,38 @@ impl<'src> Parser<'src> {
             }
         }
     }
-
-    fn prev(&self) -> Option<&Token<'src>> {
-        self.tokens.get(self.current - 1)
+    fn peek(&self) -> Option<&Token<'src>> {
+        self.tokens.get(self.current)
+    }
+    fn expect(&mut self, expected: TokenVariant) -> Result<&'src TokenData<'src>, String> {
+        let (var, d) = self.next()?;
+        if *var != expected {
+            return Err(format!("Expected {} at {}", expected, d));
+        }
+        Ok(d)
     }
 
+    fn parse_declaration(&mut self) -> Result<Declaration<'src>, String> {
+        let (var, d) = self.next()?;
+        let dec = match var {
+            TokenVariant::Type => self.parse_type_declaration(),
+            _ => Err(format!("Expected 'type' at {}, instead found {}.", d, var)),
+        };
+
+        if let Err(e) = dec {
+            return Err(e);
+        }
+
+        self.expect(TokenVariant::Semicolon)?;
+
+        dec
+    }
     fn parse_type_declaration(&mut self) -> Result<Declaration<'src>, String> {
-        let type_tok = self.next()?;
-        if type_tok.0 != TokenVariant::Type {
-            return Err(format!("Expected 'type' at {}", type_tok.1));
-        }
-
-        let (nv, name) = self.next()?;
-        if *nv != TokenVariant::Identifier {
-            return Err(format!("Expected identifier at {}", name));
-        }
-
-        let (nv, d) = self.next()?;
-        if *nv != TokenVariant::Eq {
-            return Err(format!("Expected '=' at {:?}", d));
-        }
-
+        let name = self.expect(TokenVariant::Identifier)?;
+        self.expect(TokenVariant::Eq)?;
         let t = self.parse_expr_list()?;
-
-        let (nv, d) = self.next()?;
-        if *nv != TokenVariant::RCurly {
-            return Err(format!("Expected '}}' at {}", d));
-        }
-
         Ok(Declaration::TypeDecl { name, t })
     }
-
-    fn parse_expr(&mut self) -> Result<Expr<'src>, String> {
-        let (first_var, first) = self.next()?;
-
-        match first_var {
-            TokenVariant::Identifier => Ok(Expr::Identifier(first)),
-            TokenVariant::String => Ok(Expr::Literal(Literal::String(
-                first.v[1..first.v.len() - 1].to_string(),
-                first,
-            ))),
-            TokenVariant::Number => self.parse_number(first),
-            TokenVariant::LBracket => self.parse_list(),
-            TokenVariant::At => self.parse_annotation(),
-            _ => Err(format!(
-                "Unexpected token {}",
-                format_token_opt(self.prev())
-            )),
-        }
-    }
-
     fn parse_expr_list(&mut self) -> Result<Vec<Expr<'src>>, String> {
         let mut list = Vec::new();
 
@@ -100,17 +77,17 @@ impl<'src> Parser<'src> {
                 Some(d) => {
                     if matches!(
                         d.0,
-                        TokenVariant::Comma | TokenVariant::RBracket | TokenVariant::RCurly | TokenVariant::RParen
+                        TokenVariant::Comma
+                            | TokenVariant::RBracket
+                            | TokenVariant::RCurly
+                            | TokenVariant::RParen
+                            | TokenVariant::Semicolon
                     ) {
                         current = d;
                         break;
                     }
                 }
-
-                None => {
-                    dbg!("UE1");
-                    return Err("Unexpected end of input".to_string());
-                }
+                None => return Ok(list),
             }
         }
 
@@ -120,6 +97,22 @@ impl<'src> Parser<'src> {
 
         Ok(list)
     }
+    fn parse_expr(&mut self) -> Result<Expr<'src>, String> {
+        let (first_var, first) = self.next()?;
+
+        match first_var {
+            TokenVariant::Identifier => Ok(Expr::Identifier(first)),
+            TokenVariant::String => Ok(Expr::Literal(Literal::String(
+                first.v[1..first.v.len() - 1].to_string(),
+                first,
+            ))),
+            TokenVariant::Number => self.parse_number(first),
+            TokenVariant::LBracket => self.parse_list(),
+            TokenVariant::LCurly => self.parse_struct(),
+            TokenVariant::At => self.parse_annotation(),
+            _ => Err(format!("Unexpected expression token {}", first)),
+        }
+    }
 
     fn parse_list(&mut self) -> Result<Expr<'src>, String> {
         let mut list = Vec::new();
@@ -128,34 +121,35 @@ impl<'src> Parser<'src> {
             list.push(self.parse_expr_list()?);
         }
 
-        let (var, d) = self.next()?;
-        if *var != TokenVariant::RBracket {
-            return Err(format!("Expected ']' at {}", d));
-        }
+        self.expect(TokenVariant::RBracket)?;
 
         Ok(Expr::List(list))
     }
+    fn parse_struct(&mut self) -> Result<Expr<'src>, String> {
+        let mut fields = Vec::new();
+        while self.peek().map(|t| t.0) != Some(TokenVariant::RCurly) {
+            let d = self.expect(TokenVariant::Identifier)?;
+
+            self.expect(TokenVariant::Colon)?;
+
+            let expr = self.parse_expr_list()?;
+            fields.push((d, expr));
+        }
+
+        self.expect(TokenVariant::RCurly)?;
+
+        Ok(Expr::Struct(fields))
+    }
 
     fn parse_annotation(&mut self) -> Result<Expr<'src>, String> {
-        let (var, id) = self.next()?;
-        if *var != TokenVariant::Identifier {
-            return Err(format!("Expected identifier after '@' at {}", id));
-        }
+        let id = self.expect(TokenVariant::Identifier)?;
 
-        let (var, d) = self.next()?;
-        if *var != TokenVariant::LParen {
-            return Err(format!("Expected '(' at {}", d));
-        }
-
+        self.expect(TokenVariant::LParen)?;
         let t = self.parse_expr_list()?;
-        let (var, d) = self.next()?;
-        if *var != TokenVariant::RParen {
-            return Err(format!("Expected ')' at {}", d));
-        }
+        self.expect(TokenVariant::RParen)?;
 
         Ok(Expr::Annotation(id, t))
     }
-
     fn parse_number(&mut self, d: &'src TokenData<'src>) -> Result<Expr<'src>, String> {
         let has_dot = d.v.contains('.');
 

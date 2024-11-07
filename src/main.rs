@@ -23,8 +23,7 @@ fn main() {
 
     let tokens = match result {
         Err((e, loc)) => {
-            println!("Error: {}", e);
-            println!("Location: {:?}", loc);
+            println!("Lexer error: {} at location [{}]", e, loc);
             return;
         }
         Ok(tokens) => tokens,
@@ -35,7 +34,7 @@ fn main() {
     let parser_result = p.parse();
 
     match parser_result {
-        Err(e) => println!("Error: {}", e),
+        Err(e) => println!("Parser error: {}", e),
         Ok(ast) => drop(dbg!("{:?}", ast)),
     };
 }

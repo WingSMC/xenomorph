@@ -100,7 +100,3 @@ impl<'src> fmt::Display for TokenData<'src> {
         write!(f, "\"{}\" on line:{} column:{}", self.v, self.l, self.c)
     }
 }
-
-pub fn format_token_opt(token: Option<&Token>) -> String {
-    token.map_or("None".to_string(), |t| format!("{} {}", t.0, t.1))
-}

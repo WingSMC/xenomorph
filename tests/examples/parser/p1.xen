@@ -1,5 +1,7 @@
-type Color = [
-	"red" @minlen("asd") @maxlen("bsd"),
-  	"green",
-  	"blue",
-]
+type BrightChannel = Float @min(0.5) @max(1.0);
+
+type BrightColor = {
+	r: BrightChannel,
+  	g: BrightChannel,
+  	b: BrightChannel,
+};

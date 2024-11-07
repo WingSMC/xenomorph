@@ -1,5 +1,5 @@
 use crate::tokens::{Token, TokenData, TokenVariant};
-use std::{iter::Peekable, str::Chars};
+use std::{fmt, iter::Peekable, str::Chars};
 
 static NOT_RECOGNIZED: &str = "Token not recognized";
 static MALFORMED_REGEX: &str = "Malformed regex";
@@ -12,6 +12,12 @@ pub struct LexerLocation {
     pub src_index: usize,
     pub line: usize,
     pub column: usize,
+}
+
+impl fmt::Display for LexerLocation {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "index: {}, line: {}, column: {}", self.src_index, self.line, self.column)
+    }
 }
 
 pub struct Lexer<'src> {
