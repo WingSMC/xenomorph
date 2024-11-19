@@ -57,7 +57,7 @@ type User = {
 	// if it is an SQL ORM it will use u64
 	_id: 
 		| string
-		| @Mongo:id(string) /^[a-f0-9]{24}$/
+		| @Mongo:id
 		| @SQL:primary(u64),
 	name: string /^[A-Z]{3,5}_[0-9]{1,3}$/ @len(5..20),
 	age: u8 @min(13) @max(127) @if(lt(18), $adultContent +false),
@@ -69,12 +69,12 @@ type User = {
 }
 
 // Action user contains algebraic data just like rust enums
-type UserType = {
+type UserType = enum {
 	Admin(-1),
 	Basic(1),
 	Premium(2),
 }
-type Action = {
+type Action = enum {
 	// DeleteUser contains same type as User._id, it's
 	// own type is an auto generated integer much like in rust
 	DeleteUser(User._id), // in memory [0, User._id]
