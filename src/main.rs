@@ -1,17 +1,16 @@
 use lexer::Lexer;
-use parser::Parser;
+use parser::parser::Parser;
 use std::env;
 use std::fs;
 
 mod lexer;
 mod parser;
-mod parser_expr;
 mod tokens;
 
 fn main() {
     let mut filepath = env::current_exe().unwrap();
     filepath.pop();
-    filepath.push("../../tests/examples/lexer/1.xen");
+    filepath.push("../../tests/examples/parser/p1.xen");
     let contents = fs::read_to_string(filepath);
 
     let c = match contents {
@@ -22,25 +21,20 @@ fn main() {
     let mut lexer = Lexer::new(&c);
     let result = lexer.tokenize();
 
-    match result {
+    let tokens = match result {
         Err((e, loc)) => {
-            println!("Error: {}", e);
-            println!("Location: {:?}", loc);
+            println!("Lexer error: {} at location [{}]", e, loc);
+            return;
         }
-        Ok(tokens) => {
-            dbg!(&tokens);
-            let mut p = Parser::new(tokens);
-            let parser_result = p.parse();
+        Ok(tokens) => tokens,
+    };
 
-            match parser_result {
-                Err(e) => {
-                    println!("Error: {}", e);
-                    p.print_location();
-                }
-                Ok(ast) => {
-                    dbg!(&ast);
-                }
-            }
-        }
-    }
+    //dbg!(&tokens);
+    let mut p = Parser::new(&tokens);
+    let parser_result = p.parse();
+
+    match parser_result {
+        Err(e) => println!("Parser error: {}", e),
+        Ok(ast) => drop(dbg!("{:?}", ast)),
+    };
 }
