@@ -30,15 +30,16 @@ pub enum TokenVariant {
 
     Plus,
     Minus,
-    Asterix,
     Backslash,
     Dollar,
+    Asterix,
+    Caret,
 
     At,
     Eq,
     Neq,
-    Caret,
     SymmDiff,
+    Range,
 
     Gt,
     Lt,
@@ -91,6 +92,7 @@ impl fmt::Display for TokenVariant {
             TokenVariant::RCurly => write!(f, "RCurly"),
             TokenVariant::LBracket => write!(f, "LBracket"),
             TokenVariant::RBracket => write!(f, "RBracket"),
+            TokenVariant::Range => write!(f, "Range"),
         }
     }
 }

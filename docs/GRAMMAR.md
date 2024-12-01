@@ -39,7 +39,7 @@ Validators are executed in the order they are written in most contexts, but the 
 - `<literal>` are they equal e.g. `string "exact"`
 - `in(<enum, list>)` is in enumeration/list
 - `empty` for strings and arrays
-- Range: `a..b` or `a.<b` or `a<.b` or `a<.<b` where `a` and `b` are `<number> or <string>`
+- Range: `a..b` or `a.<b` or `a<.b` or `a<.<b` where `a` and `b` are `<number>`
 - `only(<plugin_list>)` restrict fields to plugins
 - `exclude(<plugin_list>)` opposite of `only`
 

@@ -70,19 +70,19 @@ type User = {
 
 // Action user contains algebraic data just like rust enums
 type UserType = enum {
-	Admin(-1),
-	Basic(1),
-	Premium(2),
+	Admin: -1,
+	Basic: 1,
+	Premium: 2,
 }
 type Action = enum {
 	// DeleteUser contains same type as User._id, it's
 	// own type is an auto generated integer much like in rust
-	DeleteUser(User._id), // in memory [0, User._id]
-	EditUser(User._id),   // in memory [1, User._id]
-	QueryLogs({from: Date, to: Date}),  // in memory [2, Date, Date]
+	DeleteUser: User._id, // in memory [0, User._id]
+	EditUser: User._id,   // in memory [1, User._id]
+	QueryLogs: {from: Date, to: Date},  // in memory [2, Date, Date]
 }
 
-type Admin = User + {
+type Admin = User & {
 	actions: [Date, Action][] @minlen(1) @maxlen(10),
 }
 

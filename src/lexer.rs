@@ -16,7 +16,11 @@ pub struct LexerLocation {
 
 impl fmt::Display for LexerLocation {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "index: {}, line: {}, column: {}", self.src_index, self.line, self.column)
+        write!(
+            f,
+            "index: {}, line: {}, column: {}",
+            self.src_index, self.line, self.column
+        )
     }
 }
 
@@ -109,9 +113,6 @@ impl<'src> Lexer<'src> {
                 '$' => (TokenVariant::Dollar, self.single_char_token_next()),
                 '|' => (TokenVariant::Or, self.single_char_token_next()),
                 '&' => (TokenVariant::And, self.single_char_token_next()),
-                '0'..='9' => self.consume_number(),
-                '"' => self.consume_string()?,
-                '.' => (TokenVariant::Dot, self.single_char_token_next()),
                 '(' => (TokenVariant::LParen, self.single_char_token_next()),
                 ')' => (TokenVariant::RParen, self.single_char_token_next()),
                 ',' => (TokenVariant::Comma, self.single_char_token_next()),
@@ -119,7 +120,9 @@ impl<'src> Lexer<'src> {
                 '}' => (TokenVariant::RCurly, self.single_char_token_next()),
                 '[' => (TokenVariant::LBracket, self.single_char_token_next()),
                 ']' => (TokenVariant::RBracket, self.single_char_token_next()),
-                '<' => self.consume_lt_or_symdiff(),
+                '0'..='9' => self.consume_number(),
+                '"' => self.consume_string()?,
+                '.' | '<' => self.consume_range_lt_dot_symmdiff(),
                 '>' => (TokenVariant::Gt, self.single_char_token_next()),
                 ';' => (TokenVariant::Semicolon, self.single_char_token_next()),
                 '+' => (TokenVariant::Plus, self.single_char_token_next()),
@@ -218,25 +221,6 @@ impl<'src> Lexer<'src> {
         Err((STRING_TERMINATION_ERROR, initial_loc))
     }
 
-    fn consume_lt_or_symdiff(&mut self) -> Token<'src> {
-        let initial_loc = self.location_snapshot();
-        self.next();
-
-        match self.peek() {
-            Some('>') => {
-                self.next();
-                (
-                    TokenVariant::SymmDiff,
-                    TokenData::from_loc_to_but_not_including_lexer(&initial_loc, &self),
-                )
-            }
-            _ => (
-                TokenVariant::Lt,
-                TokenData::at_loc_in_lexer(&initial_loc, &self),
-            ),
-        }
-    }
-
     fn consume_not_or_neq(&mut self) -> Token<'src> {
         let initial_loc = self.location_snapshot();
         self.next();
@@ -258,16 +242,67 @@ impl<'src> Lexer<'src> {
 
     fn consume_number(&mut self) -> Token<'src> {
         let initial_loc = self.location_snapshot();
+        let mut has_decimal_point = false;
 
         while let Some(&c) = self.peek() {
             match c {
-                '0'..='9' | '.' => {
+                '0'..='9' => {
                     self.next().unwrap();
+                }
+                '.' if !has_decimal_point => {
+                    // Peek forward one more for range
+                    if matches!(self.it.clone().nth(1), Some('0'..='9')) {
+                        has_decimal_point = true;
+                        self.next().unwrap();
+                    } else {
+                        break;
+                    }
                 }
                 _ => break,
             }
         }
 
-        (TokenVariant::Number, TokenData::from_loc_to_but_not_including_lexer(&initial_loc, &self))
+        (
+            TokenVariant::Number,
+            TokenData::from_loc_to_but_not_including_lexer(&initial_loc, &self),
+        )
+    }
+    fn consume_range_lt_dot_symmdiff(&mut self) -> Token<'src> {
+        let initial_loc = self.location_snapshot();
+        let variant = match self.next() {
+            Some('.') => {
+                match self.peek() {
+                    Some('.' | '<') => {
+                        self.next();
+                        TokenVariant::Range
+                    }
+                    _ => TokenVariant::Dot,
+                }
+            }
+            _ => {
+                match self.peek() {
+                    Some('.') => {
+                        self.next();
+                        match self.peek() {
+                            Some('<') => {
+                                self.next();
+                                TokenVariant::Range
+                            }
+                            _ => TokenVariant::Range,
+                        }
+                    }
+                    Some('>') => {
+                        self.next();
+                        TokenVariant::SymmDiff
+                    }
+                    _ => TokenVariant::Lt,
+                }
+            }
+        };
+
+        (
+            variant,
+            TokenData::from_loc_to_but_not_including_lexer(&initial_loc, &self),
+        )
     }
 }

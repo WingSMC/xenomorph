@@ -4,7 +4,7 @@ type Color = [
   	"blue",
 ]
 
-type Person = {
+type User = {
 	name: string,
 	age: number,
 	favoriteColor: Color,
