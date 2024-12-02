@@ -27,39 +27,36 @@ fn main() {
     let args = Args::parse();
     let filepath = env::current_exe().unwrap().with_file_name(args.path);
     let contents = fs::read_to_string(filepath);
-
-
     let c = match contents {
         Err(e) => return println!("Error: {}", e),
         Ok(s) => s,
     };
 
-    let mut lexer = Lexer::new(&c);
-
-    let tokens = match lexer.tokenize() {
+    let tokens = match Lexer::new(&c).tokenize() {
         Err((e, loc)) => {
             println!("Lexer error: {} at location [{}]", e, loc);
             return;
         }
-        Ok(tokens) => tokens,
+        Ok(tokens) => {
+            if args.tokens {
+                print!("{:?}\n\n", tokens)
+            }
+            tokens
+        }
     };
 
-    if args.tokens {
-        print!("{:?}\n\n", tokens)
-    }
-
-    let mut p = Parser::new(&tokens);
-    let ast = match p.parse() {
+    let ast = match Parser::new(&tokens).parse() {
         Err(e) => {
             println!("Parser error: {}", e);
             return;
         }
-        Ok(ast) => ast,
+        Ok(ast) => {
+            if args.ast {
+                print!("{:?}\n\n", ast)
+            }
+            ast
+        }
     };
-
-    if args.ast {
-        print!("{:?}\n\n", ast)
-    }
 
     analyze(&ast);
 }
