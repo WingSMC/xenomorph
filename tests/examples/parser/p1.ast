@@ -1,0 +1,24 @@
+[
+	TypeDecl { name: TokenData { v: "BrightChannel", l: 1, c: 6 },
+		t: [Identifier(TokenData { v: "Float", l: 1, c: 22 }), Annotation(TokenData { v: "min", l: 1, c: 29 }, [[Literal(Number(Float(0.5, TokenData { v: "0.5", l: 1, c: 33 })))]]), Annotation(TokenData { v: "max", l: 1, c: 39 }, [[Literal(Number(Float(1.0, TokenData { v: "1.0", l: 1, c: 43 })))]])]
+	},
+	TypeDecl { name: TokenData { v: "BrightColor", l: 3, c: 6 },
+		t: [Struct([(TokenData { v: "r", l: 4, c: 2 }, [Identifier(TokenData { v: "BrightChannel", l: 4, c: 5 })]), (TokenData { v: "g", l: 5, c: 4 }, [Identifier(TokenData { v: "BrightChannel", l: 5, c: 7 })]), (TokenData { v: "b", l: 6, c: 4 }, [Identifier(TokenData { v: "BrightChannel", l: 6, c: 7 })])])]
+	},
+	TypeDecl { name: TokenData { v: "Admin", l: 9, c: 6 },
+		t: [BinaryExpr(Union, (
+				Identifier(TokenData { v: "User", l: 9, c: 14 }),
+				Struct([(TokenData { v: "actions", l: 10, c: 2 }, [List([[Identifier(TokenData { v: "Date", l: 10, c: 12 })], [Identifier(TokenData { v: "Action", l: 10, c: 18 })]]), List([]), Annotation(TokenData { v: "minlen", l: 10, c: 29 }, [[Literal(Number(Int(1, TokenData { v: "1", l: 10, c: 36 })))], [Literal(Boolean(true, TokenData { v: "true", l: 10, c: 39 }))]]), Annotation(TokenData { v: "maxlen", l: 10, c: 46 }, [[Literal(Number(Int(10, TokenData { v: "10", l: 10, c: 53 })))]])])])
+			))]
+	},
+	TypeDecl { name: TokenData { v: "User", l: 13, c: 6 },
+		t: [Struct([
+			(TokenData { v: "_id", l: 17, c: 2 }, [BinaryExpr(Or, (BinaryExpr(Or, (Identifier(TokenData { v: "string", l: 18, c: 5 }), Annotation(TokenData { v: "MongoId", l: 19, c: 6 }, []))), Annotation(TokenData { v: "SQLPrimary", l: 20, c: 6 }, [[Identifier(TokenData { v: "u64", l: 20, c: 17 })]])))]),
+			(TokenData { v: "name", l: 21, c: 2 }, [Identifier(TokenData { v: "string", l: 21, c: 8 }), Regex(TokenData { v: "/^[A-Z]{3,5}_[0-9]{1,3}$/", l: 21, c: 15 }), Annotation(TokenData { v: "len", l: 21, c: 42 }, [[BinaryExpr(Range, (Literal(Number(Int(5, TokenData { v: "5", l: 21, c: 46 }))), Literal(Number(Int(20, TokenData { v: "20", l: 21, c: 49 })))))]])]),
+			(TokenData { v: "age", l: 22, c: 2 }, [Identifier(TokenData { v: "u8", l: 22, c: 7 }), Annotation(TokenData { v: "min", l: 22, c: 11 }, [[Literal(Number(Int(13, TokenData { v: "13", l: 22, c: 15 })))]]), Annotation(TokenData { v: "max", l: 22, c: 20 }, [[Literal(Number(Int(127, TokenData { v: "127", l: 22, c: 24 })))]]), Annotation(TokenData { v: "if", l: 22, c: 30 }, [[Annotation(TokenData { v: "lt", l: 22, c: 34 }, [[Literal(Number(Int(18, TokenData { v: "18", l: 22, c: 37 })))]])], [BinaryExpr(Add, (FieldAccess(TokenData { v: "adultContent", l: 22, c: 43 }), Literal(Boolean(false, TokenData { v: "false", l: 22, c: 57 }))))]])]),
+			(TokenData { v: "utype", l: 23, c: 2 }, [Identifier(TokenData { v: "UserType", l: 23, c: 9 })]),
+			(TokenData { v: "languageFilter", l: 26, c: 2 }, [Identifier(TokenData { v: "bool", l: 26, c: 18 }), Annotation(TokenData { v: "if", l: 26, c: 24 }, [[Identifier(TokenData { v: "_", l: 26, c: 27 })], [BinaryExpr(Add, (FieldAccess(TokenData { v: "age", l: 26, c: 31 }), Annotation(TokenData { v: "min", l: 26, c: 36 }, [[Literal(Number(Int(16, TokenData { v: "16", l: 26, c: 40 })))]])))]]), Annotation(TokenData { v: "else", l: 26, c: 46 }, [[BinaryExpr(Add, (FieldAccess(TokenData { v: "age", l: 26, c: 52 }), Annotation(TokenData { v: "min", l: 26, c: 58 }, [[Literal(Number(Int(12, TokenData { v: "12", l: 26, c: 62 })))]])))]])]),
+			(TokenData { v: "adultContent", l: 27, c: 2 }, [Identifier(TokenData { v: "bool", l: 27, c: 16 })])
+		])]
+	}
+]

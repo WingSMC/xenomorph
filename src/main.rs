@@ -1,3 +1,5 @@
+use clap::Parser as ArgParser;
+
 use lexer::lexer::Lexer;
 use parser::parser::Parser;
 use semantic::analyzer::analyze;
@@ -8,11 +10,24 @@ mod lexer;
 mod parser;
 mod semantic;
 
+#[derive(ArgParser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[arg(short, long, default_value = "../../tests/examples/parser/p1.xen")]
+    path: String,
+
+    #[arg(short, long)]
+    tokens: bool,
+
+    #[arg(short, long)]
+    ast: bool,
+}
+
 fn main() {
-    let mut filepath = env::current_exe().unwrap();
-    filepath.pop();
-    filepath.push("../../tests/examples/parser/p1.xen");
+    let args = Args::parse();
+    let filepath = env::current_exe().unwrap().with_file_name(args.path);
     let contents = fs::read_to_string(filepath);
+
 
     let c = match contents {
         Err(e) => return println!("Error: {}", e),
@@ -29,6 +44,10 @@ fn main() {
         Ok(tokens) => tokens,
     };
 
+    if args.tokens {
+        print!("{:?}\n\n", tokens)
+    }
+
     let mut p = Parser::new(&tokens);
     let ast = match p.parse() {
         Err(e) => {
@@ -37,6 +56,10 @@ fn main() {
         }
         Ok(ast) => ast,
     };
+
+    if args.ast {
+        print!("{:?}\n\n", ast)
+    }
 
     analyze(&ast);
 }
