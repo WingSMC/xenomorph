@@ -1,4 +1,4 @@
-use crate::tokens::{Token, TokenData, TokenVariant};
+use crate::lexer::tokens::{Token, TokenData, TokenVariant};
 use std::{fmt, iter::Peekable, str::Chars};
 
 static NOT_RECOGNIZED: &str = "Token not recognized";

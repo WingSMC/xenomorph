@@ -1,11 +1,12 @@
-use lexer::Lexer;
+use lexer::lexer::Lexer;
 use parser::parser::Parser;
+use semantic::analyzer::analyze;
 use std::env;
 use std::fs;
 
 mod lexer;
 mod parser;
-mod tokens;
+mod semantic;
 
 fn main() {
     let mut filepath = env::current_exe().unwrap();
@@ -19,9 +20,8 @@ fn main() {
     };
 
     let mut lexer = Lexer::new(&c);
-    let result = lexer.tokenize();
 
-    let tokens = match result {
+    let tokens = match lexer.tokenize() {
         Err((e, loc)) => {
             println!("Lexer error: {} at location [{}]", e, loc);
             return;
@@ -29,12 +29,14 @@ fn main() {
         Ok(tokens) => tokens,
     };
 
-    //dbg!(&tokens);
     let mut p = Parser::new(&tokens);
-    let parser_result = p.parse();
-
-    match parser_result {
-        Err(e) => println!("Parser error: {}", e),
-        Ok(ast) => drop(dbg!("{:?}", ast)),
+    let ast = match p.parse() {
+        Err(e) => {
+            println!("Parser error: {}", e);
+            return;
+        }
+        Ok(ast) => ast,
     };
+
+    analyze(&ast);
 }

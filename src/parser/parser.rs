@@ -1,7 +1,7 @@
 use super::parser_expr::{
     AnonymType, BinaryExprType, Declaration, Expr, KeyValExpr, Literal, NumberType, TypeList,
 };
-use crate::tokens::{Token, TokenData, TokenVariant};
+use crate::lexer::tokens::{Token, TokenData, TokenVariant};
 
 pub struct Parser<'src> {
     pub tokens: &'src Vec<Token<'src>>,

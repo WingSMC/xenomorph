@@ -1,4 +1,4 @@
-use crate::tokens::TokenData;
+use crate::lexer::tokens::TokenData;
 
 pub type BinaryExpr<'src> = Box<(Expr<'src>, Expr<'src>)>;
 pub type KeyValExpr<'src> = (&'src TokenData<'src>, AnonymType<'src>);
