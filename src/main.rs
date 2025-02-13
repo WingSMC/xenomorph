@@ -8,6 +8,7 @@ use std::fs;
 
 mod lexer;
 mod parser;
+mod plugins;
 mod semantic;
 
 #[derive(ArgParser, Debug)]
@@ -27,16 +28,17 @@ fn main() {
     let args = Args::parse();
     let filepath = env::current_exe().unwrap().with_file_name(args.path);
     let contents = fs::read_to_string(filepath);
+
+    let plugins = plugins::loader::load_plugins(vec!["test_plugin".to_string()]);
+    println!("Loaded plugins: {:?}", plugins);
+
     let c = match contents {
         Err(e) => return println!("Error: {}", e),
         Ok(s) => s,
     };
 
     let tokens = match Lexer::new(&c).tokenize() {
-        Err((e, loc)) => {
-            println!("Lexer error: {} at location [{}]", e, loc);
-            return;
-        }
+        Err((e, loc)) => return println!("Lexer error: {} at location [{}]", e, loc),
         Ok(tokens) => {
             if args.tokens {
                 print!("{:?}\n\n", tokens)
