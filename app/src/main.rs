@@ -32,7 +32,8 @@ fn main() {
     let contents = fs::read_to_string(filepath);
 
     let plugins = plugins::loader::load_plugins(&vec!["test".to_string()]);
-    println!("Loaded plugins: {:?}", plugins);
+    dbg!(&plugins);
+    dbg!((plugins[0].provide)());
 
     let c = match contents {
         Err(e) => return println!("Error: {}", e),

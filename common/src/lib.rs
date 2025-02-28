@@ -17,7 +17,7 @@ pub struct Plugin<'a> {
     pub name: &'a str,
     pub version: &'a str,
 
-    // initialize: fn(),
+    pub provide: fn() -> Vec<&'a str>,
     // lint: fn(),
     // generate: fn() -> String,
     // execute: fn(&str),

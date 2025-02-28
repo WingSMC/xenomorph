@@ -1,7 +1,5 @@
+use lsp_types::{Command, CompletionItemKind, InsertTextFormat, MarkupContent, TextEdit};
 use serde::{Deserialize, Serialize};
-use lsp_types::{
-    CompletionItemKind, InsertTextFormat, TextEdit, Command, MarkupContent,
-};
 use serde_json::Value;
 
 /// A type that represents a completion token with rich semantic data.

@@ -5,13 +5,6 @@ use std::{
 };
 use xenomorph_common::Plugin;
 
-pub fn load_plugin<'a>(lib: Library) -> Result<Plugin<'a>, libloading::Error> {
-    let lib_ref = Box::leak(Box::new(lib));
-    let plugin: Symbol<'a, Plugin<'a>> = unsafe { lib_ref.get(b"PLUGIN")? };
-
-    Ok(*plugin)
-}
-
 macro_rules! lib_filename {
     ($lib_name: expr) => {{
         #[cfg(target_os = "windows")]
@@ -40,27 +33,33 @@ fn load_plugin_library(path: &Path) -> Result<Library, String> {
         .map_err(|e| format!("Library load error\n{}:\n{}", path.display(), e))
 }
 
-fn log_loading_error(plugin_name: &String, e: &String) {
-    eprintln!("Failed to load plugin '{}':\n{}", plugin_name, e);
+fn load_plugin(lib: Library) -> Result<&'static Plugin<'static>, libloading::Error> {
+    let lib_ref = Box::leak(Box::new(lib));
+    let load: Symbol<fn() -> &'static Plugin<'static>> = unsafe { lib_ref.get(b"load")? };
+    Ok(load())
 }
 
-fn create_plugin_instance<'a>(lib: Library, name: &str) -> Result<Plugin<'a>, String> {
+fn create_plugin_instance(lib: Library, name: &str) -> Result<&'static Plugin<'static>, String> {
     load_plugin(lib).map_err(|e| {
         format!(
-            "Symbol resolution error in plugin '{}'. Make sure it's compatible with the current version!{}",
+            "Symbol resolution error in plugin '{}'. Make sure it's compatible with the current version!\n{}",
             name,
             e
         )
     })
 }
 
-pub fn load_plugins<'a>(plugin_names: &Vec<String>) -> Vec<Plugin<'a>> {
+fn log_loading_error(plugin_name: &String, e: &String) {
+    eprintln!("Failed to load plugin '{}':\n{}", plugin_name, e);
+}
+
+pub fn load_plugins(plugin_names: &Vec<String>) -> Vec<&'static Plugin<'static>> {
     let plugins_dir = plugins_directory();
 
     plugin_names
         .iter()
         .filter_map(|plugin_name| {
-                let lib_path = plugins_dir.join(lib_filename!(plugin_name));
+            let lib_path = plugins_dir.join(lib_filename!(&plugin_name));
 
             load_plugin_library(&lib_path)
                 .and_then(|lib| create_plugin_instance(lib, &plugin_name))
