@@ -1,8 +1,7 @@
-[package]
-name = "xenomorph"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-clap = { version = "4", features = ["derive"] }
-libloading = { version = "0" }
+[workspace]
+resolver="2"
+members = [
+"app",
+"common",
+"plugins/test",
+]
