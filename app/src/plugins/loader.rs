@@ -39,7 +39,7 @@ fn load_plugin(lib: Library) -> Result<&'static Plugin<'static>, libloading::Err
     Ok(load())
 }
 
-fn create_plugin_instance(lib: Library, name: &str) -> Result<&'static Plugin<'static>, String> {
+fn create_plugin_instance(lib: Library, name: &String) -> Result<&'static Plugin<'static>, String> {
     load_plugin(lib).map_err(|e| {
         format!(
             "Symbol resolution error in plugin '{}'. Make sure it's compatible with the current version!\n{}",

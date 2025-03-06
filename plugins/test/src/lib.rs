@@ -1,5 +1,4 @@
 use xenomorph_common::Plugin;
-mod meta;
 
 fn provide() -> Vec<&'static str> {
     vec!["Hello", "World"]

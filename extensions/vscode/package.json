@@ -1,0 +1,25 @@
+{
+  "name": "xenomorph",
+  "displayName": "xenomorph",
+  "description": "xenomorph language support",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.54.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [{
+      "id": "xenomorph",
+      "aliases": ["xenomorph", "xenomorph"],
+      "extensions": ["xen"],
+      "configuration": "./language-configuration.json"
+    }],
+    "grammars": [{
+      "language": "xenomorph",
+      "scopeName": "source.xenomorph",
+      "path": "./syntaxes/xenomorph.tmLanguage.json"
+    }]
+  }
+}
