@@ -1,0 +1,9 @@
+{
+	"name": "xenomorph",
+	"scripts": {
+		"build-lsp": "cargo build --release --package xenomorph_lsp",
+		"copy-lsp": "cp ./target/release/xenomorph_lsp{,.exe} ./extensions/vscode/server/",
+		"lsp": "npm run build-lsp && npm run copy-lsp",
+		"build-extensions": "nr lsp && cd ./extensions/vscode && nr build"
+	}
+}

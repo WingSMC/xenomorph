@@ -1,9 +1,6 @@
+use crate::{config::{load_config_key, workdir}, Plugin};
 use libloading::{Library, Symbol};
-use std::{
-    env,
-    path::{Path, PathBuf},
-};
-use xenomorph_common::Plugin;
+use std::path::{Path, PathBuf};
 
 macro_rules! lib_filename {
     ($lib_name: expr) => {{
@@ -23,9 +20,15 @@ macro_rules! lib_filename {
 }
 
 fn plugins_directory() -> PathBuf {
-    env::current_exe()
-        .expect("Failed to get executable path for loading plugins")
-        .with_file_name("")
+    let workdir = workdir().expect("No workdir found");
+    let plugin_path = load_config_key("plugins")
+        .get("path")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    workdir.join(plugin_path)
 }
 
 fn load_plugin_library(path: &Path) -> Result<Library, String> {

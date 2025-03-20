@@ -1,6 +1,6 @@
 use xenomorph_common::Plugin;
 
-fn provide() -> Vec<&'static str> {
+extern "Rust" fn provide() -> Vec<&'static str> {
     vec!["Hello", "World"]
 }
 
