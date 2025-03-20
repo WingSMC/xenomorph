@@ -68,9 +68,10 @@ impl LanguageServer for Backend {
 async fn main() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
+    let (service, socket) = LspService::new(|client| Backend {
+        client,
+        plugins: load_plugins(),
+    });
 
-    let plugins = load_plugins(&vec!["test".to_string()]);
-
-    let (service, socket) = LspService::new(|client| Backend { client, plugins });
     Server::new(stdin, stdout, socket).serve(service).await;
 }

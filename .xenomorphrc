@@ -6,3 +6,4 @@ ast = false
 
 [plugins]
 path = "./target/release/"
+plugins = ["test"]

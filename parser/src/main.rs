@@ -17,7 +17,7 @@ fn main() {
     let filepath = workdir_path(file_path);
     let contents = fs::read_to_string(filepath);
 
-    let plugins = load_plugins(&vec!["test".to_string()]);
+    let plugins = load_plugins();
 
     if parser_config.get("plugins").unwrap().as_bool().unwrap() {
         dbg!(&plugins);
