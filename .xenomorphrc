@@ -5,4 +5,4 @@ tokens = false
 ast = false
 
 [plugins]
-path = "./target/debug/"
+path = "./target/release/"

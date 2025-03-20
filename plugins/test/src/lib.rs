@@ -1,7 +1,7 @@
 use xenomorph_common::Plugin;
 
 extern "Rust" fn provide() -> Vec<&'static str> {
-    vec!["Hello", "World"]
+    vec!["Hello", "World", "Xeno"]
 }
 
 static NAME: &'static str = "test_plugin";

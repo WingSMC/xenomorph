@@ -16,7 +16,7 @@
     ],
     "scripts": {
         "build": "cd client && tsc && cd .. && nr setup:lsp",
-        "setup:lsp": "cd ../../ && cp ./target/release/xenomorph_lsp{,.exe} ./extensions/vscode/server/ && cd ./extensions/vscode"
+        "setup:lsp": "cd ../../ && (cp ./target/release/xenomorph_lsp{,.exe} ./extensions/vscode/server/ || true) && cd ./extensions/vscode"
     },
     "main": "./client/out/extension",
     "contributes": {
@@ -24,12 +24,19 @@
             {
                 "id": "xenomorph",
                 "aliases": [
-                    "xenomorph"
+                    "xeno"
                 ],
                 "extensions": [
-                    "xen"
+                    ".xen"
                 ],
-                "configuration": "./language-configuration.json"
+                "filenames": [
+                    ".xenomorphrc"
+                ],
+                "configuration": "./language-configuration.json",
+                "icon": {
+                    "light": "./icons/logo.png",
+                    "dark": "./icons/logo.png"
+                }
             }
         ],
         "grammars": [
