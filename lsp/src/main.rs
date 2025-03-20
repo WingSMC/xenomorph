@@ -58,6 +58,10 @@ impl LanguageServer for Backend {
                 .collect(),
         )))
     }
+
+    async fn completion_resolve(&self, item: CompletionItem) -> Result<CompletionItem> {
+        Ok(item)
+    }
 }
 
 #[tokio::main]

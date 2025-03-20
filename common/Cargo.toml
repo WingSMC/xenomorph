@@ -4,6 +4,5 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-clap = { version = "4.5.31", features = ["derive"] }
 libloading = { version = "0" }
 toml = { version = "0.8.20" }

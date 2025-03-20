@@ -17,7 +17,7 @@
 				"${workspaceRoot}/extensions/vscode/client/out/**/*.js"
 			],
 			"autoAttachChildProcesses": true,
-			"preLaunchTask": "npm: build - extensions/vscode/client"
+			"preLaunchTask": "npm: build"
 		}
 	]
 }
