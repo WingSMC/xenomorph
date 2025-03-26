@@ -55,6 +55,12 @@
                 "scopeName": "source.xenomorph",
                 "path": "./syntaxes/xenomorph.tmLanguage.json"
             }
+        ],
+        "snippets": [
+            {
+                "language": "xenomorph",
+                "path": "./snippets/snippets.json"
+            }
         ]
     }
 }
