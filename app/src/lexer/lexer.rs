@@ -270,34 +270,30 @@ impl<'src> Lexer<'src> {
     fn consume_range_lt_dot_symmdiff(&mut self) -> Token<'src> {
         let initial_loc = self.location_snapshot();
         let variant = match self.next() {
-            Some('.') => {
-                match self.peek() {
-                    Some('.' | '<') => {
-                        self.next();
-                        TokenVariant::Range
-                    }
-                    _ => TokenVariant::Dot,
+            Some('.') => match self.peek() {
+                Some('.' | '<') => {
+                    self.next();
+                    TokenVariant::Range
                 }
-            }
-            _ => {
-                match self.peek() {
-                    Some('.') => {
-                        self.next();
-                        match self.peek() {
-                            Some('<') => {
-                                self.next();
-                                TokenVariant::Range
-                            }
-                            _ => TokenVariant::Range,
+                _ => TokenVariant::Dot,
+            },
+            _ => match self.peek() {
+                Some('.') => {
+                    self.next();
+                    match self.peek() {
+                        Some('<') => {
+                            self.next();
+                            TokenVariant::Range
                         }
+                        _ => TokenVariant::Range,
                     }
-                    Some('>') => {
-                        self.next();
-                        TokenVariant::SymmDiff
-                    }
-                    _ => TokenVariant::Lt,
                 }
-            }
+                Some('>') => {
+                    self.next();
+                    TokenVariant::SymmDiff
+                }
+                _ => TokenVariant::Lt,
+            },
         };
 
         (

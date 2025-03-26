@@ -1,0 +1,6 @@
+{
+    "type": {
+        "prefix": "type",
+        "body": ["type ${1:Name} = ${0};"]
+    }
+}
