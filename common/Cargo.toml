@@ -2,3 +2,7 @@
 name = "xenomorph_common"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+libloading = { version = "0" }
+toml = { version = "0.8.20" }

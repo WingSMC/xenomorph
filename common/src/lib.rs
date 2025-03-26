@@ -1,3 +1,5 @@
+pub mod plugins;
+pub mod config;
 
 #[allow(dead_code)]
 pub trait XenoPlugin {

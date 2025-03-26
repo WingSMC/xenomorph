@@ -1,25 +1,60 @@
 {
-  "name": "xenomorph",
-  "displayName": "xenomorph",
-  "description": "xenomorph language support",
-  "version": "0.0.1",
-  "engines": {
-    "vscode": "^1.54.0"
-  },
-  "categories": [
-    "Programming Languages"
-  ],
-  "contributes": {
-    "languages": [{
-      "id": "xenomorph",
-      "aliases": ["xenomorph", "xenomorph"],
-      "extensions": ["xen"],
-      "configuration": "./language-configuration.json"
-    }],
-    "grammars": [{
-      "language": "xenomorph",
-      "scopeName": "source.xenomorph",
-      "path": "./syntaxes/xenomorph.tmLanguage.json"
-    }]
-  }
+    "name": "xenomorph",
+    "displayName": "Xenomorph",
+    "description": "Xenomorph language support",
+    "version": "0.1.0",
+    "engines": {
+        "vscode": "^1.54.0"
+    },
+    "author": {
+        "name": "WingSMC",
+        "url": "https://github.com/WingSMC"
+    },
+    "categories": [
+        "Programming Languages",
+        "Snippets"
+    ],
+    "scripts": {
+        "build": "cd client && tsc && cd .. && nr setup:lsp",
+        "setup:lsp": "cd ../../ && (cp ./target/release/xenomorph_lsp{,.exe} ./extensions/vscode/server/ || true) && cd ./extensions/vscode"
+    },
+    "main": "./client/out/extension",
+    "contributes": {
+        "languages": [
+            {
+                "id": "xenomorph",
+                "aliases": [
+                    "xeno"
+                ],
+                "extensions": [
+                    ".xen"
+                ],
+                "configuration": "./language-configuration.json",
+                "icon": {
+                    "light": "./icons/logo.png",
+                    "dark": "./icons/logo.png"
+                }
+            },
+            {
+                "id": "xenomorph-toml",
+                "aliases": [
+                    "TOML"
+                ],
+                "filenames": [
+                    ".xenomorphrc"
+                ],
+                "icon": {
+                    "light": "./icons/logo.png",
+                    "dark": "./icons/logo.png"
+                }
+            }
+        ],
+        "grammars": [
+            {
+                "language": "xenomorph",
+                "scopeName": "source.xenomorph",
+                "path": "./syntaxes/xenomorph.tmLanguage.json"
+            }
+        ]
+    }
 }

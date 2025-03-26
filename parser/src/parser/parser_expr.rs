@@ -38,7 +38,7 @@ pub enum BinaryExprType {
     Add,
     Remove,
 }
-
+#[repr(u8)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr<'src> {
     Identifier(&'src TokenData<'src>),
