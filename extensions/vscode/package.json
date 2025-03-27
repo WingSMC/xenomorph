@@ -31,8 +31,8 @@
                 ],
                 "configuration": "./language-configuration.json",
                 "icon": {
-                    "light": "./icons/logo.png",
-                    "dark": "./icons/logo.png"
+                    "light": "./icons/logo-black.png",
+                    "dark": "./icons/logo-white.png"
                 }
             },
             {
