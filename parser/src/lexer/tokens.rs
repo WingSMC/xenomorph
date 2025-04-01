@@ -7,7 +7,6 @@ pub struct TokenData<'src> {
     pub c: usize,
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenVariant {
     Identifier,
@@ -53,7 +52,6 @@ pub enum TokenVariant {
 }
 
 pub type Token<'src> = (TokenVariant, TokenData<'src>);
-
 
 impl fmt::Display for TokenVariant {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
