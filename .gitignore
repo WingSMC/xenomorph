@@ -2,3 +2,6 @@
 **/out/
 **/dist/
 **/node_modules/
+
+*.swp
+
