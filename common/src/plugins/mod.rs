@@ -1,7 +1,4 @@
-use crate::{
-    config::{load_config_key, workdir},
-    Plugin,
-};
+use crate::{config::Config, Plugin};
 use libloading::{Library, Symbol};
 use std::path::{Path, PathBuf};
 
@@ -22,16 +19,9 @@ macro_rules! lib_filename {
     }};
 }
 
-fn plugins_directory(plugin_config: toml::Value) -> PathBuf {
-    let workdir = workdir().expect("No workdir found");
-    let plugin_path = plugin_config
-        .get("path")
-        .unwrap()
-        .as_str()
-        .unwrap()
-        .to_owned();
-
-    workdir.join(plugin_path)
+fn plugins_directory() -> PathBuf {
+    let config = Config::get();
+    config.workdir.join(&config.plugins.path)
 }
 
 fn load_plugin_library(path: &Path) -> Result<Library, String> {
@@ -60,18 +50,11 @@ fn log_loading_error(plugin_name: &String, e: &String) {
 }
 
 pub fn load_plugins() -> Vec<&'static Plugin<'static>> {
-    let plugin_config = load_config_key("plugins");
-    let plugin_names = plugin_config
-        .get("plugins")
-        .unwrap()
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| v.as_str().unwrap().to_string())
-        .collect::<Vec<String>>();
-    let plugins_dir = plugins_directory(plugin_config);
+    let plugin_config = &Config::get().plugins;
+    let plugins_dir = plugins_directory();
 
-    plugin_names
+    plugin_config
+        .plugins
         .iter()
         .filter_map(|plugin_name| {
             let lib_path = plugins_dir.join(lib_filename!(&plugin_name));

@@ -1,14 +1,121 @@
+use serde::Deserialize;
 use std::fs;
 use std::path::PathBuf;
-use toml::Table;
+use std::sync::OnceLock;
 
-fn find_config_file() -> Option<PathBuf> {
-    let mut current_dir = std::env::current_dir().ok()?;
+static CONFIG: OnceLock<Config> = OnceLock::new();
+
+#[repr(Rust)]
+#[derive(Deserialize, Debug, Clone)]
+pub struct Config {
+    #[serde(default)]
+    pub parser: ParserConfig,
+
+    #[serde(default)]
+    pub plugins: PluginsConfig,
+
+    #[serde(default)]
+    pub debug: DebugConfig,
+
+    #[serde(default = "default_workdir")]
+    pub workdir: PathBuf,
+}
+#[repr(Rust)]
+#[derive(Deserialize, Debug, Clone)]
+pub struct ParserConfig {
+    #[serde(default = "default_parser_path")]
+    pub path: String,
+}
+#[repr(Rust)]
+#[derive(Deserialize, Debug, Clone)]
+pub struct PluginsConfig {
+    #[serde(default = "default_plugins_path")]
+    pub path: String,
+
+    #[serde(default = "default_plugins_list")]
+    pub plugins: Vec<String>,
+}
+#[repr(Rust)]
+#[derive(Deserialize, Debug, Clone)]
+pub struct DebugConfig {
+    #[serde(default)]
+    pub plugins: bool,
+
+    #[serde(default)]
+    pub tokens: bool,
+
+    #[serde(default)]
+    pub ast: bool,
+}
+
+fn default_parser_path() -> String {
+    "./tests/examples/parser/p1.xen".to_string()
+}
+fn default_plugins_path() -> String {
+    "./target/release/".to_string()
+}
+fn default_plugins_list() -> Vec<String> {
+    vec![]
+}
+fn default_workdir() -> PathBuf {
+    std::env::current_dir().unwrap_or_default()
+}
+
+impl Config {
+    pub fn default_with_workdir(workdir: PathBuf) -> Self {
+        Self {
+            workdir,
+            ..Default::default()
+        }
+    }
+
+    pub fn get() -> &'static Config {
+        CONFIG.get_or_init(init_config)
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            parser: ParserConfig::default(),
+            plugins: PluginsConfig::default(),
+            debug: DebugConfig::default(),
+            workdir: PathBuf::default(),
+        }
+    }
+}
+impl Default for ParserConfig {
+    fn default() -> Self {
+        Self {
+            path: default_parser_path(),
+        }
+    }
+}
+impl Default for DebugConfig {
+    fn default() -> Self {
+        Self {
+            plugins: false,
+            tokens: false,
+            ast: false,
+        }
+    }
+}
+impl Default for PluginsConfig {
+    fn default() -> Self {
+        Self {
+            path: default_plugins_path(),
+            plugins: default_plugins_list(),
+        }
+    }
+}
+
+fn find_workspace_root(wd: &PathBuf) -> Option<PathBuf> {
+    let mut current_dir = wd.clone();
 
     loop {
         let config_path = current_dir.join(".xenomorphrc");
         if config_path.exists() {
-            return Some(config_path);
+            return Some(current_dir);
         }
 
         if !current_dir.pop() {
@@ -19,37 +126,36 @@ fn find_config_file() -> Option<PathBuf> {
     None
 }
 
-pub fn workdir() -> Option<PathBuf> {
-    let config = find_config_file();
-    match config {
-        Some(c) => Some(c.parent().unwrap().to_path_buf()),
-        None => None,
-    }
-}
+pub fn init_config() -> Config {
+    let current_dir = match std::env::current_dir() {
+        Ok(path) => path,
+        Err(_) => {
+            eprintln!("Error: Unable to get current directory.");
+            return Config::default();
+        }
+    };
 
-pub fn workdir_path(relative_path: &str) -> PathBuf {
-    let workdir = workdir().expect("No workdir found");
-    workdir.join(relative_path)
-}
+    match find_workspace_root(&current_dir) {
+        None => Config::default_with_workdir(current_dir),
+        Some(workdir) => {
+            let content = match fs::read_to_string(workdir.join(".xenomorphrc")) {
+                Ok(content) => content,
+                Err(_) => {
+                    eprintln!("Error: Unable to read config file.");
+                    return Config::default_with_workdir(workdir);
+                }
+            };
 
-/// Loads the configuration from a .xenomorphrc file found in the directory hierarchy.
-pub fn load_config() -> Option<Table> {
-    let config_path = find_config_file()?;
-    let content = fs::read_to_string(config_path).ok()?;
-    content.parse::<Table>().ok()
-}
-
-pub fn load_config_key<'a>(key: &str) -> toml::Value {
-    match load_config() {
-        Some(conf) => get_config_value(&conf, key),
-        None => panic!("No .xenomorphrc file found in directory hierarchy"),
-    }
-}
-
-pub fn get_config_value<'a>(config: &'a Table, key: &str) -> toml::Value {
-    if let Some(c) = config.get(key) {
-        c.to_owned()
-    } else {
-        panic!("No {} configuration found in .xenomorphrc file", key);
+            match toml::de::from_str::<Config>(&content) {
+                Ok(mut config) => {
+                    config.workdir = workdir;
+                    config
+                }
+                Err(_) => {
+                    eprintln!("Error: Unable to parse config file.");
+                    return Config::default_with_workdir(workdir);
+                }
+            }
+        }
     }
 }

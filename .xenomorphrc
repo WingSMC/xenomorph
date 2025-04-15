@@ -1,9 +1,11 @@
 [parser]
 path = "./tests/examples/parser/p1.xen"
-plugins = false
-tokens = false
-ast = false
 
 [plugins]
 path = "./target/release/"
 plugins = ["test"]
+
+[debug]
+plugins = true
+tokens = false
+ast = false
