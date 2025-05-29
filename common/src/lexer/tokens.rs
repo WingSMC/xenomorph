@@ -49,6 +49,8 @@ pub enum TokenVariant {
     RCurly,
     LBracket,
     RBracket,
+
+    Error,
 }
 
 pub type Token<'src> = (TokenVariant, TokenData<'src>);
@@ -91,6 +93,7 @@ impl fmt::Display for TokenVariant {
             TokenVariant::LBracket => write!(f, "LBracket"),
             TokenVariant::RBracket => write!(f, "RBracket"),
             TokenVariant::Range => write!(f, "Range"),
+            TokenVariant::Error => write!(f, "Error"),
         }
     }
 }

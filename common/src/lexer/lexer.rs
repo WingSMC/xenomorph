@@ -1,11 +1,12 @@
-use crate::lexer::tokens::{Token, TokenData, TokenVariant};
+use crate::{
+    lexer::tokens::{Token, TokenData, TokenVariant},
+    parser::parser::ParseError,
+};
 use std::{fmt, iter::Peekable, str::Chars};
 
 static NOT_RECOGNIZED: &str = "Token not recognized";
 static MALFORMED_REGEX: &str = "Malformed regex";
 static STRING_TERMINATION_ERROR: &str = "String not terminated";
-
-type LexerError = (&'static str, LexerLocation);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LexerLocation {
@@ -99,7 +100,7 @@ impl<'src> Lexer<'src> {
         td
     }
 
-    pub fn tokenize(&mut self) -> Result<Vec<Token<'src>>, LexerError> {
+    pub fn tokenize(&mut self) -> Result<Vec<Token<'src>>, ParseError<'src>> {
         let mut tokens: Vec<Token<'src>> = vec![];
         while let Some(c) = self.peek() {
             tokens.push(match c {
@@ -136,7 +137,16 @@ impl<'src> Lexer<'src> {
                     Some(t) => t,
                     None => continue,
                 },
-                _ => return Err((NOT_RECOGNIZED, self.location)),
+                _ => {
+                    return Err(ParseError::new_with_move_loc(
+                        NOT_RECOGNIZED.to_string(),
+                        TokenData {
+                            v: &self.slice_from(self.location.src_index),
+                            l: self.location.line,
+                            c: self.location.column,
+                        },
+                    ))
+                }
             });
         }
 
@@ -174,7 +184,7 @@ impl<'src> Lexer<'src> {
         }
     }
 
-    fn consume_comment_or_regex(&mut self) -> Result<Option<Token<'src>>, LexerError> {
+    fn consume_comment_or_regex(&mut self) -> Result<Option<Token<'src>>, ParseError<'src>> {
         let initial_loc = self.location_snapshot();
         self.next();
 
@@ -199,10 +209,13 @@ impl<'src> Lexer<'src> {
             }
         }
 
-        Err((MALFORMED_REGEX, initial_loc))
+        Err(ParseError {
+            message: MALFORMED_REGEX.to_string(),
+            location: Some(TokenData::at_loc_in_lexer(&initial_loc, &self)),
+        })
     }
 
-    fn consume_string(&mut self) -> Result<Token<'src>, LexerError> {
+    fn consume_string(&mut self) -> Result<Token<'src>, ParseError<'src>> {
         let initial_loc = self.location_snapshot();
         self.next();
 
@@ -218,7 +231,10 @@ impl<'src> Lexer<'src> {
             }
         }
 
-        Err((STRING_TERMINATION_ERROR, initial_loc))
+        Err(ParseError {
+            message: STRING_TERMINATION_ERROR.to_string(),
+            location: Some(TokenData::at_loc_in_lexer(&initial_loc, &self)),
+        })
     }
 
     fn consume_not_or_neq(&mut self) -> Token<'src> {

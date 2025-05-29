@@ -1,69 +1,141 @@
 use super::parser_expr::{
     AnonymType, BinaryExprType, Declaration, Expr, KeyValExpr, Literal, NumberType, TypeList,
 };
-use crate::lexer::tokens::{Token, TokenData, TokenVariant};
+use crate::lexer::{
+    lexer::Lexer,
+    tokens::{Token, TokenData, TokenVariant},
+};
+use std::fmt;
+
+#[derive(Debug, Clone)]
+pub struct ParseError<'src> {
+    pub message: String,
+    pub location: Option<TokenData<'src>>,
+}
+
+impl<'src> ParseError<'src> {
+    pub fn new(message: String) -> ParseError<'src> {
+        Self {
+            message,
+            location: None,
+        }
+    }
+    pub fn new_with_location(message: String, loc: &'src TokenData<'src>) -> ParseError<'src> {
+        Self {
+            message,
+            location: Some(loc.clone()),
+        }
+    }
+    pub fn new_with_move_loc(message: String, loc: TokenData<'src>) -> ParseError<'src> {
+        Self {
+            message,
+            location: Some(loc),
+        }
+    }
+    pub fn new_with_token(message: String, token: &'src Token<'src>) -> ParseError<'src> {
+        Self {
+            message,
+            location: Some(token.1.clone()),
+        }
+    }
+}
+
+impl<'src> fmt::Display for ParseError<'src> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
 
 pub struct Parser<'src> {
-    pub tokens: &'src Vec<Token<'src>>,
+    pub tokens: Box<Vec<Token<'src>>>,
     pub current: usize,
 }
 
-impl<'src> Parser<'src> {
-    pub fn new(tokens: &'src Vec<Token<'src>>) -> Self {
-        Self { tokens, current: 0 }
-    }
-    pub fn parse(&mut self) -> Result<Vec<Declaration<'src>>, String> {
-        let mut ast = Vec::new();
+pub fn parse<'src>(
+    src: &'src str,
+) -> (
+    Vec<Declaration<'src>>,
+    Vec<ParseError<'src>>,
+    Box<Vec<Token<'src>>>,
+) {
+    let tokens = Box::new(match Lexer::new(&src).tokenize() {
+        Ok(t) => t,
+        Err(e) => {
+            return (vec![], vec![e], Box::new(vec![]));
+        }
+    });
 
-        while self.is_not_eof() {
-            ast.push(self.parse_declaration()?);
+    let mut parser = Parser { tokens, current: 0 };
+    let mut ast = Vec::new();
+    let mut errors = Vec::new();
+
+    while parser.is_not_eof() {
+        match parser.parse_declaration() {
+            Ok(decl) => ast.push(decl),
+            Err(err) => {
+                errors.push(err);
+                parser.recover_to_declaration_boundary();
+            }
+        }
+    }
+
+    let Parser { tokens, current: _ } = parser;
+
+    (ast, errors, tokens)
+}
+
+impl<'src> Parser<'src> {
+    fn parse_declaration(&mut self) -> Result<Declaration<'src>, ParseError<'src>> {
+        let dec = match self.next()? {
+            (TokenVariant::Type, _) => self.parse_type_declaration(),
+            token => Err(ParseError::new_with_token(
+                format!("Expected 'type' at {}, instead found {}.", token.1, token.0),
+                token,
+            )),
+        };
+
+        if let Ok(_) = dec {
+            self.expect(TokenVariant::Semicolon)?;
         }
 
-        Ok(ast)
+        dec
     }
 
     fn is_not_eof(&self) -> bool {
         self.current < self.tokens.len() - 1
     }
-    fn next(&mut self) -> Result<&'src Token<'src>, String> {
+    fn next(&mut self) -> Result<&'src Token<'src>, ParseError<'src>> {
         let d = self.tokens.get(self.current);
         match d {
-            None => Err("Unexpected end of input".to_string()),
+            None => Err(ParseError::new(format!("Unexpected end of input"))),
             Some(t) => {
                 self.current += 1;
-                Ok(t)
+                // TODO: This is unsafe, but we know that the tokens are valid and will not be dropped as long as the AST is alive.
+                Ok(unsafe { std::mem::transmute::<&Token<'src>, &'src Token<'src>>(t) })
             }
         }
     }
-    fn peek(&self) -> Option<&Token<'src>> {
+    fn peek(&'src self) -> Option<&Token<'src>> {
         self.tokens.get(self.current)
     }
-    fn expect(&mut self, expected: TokenVariant) -> Result<&'src TokenData<'src>, String> {
+    fn expect(
+        &mut self,
+        expected: TokenVariant,
+    ) -> Result<&'src TokenData<'src>, ParseError<'src>> {
         let (var, d) = self.next()?;
         if *var != expected {
-            return Err(format!("Expected {} at {}", expected, d));
+            Err(ParseError::new(format!("Expected {} at {}", expected, d)))
+        } else {
+            Ok(d)
         }
-        Ok(d)
     }
-
-    fn parse_declaration(&mut self) -> Result<Declaration<'src>, String> {
-        let (var, d) = self.next()?;
-        let dec = match var {
-            TokenVariant::Type => self.parse_type_declaration(),
-            _ => Err(format!("Expected 'type' at {}, instead found {}.", d, var)),
-        }?;
-
-        self.expect(TokenVariant::Semicolon)?;
-
-        Ok(dec)
-    }
-    fn parse_type_declaration(&mut self) -> Result<Declaration<'src>, String> {
+    fn parse_type_declaration(&mut self) -> Result<Declaration<'src>, ParseError<'src>> {
         let name = self.expect(TokenVariant::Identifier)?;
         self.expect(TokenVariant::Eq)?;
         let t = self.parse_anonym_type()?;
         Ok(Declaration::TypeDecl { name, t })
     }
-    fn parse_anonym_type(&mut self) -> Result<AnonymType<'src>, String> {
+    fn parse_anonym_type(&mut self) -> Result<AnonymType<'src>, ParseError<'src>> {
         let mut list: Vec<Expr<'src>> = Vec::new();
 
         loop {
@@ -90,7 +162,7 @@ impl<'src> Parser<'src> {
         }
     }
 
-    fn parse_expr(&mut self, list: &mut AnonymType<'src>) -> Result<(), String> {
+    fn parse_expr(&mut self, list: &mut AnonymType<'src>) -> Result<(), ParseError<'src>> {
         let (variant, loc) = self.next()?;
 
         let res = match variant {
@@ -147,7 +219,12 @@ impl<'src> Parser<'src> {
                 self.parse_binary(BinaryExprType::SymmetricDifference, loc, list)?
             }
 
-            _ => return Err(format!("Unexpected expression token {}", loc)),
+            _ => {
+                return Err(ParseError::new_with_location(
+                    format!("Unexpected expression token {}", loc),
+                    loc,
+                ))
+            }
         };
 
         list.push(res);
@@ -157,14 +234,14 @@ impl<'src> Parser<'src> {
     fn parse_binary(
         &mut self,
         t: BinaryExprType,
-        loc: &TokenData<'src>,
+        loc: &'src TokenData<'src>,
         list: &mut AnonymType<'src>,
-    ) -> Result<Expr<'src>, String> {
+    ) -> Result<Expr<'src>, ParseError<'src>> {
         let prev = list.pop();
         if let None = prev {
-            return Err(format!(
-                "Expected expression before binary operator at {}",
-                loc
+            return Err(ParseError::new_with_location(
+                format!("Expected expression before binary operator at {}", loc),
+                loc,
             ));
         }
 
@@ -174,7 +251,7 @@ impl<'src> Parser<'src> {
             Box::new((prev.unwrap(), list.pop().unwrap())),
         ));
     }
-    fn parse_list(&mut self) -> Result<TypeList<'src>, String> {
+    fn parse_list(&mut self) -> Result<TypeList<'src>, ParseError<'src>> {
         let mut list = Vec::new();
 
         while !matches!(
@@ -187,7 +264,7 @@ impl<'src> Parser<'src> {
 
         Ok(list)
     }
-    fn parse_struct(&mut self) -> Result<Vec<KeyValExpr<'src>>, String> {
+    fn parse_struct(&mut self) -> Result<Vec<KeyValExpr<'src>>, ParseError<'src>> {
         let mut fields = Vec::new();
         while self.peek().map(|t| t.0) != Some(TokenVariant::RCurly) {
             let d = self.expect(TokenVariant::Identifier)?;
@@ -202,11 +279,10 @@ impl<'src> Parser<'src> {
 
         Ok(fields)
     }
-    fn parse_annotation(&mut self) -> Result<Expr<'src>, String> {
+    fn parse_annotation(&mut self) -> Result<Expr<'src>, ParseError<'src>> {
         let id = self.expect(TokenVariant::Identifier)?;
 
         let has_args = self.peek().map(|t| t.0) == Some(TokenVariant::LParen);
-
         if !has_args {
             return Ok(Expr::Annotation(id, Vec::new()));
         }
@@ -217,21 +293,49 @@ impl<'src> Parser<'src> {
 
         Ok(Expr::Annotation(id, t))
     }
-    fn parse_number(&mut self, d: &'src TokenData<'src>) -> Result<Expr<'src>, String> {
+
+    fn err_parse_number<T: std::fmt::Display>(
+        &self,
+        d: &'src TokenData<'src>,
+        e: T,
+    ) -> ParseError<'src> {
+        ParseError::new_with_location(format!("Error parsing number: {}, at {}", e, d.v), d)
+    }
+    fn parse_number(&mut self, d: &'src TokenData<'src>) -> Result<Expr<'src>, ParseError<'src>> {
         let has_dot = d.v.contains('.');
 
         Ok(Expr::Literal(if has_dot {
             let num = d.v.parse::<f64>();
             match num {
                 Ok(n) => Literal::Number(NumberType::Float(n, d)),
-                Err(e) => return Err(format!("Error parsing number: {}, at {}", e, d)),
+                Err(e) => return Err(self.err_parse_number(d, e)),
             }
         } else {
             let num = d.v.parse::<i64>();
             match num {
                 Ok(n) => Literal::Number(NumberType::Int(n, d)),
-                Err(e) => return Err(format!("Error parsing number: {}, at {}", e, d)),
+                Err(e) => return Err(self.err_parse_number(d, e)),
             }
         }))
+    }
+
+    fn recover_to_declaration_boundary(&mut self) {
+        while self.is_not_eof() {
+            let token = match self.peek() {
+                Some(t) => t,
+                None => break,
+            };
+
+            match token.0 {
+                TokenVariant::Type => break,
+                TokenVariant::Semicolon => {
+                    let _ = self.next();
+                    break;
+                }
+                _ => {
+                    let _ = self.next();
+                }
+            };
+        }
     }
 }
