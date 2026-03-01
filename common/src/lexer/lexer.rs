@@ -1,5 +1,6 @@
-use crate::lexer::tokens::{Token, TokenData, TokenVariant};
 use std::{fmt, iter::Peekable, str::Chars};
+
+use crate::lexer::{Token, TokenData, TokenVariant};
 
 static NOT_RECOGNIZED: &str = "Token not recognized";
 static MALFORMED_REGEX: &str = "Malformed regex";

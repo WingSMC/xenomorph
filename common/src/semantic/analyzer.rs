@@ -1,12 +1,11 @@
-use crate::parser::parser_expr::{Declaration, Expr};
-
+use crate::parser::{Declaration, Expr};
 
 pub fn analyze<'src>(ast: &Vec<Declaration<'src>>) {
-	for declaration in ast {
+    for declaration in ast {
         match declaration {
             Declaration::TypeDecl { t, .. } => {
                 validate_annotations(&t);
-				//print!("{:?}", t)
+                //print!("{:?}", t)
             }
         }
     }

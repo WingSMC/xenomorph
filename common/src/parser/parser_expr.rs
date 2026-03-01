@@ -1,4 +1,5 @@
-use crate::lexer::tokens::TokenData;
+use crate::lexer::TokenData;
+use std::fmt;
 
 pub type BinaryExpr<'src> = Box<(Expr<'src>, Expr<'src>)>;
 pub type KeyValExpr<'src> = (&'src TokenData<'src>, AnonymType<'src>);
@@ -55,8 +56,6 @@ pub enum Expr<'src> {
     Enum(Vec<KeyValExpr<'src>>),
 }
 
-
-use std::fmt;
 impl<'src> fmt::Display for Declaration<'src> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -193,4 +192,3 @@ fn format_vector_expr<'src>(f: &mut fmt::Formatter<'_>, expr: &Vec<Expr<'src>>) 
     }
     write!(f, "")
 }
- 

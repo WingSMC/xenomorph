@@ -1,8 +1,17 @@
-use super::parser_expr::{
-    AnonymType, BinaryExprType, Declaration, Expr, KeyValExpr, Literal, NumberType, TypeList,
+use crate::{
+    lexer::{Token, TokenData, TokenVariant},
+    parser::{
+        AnonymType, BinaryExprType, Declaration, Expr, KeyValExpr, Literal, NumberType, TypeList,
+    },
 };
-use crate::lexer::tokens::{Token, TokenData, TokenVariant};
 
+#[derive(Clone, Debug)]
+pub struct ParseError<'src> {
+    pub location: &'src TokenData<'src>,
+    pub message: String,
+}
+
+#[derive(Clone, Debug)]
 pub struct Parser<'src> {
     pub tokens: &'src Vec<Token<'src>>,
     pub current: usize,

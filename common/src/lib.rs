@@ -1,5 +1,8 @@
-pub mod plugins;
 pub mod config;
+pub mod lexer;
+pub mod parser;
+pub mod plugins;
+pub mod semantic;
 
 #[allow(dead_code)]
 pub trait XenoPlugin {
