@@ -2,8 +2,11 @@ use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TokenData<'src> {
+    /** The value of the token */
     pub v: &'src str,
+    /** The line number of the token (0 indexed) */
     pub l: usize,
+    /** The column number of the token (0 indexed) */
     pub c: usize,
 }
 
@@ -11,6 +14,7 @@ pub struct TokenData<'src> {
 pub enum TokenVariant {
     Identifier,
     Type,
+    Validator,
     Set,
     Enum,
     True,
@@ -49,7 +53,12 @@ pub enum TokenVariant {
     RCurly,
     LBracket,
     RBracket,
+
+    Documentation,
 }
+
+pub static DECLARATION_TOKEN_VARIANTS: [TokenVariant; 2] =
+    [TokenVariant::Type, TokenVariant::Validator];
 
 pub type Token<'src> = (TokenVariant, TokenData<'src>);
 
@@ -58,6 +67,7 @@ impl fmt::Display for TokenVariant {
         match self {
             TokenVariant::Identifier => write!(f, "Identifier"),
             TokenVariant::Type => write!(f, "Type"),
+            TokenVariant::Validator => write!(f, "Validator"),
             TokenVariant::Set => write!(f, "Set"),
             TokenVariant::Enum => write!(f, "Enum"),
             TokenVariant::True => write!(f, "True"),
@@ -91,12 +101,19 @@ impl fmt::Display for TokenVariant {
             TokenVariant::LBracket => write!(f, "LBracket"),
             TokenVariant::RBracket => write!(f, "RBracket"),
             TokenVariant::Range => write!(f, "Range"),
+            TokenVariant::Documentation => write!(f, "Documentation"),
         }
     }
 }
 
 impl<'src> fmt::Display for TokenData<'src> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "\"{}\" on line:{} column:{}", self.v, self.l, self.c)
+        write!(
+            f,
+            "\"{}\" on line:{} column:{}",
+            self.v,
+            self.l + 1,
+            self.c + 1
+        )
     }
 }

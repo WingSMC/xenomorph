@@ -1,32 +1,34 @@
-use lexer::lexer::Lexer;
-use parser::parser::Parser;
-use semantic::analyzer::analyze;
 use std::fs;
-use xenomorph_common::{config::Config, plugins::load_plugins};
-
-mod lexer;
-mod parser;
-mod semantic;
+use xenomorph_common::{
+    config::Config, lexer::Lexer, parser::Parser, plugins::load_plugins, semantic::analyze,
+};
 
 fn main() {
     let config = Config::get();
-    let dbg_config = &config.debug;
-    let contents = fs::read_to_string(config.workdir.join(&config.parser.path));
-
     let plugins = load_plugins();
 
+    let dbg_config = &config.debug;
     if dbg_config.plugins {
         dbg!(&plugins);
         dbg!((plugins[0].provide)());
     }
 
-    let c = match contents {
+    let file_path = config.workdir.join(&config.parser.path);
+    let file_name = match file_path.file_name() {
+        None => {
+            println!("Error: Invalid file path '{}'", file_path.display());
+            return;
+        }
+        Some(name) => name.to_string_lossy(),
+    };
+
+    let file_contents = match fs::read_to_string(&file_path) {
         Err(e) => return println!("Error: {}", e),
         Ok(s) => s,
     };
 
-    let tokens = match Lexer::new(&c).tokenize() {
-        Err((e, loc)) => return println!("Lexer error: {} at location [{}]", e, loc),
+    let tokens = match Lexer::new(&file_contents).tokenize() {
+        Err((e, loc)) => return println!("[{}] Lexer error: {} At [{}]", file_name, e, loc),
         Ok(tokens) => {
             if dbg_config.tokens {
                 print!("{:?}\n\n", tokens)
@@ -35,18 +37,16 @@ fn main() {
         }
     };
 
-    let ast = match Parser::new(&tokens).parse() {
-        Err(e) => {
-            println!("Parser error: {}", e);
-            return;
+    let (ast, errs) = Parser::new(&tokens).parse();
+    if !errs.is_empty() {
+        for e in errs {
+            println!(
+                "[{}] Parser error: {} At [{}]",
+                file_name, e.message, e.location
+            );
         }
-        Ok(ast) => {
-            if dbg_config.ast {
-                print!("{:?}\n\n", ast)
-            }
-            ast
-        }
-    };
+        return;
+    }
 
     analyze(&ast);
 }

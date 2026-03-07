@@ -10,6 +10,7 @@ use xenomorph_common::{
     plugins::load_plugins,
     Plugin,
 };
+use xenomorph_lsp_common::types::create_completion_item;
 
 type AstCache<'src> = (
     Rc<String>,
@@ -42,7 +43,7 @@ impl<'src> Backend<'src> {
         uri: &Url,
     ) -> Option<(
         Vec<Token<'src>>,
-        Result<Vec<Declaration<'src>>, Vec<ParseError<'src>>>,
+        (Vec<Declaration<'src>>, Vec<ParseError<'src>>),
     )> {
         let text = {
             let documents = self.document_map.lock().unwrap();
@@ -304,16 +305,6 @@ impl<'src> Backend<'src> {
             }),
             range: Some(range),
         })
-    }
-}
-
-fn create_completion_item(label: &str, detail: &str, kind: CompletionItemKind) -> CompletionItem {
-    CompletionItem {
-        label: label.to_string(),
-        kind: Some(kind),
-        detail: Some(detail.to_string()),
-        insert_text_format: Some(InsertTextFormat::SNIPPET),
-        ..Default::default()
     }
 }
 

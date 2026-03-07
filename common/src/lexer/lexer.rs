@@ -5,6 +5,7 @@ use crate::lexer::{Token, TokenData, TokenVariant};
 static NOT_RECOGNIZED: &str = "Token not recognized";
 static MALFORMED_REGEX: &str = "Malformed regex";
 static STRING_TERMINATION_ERROR: &str = "String not terminated";
+static COMMENT_NOT_TERMINATED: &str = "Comment not terminated";
 
 type LexerError = (&'static str, LexerLocation);
 
@@ -47,6 +48,10 @@ impl<'src> TokenData<'src> {
             c: start.column,
         }
     }
+    /**
+    If you step over the last character of a token with next()
+    so the current lexer location is one after the token, use this.
+    */
     pub fn from_loc_to_but_not_including_lexer(start: &LexerLocation, lexer: &Lexer<'src>) -> Self {
         TokenData {
             v: &lexer.src[start.src_index..lexer.location.src_index],
@@ -175,34 +180,6 @@ impl<'src> Lexer<'src> {
         }
     }
 
-    fn consume_comment_or_regex(&mut self) -> Result<Option<Token<'src>>, LexerError> {
-        let initial_loc = self.location_snapshot();
-        self.next();
-
-        if self.peek() == Some(&'/') {
-            self.next();
-            while let Some(&c) = self.peek() {
-                self.next();
-                if c == '\n' {
-                    break;
-                }
-            }
-
-            return Ok(None);
-        }
-
-        while let Some(c) = self.next() {
-            if c == '/' {
-                return Ok(Some((
-                    TokenVariant::Regex,
-                    TokenData::from_loc_to_but_not_including_lexer(&initial_loc, &self),
-                )));
-            }
-        }
-
-        Err((MALFORMED_REGEX, initial_loc))
-    }
-
     fn consume_string(&mut self) -> Result<Token<'src>, LexerError> {
         let initial_loc = self.location_snapshot();
         self.next();
@@ -301,5 +278,88 @@ impl<'src> Lexer<'src> {
             variant,
             TokenData::from_loc_to_but_not_including_lexer(&initial_loc, &self),
         )
+    }
+
+    fn consume_comment_or_regex(&mut self) -> Result<Option<Token<'src>>, LexerError> {
+        let initial_loc = self.location_snapshot();
+        self.next(); // skip first '/'
+
+        match self.peek() {
+            Some(&'/') => self.skip_line_comment(),
+            Some(&'*') => self.consume_doc_comment(initial_loc),
+            _ => self.consume_regex(initial_loc),
+        }
+    }
+
+    fn skip_line_comment(&mut self) -> Result<Option<Token<'src>>, LexerError> {
+        self.next(); // skip second '/'
+        while let Some(&c) = self.peek() {
+            self.next(); // skip til after comment
+            if c == '\n' {
+                break;
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn consume_doc_comment(
+        &mut self,
+        start: LexerLocation,
+    ) -> Result<Option<Token<'src>>, LexerError> {
+        self.next(); // skip '*'
+
+        if let Some('*') = self.next() {
+            // '/**'
+            if let Some('/') = self.peek() {
+                // '/**/
+                self.next();
+                return Ok(None); // just an empty multiline comment, skip
+            }
+
+            // doc comment, consume until '*/'
+            while let Some(c) = self.next() {
+                if c == '*' {
+                    if let Some('/') = self.peek() {
+                        self.next();
+                        return Ok(Some((
+                            TokenVariant::Documentation,
+                            TokenData::from_loc_to_but_not_including_lexer(&start, &self),
+                        )));
+                    }
+                }
+            }
+        }
+
+        // regular multiline comment, consume until '*/'
+        while let Some(c) = self.next() {
+            if c == '*' {
+                if let Some('/') = self.peek() {
+                    self.next();
+                    return Ok(None);
+                }
+            }
+        }
+
+        Err((COMMENT_NOT_TERMINATED, start))
+    }
+
+    fn consume_regex(&mut self, start: LexerLocation) -> Result<Option<Token<'src>>, LexerError> {
+        let mut has_escape = false;
+        while let Some(c) = self.next() {
+            if c == '\\' {
+                has_escape = !has_escape;
+            } else {
+                if c == '/' && !has_escape {
+                    return Ok(Some((
+                        TokenVariant::Regex,
+                        TokenData::from_loc_to_but_not_including_lexer(&start, &self),
+                    )));
+                }
+                has_escape = false;
+            }
+        }
+
+        Err((MALFORMED_REGEX, start))
     }
 }
