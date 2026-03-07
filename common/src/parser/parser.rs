@@ -39,6 +39,14 @@ impl<'src> Parser<'src> {
         (ast, errs)
     }
 
+    pub fn parse_range(
+        &mut self,
+        _old_ast: Vec<Declaration<'src>>,
+        _range: (usize, usize),
+    ) -> (Vec<Declaration<'src>>, Vec<ParseError<'src>>) {
+        panic!("Not implemented yet")
+    }
+
     fn recover_to_next_declaration(&mut self) {
         while self.is_not_eof() {
             if let Some(t) = self.peek() {
@@ -193,7 +201,21 @@ impl<'src> Parser<'src> {
                 self.parse_binary(BinaryExprType::SymmetricDifference, loc, list)?
             }
 
-            _ => {
+            TokenVariant::Type
+            | TokenVariant::Validator
+            | TokenVariant::Dot
+            | TokenVariant::Comma
+            | TokenVariant::Colon
+            | TokenVariant::Semicolon
+            | TokenVariant::Eq
+            | TokenVariant::Neq
+            | TokenVariant::Gt
+            | TokenVariant::Lt
+            | TokenVariant::LParen
+            | TokenVariant::RParen
+            | TokenVariant::RCurly
+            | TokenVariant::RBracket
+            | TokenVariant::Documentation => {
                 return Err(ParseError {
                     location: loc,
                     message: format!("Unexpected token {}", variant),

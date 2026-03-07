@@ -5,5 +5,6 @@ edition = "2021"
 
 [dependencies]
 xenomorph_common = { path = "../common" }
+xenomorph_lsp_common = { path = "../lsp_common" }
 tower-lsp = { version = "0.20.0" }
 tokio = { version = "1.28", features = ["full"] }
