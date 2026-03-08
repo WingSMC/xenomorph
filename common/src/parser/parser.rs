@@ -1,5 +1,5 @@
 use crate::{
-    lexer::{Token, TokenData, TokenVariant, DECLARATION_TOKEN_VARIANTS},
+    lexer::{Token, TokenData, TokenVariant, Tokens},
     parser::{
         AnonymType, BinaryExprType, Declaration, Expr, KeyValExpr, Literal, NumberType, TypeList,
     },
@@ -13,21 +13,27 @@ pub struct ParseError<'src> {
 
 #[derive(Clone, Debug)]
 pub struct Parser<'src> {
-    pub tokens: &'src Vec<Token<'src>>,
+    pub tokens: &'src Tokens<'src>,
     pub current: usize,
 }
 
+pub type XenoAst<'src> = Vec<Declaration<'src>>;
+pub type XenoParseResult<'src> = (XenoAst<'src>, Vec<ParseError<'src>>);
+
 impl<'src> Parser<'src> {
-    pub fn new(tokens: &'src Vec<Token<'src>>) -> Self {
+    fn new(tokens: &'src Tokens<'src>) -> Self {
         Self { tokens, current: 0 }
     }
-    pub fn parse(&mut self) -> (Vec<Declaration<'src>>, Vec<ParseError<'src>>) {
+
+    pub fn parse(tokens: &'src Tokens<'src>) -> XenoParseResult<'src> {
+        Self::new(tokens)._parse()
+    }
+    fn _parse(mut self) -> XenoParseResult<'src> {
         let mut ast = Vec::new();
         let mut errs = Vec::new();
 
         while self.is_not_eof() {
-            let dec = self.parse_declaration();
-            match dec {
+            match self.parse_declaration() {
                 Err(e) => {
                     errs.push(e);
                     self.recover_to_next_declaration();
@@ -40,28 +46,32 @@ impl<'src> Parser<'src> {
     }
 
     pub fn parse_range(
-        &mut self,
+        _tokens: &'src Tokens<'src>,
         _old_ast: Vec<Declaration<'src>>,
         _range: (usize, usize),
-    ) -> (Vec<Declaration<'src>>, Vec<ParseError<'src>>) {
+    ) -> XenoParseResult<'src> {
         panic!("Not implemented yet")
     }
 
-    fn recover_to_next_declaration(&mut self) {
-        while self.is_not_eof() {
-            if let Some(t) = self.peek() {
-                if DECLARATION_TOKEN_VARIANTS.contains(&t.0) {
-                    break;
-                }
-            } else {
+    fn recover_to(&mut self, variant: TokenVariant) {
+        while let Some(t) = self.peek() {
+            self.current += 1;
+            if t.0 == variant {
                 break;
             }
-            self.current += 1;
         }
     }
 
+    fn recover_to_next_declaration(&mut self) {
+        self.recover_to(TokenVariant::Semicolon);
+    }
+
+    fn recover_to_next_field(&mut self) {
+        self.recover_to(TokenVariant::Comma);
+    }
+
     fn is_not_eof(&self) -> bool {
-        self.current < self.tokens.len() - 1
+        self.current < self.tokens.len()
     }
 
     fn next(&mut self) -> Result<&'src Token<'src>, ParseError<'src>> {
@@ -91,7 +101,7 @@ impl<'src> Parser<'src> {
         if *var != expected {
             return Err(ParseError {
                 location: d,
-                message: format!("Expected {} at {}", expected, d),
+                message: format!("Expected {} at {} instead got {}.", expected, d, var),
             });
         }
         Ok(d)

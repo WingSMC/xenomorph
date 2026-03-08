@@ -2,124 +2,114 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Mutex;
 use tower_lsp::jsonrpc::Result;
-use tower_lsp::lsp_types::*;
+use tower_lsp::lsp_types::{
+    CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse,
+    Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, DocumentFormattingParams, Documentation, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverContents, HoverParams, HoverProviderCapability,
+    InitializeParams, InitializeResult, InitializedParams, InsertTextFormat, Location,
+    MarkupContent, MarkupKind, MessageType, OneOf, Position, Range, ServerCapabilities,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions, TextEdit, Url,
+};
 use tower_lsp::{Client, LanguageServer, LspService, Server};
+use xenomorph_common::config::Config;
+use xenomorph_common::lexer::LexerLocation;
+use xenomorph_common::parser::XenoParseResult;
 use xenomorph_common::{
     lexer::{Lexer, Token, TokenData, TokenVariant},
     parser::{Declaration, ParseError, Parser},
-    plugins::load_plugins,
-    Plugin,
+    plugins::{load_plugins, XenoPlugin},
 };
-use xenomorph_lsp_common::types::create_completion_item;
+use xenomorph_lsp_common::types::{
+    create_completion_item, BUILTIN_ANNOTATION_COMPLETIONS, BUILTIN_TYPE_COMPLETIONS,
+};
 
-type AstCache<'src> = (
-    Rc<String>,
-    Vec<Token<'src>>,
-    Vec<Declaration<'src>>,
-    Vec<ParseError<'src>>,
-);
+type AstCache<'src> = (String, Tokens<'src>, XenoParseResult<'src>);
 
 #[derive(Debug)]
 struct Backend<'src> {
     client: Client,
-    plugins: Vec<&'static Plugin<'static>>,
+    plugins: Vec<&'static XenoPlugin<'static>>,
     document_map: Mutex<HashMap<Url, Rc<String>>>,
     ast_cache: Mutex<HashMap<Url, AstCache<'src>>>,
 }
 
 // Helper function to convert parser location to LSP position
-fn token_to_position(token: &TokenData) -> Position {
+fn token_to_editor_location(location: &TokenData) -> Position {
     // Convert from 1-based to 0-based for LSP
     Position {
-        line: (token.l - 1) as u32,
-        character: (token.c - 1) as u32,
+        line: (location.l - 1) as u32,
+        character: (location.c - 1) as u32,
     }
 }
 
 impl<'src> Backend<'src> {
-    // Parse document and cache result
-    fn parse_document(
-        &self,
-        uri: &Url,
-    ) -> Option<(
-        Vec<Token<'src>>,
-        (Vec<Declaration<'src>>, Vec<ParseError<'src>>),
-    )> {
-        let text = {
-            let documents = self.document_map.lock().unwrap();
-            documents.get(uri)?.clone()
-        };
+    fn parse_document(&self, uri: &Url) -> Option<(String, Tokens<'src>, XenoParseResult<'src>)> {
+        let documents = self.document_map.lock().ok()?;
+        let text = documents.get(uri)?.clone().to_string();
+        let tokens = Lexer::tokenize(&text)?;
+        let parse_result = Parser::parse(&tokens);
 
-        let tokens = match Lexer::new(&text).tokenize() {
-            Ok(t) => t,
-            Err(_) => return None,
-        };
+        Some((text, tokens, parse_result))
+    }
 
-        let mut parser = Parser::new(&tokens);
-        let (ast, errors) = parser.parse();
+    fn get_builtin_types(&self) -> Iter<CompletionItem> {
+        self.plugins
+            .iter()
+            .filter_map(|p| p.provide_types.map(|p| p()))
+            .flatten()
+            .chain(BUILTIN_TYPE_COMPLETIONS.iter())
+    }
 
-        let result = if errors.is_empty() {
-            Ok(ast.clone())
-        } else {
-            Err(errors.clone())
-        };
-
-        {
-            let mut cache = self.ast_cache.lock().unwrap();
-            cache.insert(uri.clone(), (text, tokens.clone(), ast, errors));
-        }
-
-        Some((tokens, result))
+    fn get_builtin_annotations(&self) -> Iter<CompletionItem> {
+        BUILTIN_ANNOTATION_COMPLETIONS.iter().cloned()
     }
 
     // Validate document and send diagnostics
     async fn validate_document(&self, uri: &Url) {
-        if let Some((_, parse_result)) = self.parse_document(uri) {
-            let diagnostics = match parse_result {
-                Err(errors) => {
-                    // Convert parser errors to LSP diagnostics
-                    errors
-                        .iter()
-                        .map(|err| {
-                            let start_pos = if let Some(token) = err.token {
-                                token_to_position(&token.1)
-                            } else {
-                                Position {
-                                    line: 0,
-                                    character: 0,
-                                }
-                            };
+        let res = self.parse_document(uri);
+        let doc = match res {
+            Some(doc) => doc,
+            None => {
+                self.client
+                    .show_message(
+                        MessageType::ERROR,
+                        "Failed to parse document for validation.",
+                    )
+                    .await;
+                return;
+            }
+        };
+        let text = doc.0;
+        let tokens = doc.1;
+        let parse_result = doc.2;
+        let ast = parse_result.0;
+        let errors = parse_result.1;
 
-                            // For end position, add the length of the token
-                            let end_pos = if let Some(token) = err.token {
-                                Position {
-                                    line: start_pos.line,
-                                    character: start_pos.character + token.1.v.len() as u32,
-                                }
-                            } else {
-                                Position {
-                                    line: 0,
-                                    character: 1,
-                                }
-                            };
+        if errors.len() > 0 {
+            let diagnostics = errors
+                .iter()
+                .map(|err| {
+                    let start_pos = token_to_editor_location(err.location);
+                    // For end position, add the length of the token
+                    let end_pos = Position {
+                        line: start_pos.line,
+                        character: start_pos.character + err.location.v.len() as u32,
+                    };
 
-                            Diagnostic {
-                                range: Range {
-                                    start: start_pos,
-                                    end: end_pos,
-                                },
-                                severity: Some(DiagnosticSeverity::ERROR),
-                                message: err.message.clone(),
-                                source: Some("xenomorph".to_string()),
-                                ..Default::default()
-                            }
-                        })
-                        .collect()
-                }
-                Ok(_) => vec![], // No errors
-            };
+                    Diagnostic {
+                        range: Range {
+                            start: start_pos,
+                            end: end_pos,
+                        },
+                        severity: Some(DiagnosticSeverity::ERROR),
+                        message: err.message.clone(),
+                        source: Some("xenomorph".to_string()),
+                        ..Default::default()
+                    }
+                })
+                .collect();
 
-            // Send diagnostics to client
             self.client
                 .publish_diagnostics(uri.clone(), diagnostics, None)
                 .await;
@@ -129,7 +119,7 @@ impl<'src> Backend<'src> {
     // Find the token at a given position
     fn find_token_at_position(&self, tokens: &[Token], position: Position) -> Option<&Token> {
         tokens.iter().find(|(_, data)| {
-            let token_start = token_to_position(data);
+            let token_start = token_to_editor_location(data);
             let token_end = Position {
                 line: token_start.line,
                 character: token_start.character + data.v.len() as u32,
@@ -148,77 +138,16 @@ impl<'src> Backend<'src> {
             match current_token.0 {
                 TokenVariant::At => {
                     // After @ suggest annotations
-                    items.extend(vec![
-                        create_completion_item(
-                            "min",
-                            "Minimum value constraint",
-                            CompletionItemKind::FUNCTION,
-                        ),
-                        create_completion_item(
-                            "max",
-                            "Maximum value constraint",
-                            CompletionItemKind::FUNCTION,
-                        ),
-                        create_completion_item(
-                            "len",
-                            "Length constraint",
-                            CompletionItemKind::FUNCTION,
-                        ),
-                        create_completion_item(
-                            "minlen",
-                            "Minimum length constraint",
-                            CompletionItemKind::FUNCTION,
-                        ),
-                        create_completion_item(
-                            "maxlen",
-                            "Maximum length constraint",
-                            CompletionItemKind::FUNCTION,
-                        ),
-                        create_completion_item(
-                            "if",
-                            "Conditional validation",
-                            CompletionItemKind::KEYWORD,
-                        ),
-                        create_completion_item(
-                            "else",
-                            "Alternative validation",
-                            CompletionItemKind::KEYWORD,
-                        ),
-                    ]);
+                    items.extend(self.get_builtin_annotations());
                 }
                 TokenVariant::Colon => {
                     // After colon, suggest types
                     items.extend(vec![
-                        create_completion_item(
-                            "string",
-                            "String type",
-                            CompletionItemKind::TYPE_PARAMETER,
-                        ),
-                        create_completion_item(
-                            "u8",
-                            "8-bit unsigned integer",
-                            CompletionItemKind::TYPE_PARAMETER,
-                        ),
-                        create_completion_item(
-                            "u64",
-                            "64-bit unsigned integer",
-                            CompletionItemKind::TYPE_PARAMETER,
-                        ),
-                        create_completion_item(
-                            "bool",
-                            "Boolean type",
-                            CompletionItemKind::TYPE_PARAMETER,
-                        ),
-                        create_completion_item(
-                            "float",
-                            "Floating point number",
-                            CompletionItemKind::TYPE_PARAMETER,
-                        ),
-                        create_completion_item(
-                            "Date",
-                            "Date type",
-                            CompletionItemKind::TYPE_PARAMETER,
-                        ),
+                        // create_completion_item(
+                        //     "string",
+                        //     Some("String type"),
+                        //     CompletionItemKind::TYPE_PARAMETER,
+                        // ),
                     ]);
                 }
                 TokenVariant::LCurly => {
@@ -226,22 +155,22 @@ impl<'src> Backend<'src> {
                     items.extend(vec![
                         create_completion_item(
                             "id",
-                            "Identifier property",
+                            Some("Identifier property"),
                             CompletionItemKind::PROPERTY,
                         ),
                         create_completion_item(
                             "name",
-                            "Name property",
+                            Some("Name property"),
                             CompletionItemKind::PROPERTY,
                         ),
                         create_completion_item(
                             "type",
-                            "Type property",
+                            Some("Type property"),
                             CompletionItemKind::PROPERTY,
                         ),
                         create_completion_item(
                             "value",
-                            "Value property",
+                            Some("Value property"),
                             CompletionItemKind::PROPERTY,
                         ),
                     ]);
@@ -258,10 +187,10 @@ impl<'src> Backend<'src> {
     // Provide hover information for a token
     fn get_hover_for_token(&self, token: &Token) -> Option<Hover> {
         let range = Range {
-            start: token_to_position(&token.1),
+            start: token_to_editor_location(&token.1),
             end: Position {
-                line: token_to_position(&token.1).line,
-                character: token_to_position(&token.1).character + token.1.v.len() as u32,
+                line: token_to_editor_location(&token.1).line,
+                character: token_to_editor_location(&token.1).character + token.1.v.len() as u32,
             },
         };
 
@@ -410,14 +339,22 @@ impl LanguageServer for Backend {
         let position = params.text_document_position.position;
 
         let mut completions: Vec<CompletionItem> = vec![
-            create_completion_item("type", "Define a new type", CompletionItemKind::KEYWORD),
             create_completion_item(
-                "validator",
-                "Define a validator",
+                "type",
+                Some("Define a new type"),
                 CompletionItemKind::KEYWORD,
             ),
-            create_completion_item("set", "Define a set", CompletionItemKind::KEYWORD),
-            create_completion_item("enum", "Define an enumeration", CompletionItemKind::KEYWORD),
+            create_completion_item(
+                "validator",
+                Some("Define a validator"),
+                CompletionItemKind::KEYWORD,
+            ),
+            create_completion_item("set", Some("Define a set"), CompletionItemKind::KEYWORD),
+            create_completion_item(
+                "enum",
+                Some("Define an enumeration"),
+                CompletionItemKind::KEYWORD,
+            ),
             CompletionItem {
                 label: "object literal".to_string(),
                 kind: Some(CompletionItemKind::SNIPPET),
@@ -429,10 +366,10 @@ impl LanguageServer for Backend {
         ];
 
         // Context-aware completions
-        if let Some((tokens, _)) = self.parse_document(&uri) {
-            let context_completions = self.get_context_completions(&tokens, position);
-            completions.extend(context_completions);
-        }
+        // if let Some((tokens, _)) = self.parse_document(&uri) {
+        //     let context_completions = self.get_context_completions(&tokens, position);
+        //     completions.extend(context_completions);
+        // }
 
         // Plugin-provided completions
         completions.extend(self.plugins.iter().flat_map(|p| (p.provide)()).map(|c| {
@@ -473,11 +410,11 @@ impl LanguageServer for Backend {
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
-        if let Some((tokens, _)) = self.parse_document(&uri) {
-            if let Some(token) = self.find_token_at_position(&tokens, position) {
-                return Ok(self.get_hover_for_token(token));
-            }
-        }
+        // if let Some((tokens, _)) = self.parse_document(&uri) {
+        //     if let Some(token) = self.find_token_at_position(&tokens, position) {
+        //         return Ok(self.get_hover_for_token(token));
+        //     }
+        // }
 
         Ok(None)
     }
@@ -518,31 +455,38 @@ impl LanguageServer for Backend {
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
-        if let Some((tokens, Ok(ast))) = self.parse_document(&uri) {
-            if let Some(token) = self.find_token_at_position(&tokens, position) {
-                if token.0 == TokenVariant::Identifier {
-                    let searched_name = token.1.v;
+        let (tokens, ast) = {
+            let cache = self.ast_cache.lock().unwrap();
+            if let Some((_, cached_tokens, (ast, _))) = cache.get(&uri) {
+                (cached_tokens.clone(), ast.clone())
+            } else {
+                return Ok(None);
+            }
+        };
 
-                    for decl in &ast {
-                        match decl {
-                            Declaration::TypeDecl { name, t } => {
-                                if name.v == searched_name {
-                                    let range = Range {
-                                        start: Position {
-                                            line: (name.l - 1) as u32,
-                                            character: (name.c - 1) as u32,
-                                        },
-                                        end: Position {
-                                            line: (name.l - 1) as u32,
-                                            character: (name.c - 1 + name.v.len()) as u32,
-                                        },
-                                    };
+        if let Some(token) = self.find_token_at_position(&tokens, position) {
+            if token.0 == TokenVariant::Identifier {
+                let searched_name = token.1.v;
 
-                                    return Ok(Some(GotoDefinitionResponse::Scalar(Location {
-                                        uri: uri.clone(),
-                                        range,
-                                    })));
-                                }
+                for decl in &ast {
+                    match decl {
+                        Declaration::TypeDecl { name, t } => {
+                            if name.v == searched_name {
+                                let range = Range {
+                                    start: Position {
+                                        line: (name.l - 1) as u32,
+                                        character: (name.c - 1) as u32,
+                                    },
+                                    end: Position {
+                                        line: (name.l - 1) as u32,
+                                        character: (name.c - 1 + name.v.len()) as u32,
+                                    },
+                                };
+
+                                return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                                    uri: uri.clone(),
+                                    range,
+                                })));
                             }
                         }
                     }
