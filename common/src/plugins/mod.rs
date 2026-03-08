@@ -1,6 +1,24 @@
-use crate::{config::Config, Plugin};
+use crate::{config::Config, parser::XenoAst};
 use libloading::{Library, Symbol};
 use std::path::{Path, PathBuf};
+use tower_lsp::lsp_types::CompletionItem;
+
+#[derive(Debug)]
+pub struct XenoPlugin<'a> {
+    pub name: &'a str,
+    pub version: &'a str,
+
+    pub initialize: Option<fn() -> ()>,
+    pub provide_types: Option<fn() -> Vec<CompletionItem>>,
+    pub provide_annotations: Option<fn() -> Vec<CompletionItem>>,
+    // pub lint: fn(&Self) -> (),
+    pub generate: Option<fn(ast: &XenoAst) -> ()>,
+    // execute: fn(&str),
+    // cleanup: fn(),
+
+    // parse_custom_declaration
+    // parse_custom_expression
+}
 
 macro_rules! lib_filename {
     ($lib_name: expr) => {{
@@ -29,13 +47,16 @@ fn load_plugin_library(path: &Path) -> Result<Library, String> {
         .map_err(|e| format!("Library load error\n{}:\n{}", path.display(), e))
 }
 
-fn load_plugin(lib: Library) -> Result<&'static Plugin<'static>, libloading::Error> {
+fn load_plugin(lib: Library) -> Result<&'static XenoPlugin<'static>, libloading::Error> {
     let lib_ref = Box::leak(Box::new(lib));
-    let load: Symbol<fn() -> &'static Plugin<'static>> = unsafe { lib_ref.get(b"load")? };
+    let load: Symbol<fn() -> &'static XenoPlugin<'static>> = unsafe { lib_ref.get(b"load")? };
     Ok(load())
 }
 
-fn create_plugin_instance(lib: Library, name: &String) -> Result<&'static Plugin<'static>, String> {
+fn create_plugin_instance(
+    lib: Library,
+    name: &String,
+) -> Result<&'static XenoPlugin<'static>, String> {
     load_plugin(lib).map_err(|e| {
         format!(
             "Symbol resolution error in plugin '{}'. Make sure it's compatible with the current version!\n{}",
@@ -49,7 +70,7 @@ fn log_loading_error(plugin_name: &String, e: &String) {
     eprintln!("Failed to load plugin '{}':\n{}", plugin_name, e);
 }
 
-pub fn load_plugins() -> Vec<&'static Plugin<'static>> {
+pub fn load_plugins() -> Vec<&'static XenoPlugin<'static>> {
     let plugin_config = &Config::get().plugins;
     let plugins_dir = plugins_directory();
 

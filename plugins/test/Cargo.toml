@@ -11,3 +11,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 xenomorph_common = { path = "../../common" }
+tower-lsp = "0.20.0"

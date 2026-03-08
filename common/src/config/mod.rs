@@ -119,14 +119,12 @@ fn find_workspace_root(wd: &PathBuf) -> Option<PathBuf> {
         }
 
         if !current_dir.pop() {
-            break;
+            return None;
         }
     }
-
-    None
 }
 
-pub fn init_config() -> Config {
+fn init_config() -> Config {
     let current_dir = match std::env::current_dir() {
         Ok(path) => path,
         Err(_) => {

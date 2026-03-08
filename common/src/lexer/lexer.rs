@@ -1,6 +1,6 @@
 use std::{fmt, iter::Peekable, str::Chars};
 
-use crate::lexer::{Token, TokenData, TokenVariant};
+use crate::lexer::{Token, TokenData, TokenVariant, Tokens};
 
 static NOT_RECOGNIZED: &str = "Token not recognized";
 static MALFORMED_REGEX: &str = "Malformed regex";
@@ -9,7 +9,7 @@ static COMMENT_NOT_TERMINATED: &str = "Comment not terminated";
 
 type LexerError = (&'static str, LexerLocation);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct LexerLocation {
     pub src_index: usize,
     pub line: usize,
@@ -34,7 +34,7 @@ pub struct Lexer<'src> {
 
 impl<'src> TokenData<'src> {
     pub fn one_at_lexer(lexer: &Lexer<'src>) -> Self {
-        let start = lexer.location;
+        let start = &lexer.location;
         TokenData {
             v: &lexer.src[start.src_index..=start.src_index],
             l: start.line,
@@ -62,7 +62,7 @@ impl<'src> TokenData<'src> {
 }
 
 impl<'src> Lexer<'src> {
-    pub fn new(src: &'src str) -> Self {
+    fn new(src: &'src str) -> Self {
         Lexer {
             src,
             it: src.chars().peekable(),
@@ -105,14 +105,21 @@ impl<'src> Lexer<'src> {
         td
     }
 
-    pub fn tokenize(&mut self) -> Result<Vec<Token<'src>>, LexerError> {
-        let mut tokens: Vec<Token<'src>> = vec![];
+    pub fn tokenize(src: &'src str) -> Result<Tokens<'src>, LexerError> {
+        Self::new(src)._tokenize()
+    }
+    fn _tokenize(mut self) -> Result<Tokens<'src>, LexerError> {
+        let mut tokens: Tokens<'src> = vec![];
         while let Some(c) = self.peek() {
-            tokens.push(match c {
+            let token = match c {
                 ' ' | '\n' | '\t' | '\r' => {
                     self.next();
                     continue;
                 }
+                '/' => match self.consume_comment_or_regex()? {
+                    None => continue,
+                    Some(t) => t,
+                },
                 'a'..='z' | 'A'..='Z' | '_' => self.consume_word(),
                 '@' => (TokenVariant::At, self.single_char_token_next()),
                 ':' => (TokenVariant::Colon, self.single_char_token_next()),
@@ -126,9 +133,6 @@ impl<'src> Lexer<'src> {
                 '}' => (TokenVariant::RCurly, self.single_char_token_next()),
                 '[' => (TokenVariant::LBracket, self.single_char_token_next()),
                 ']' => (TokenVariant::RBracket, self.single_char_token_next()),
-                '0'..='9' => self.consume_number(),
-                '"' => self.consume_string()?,
-                '.' | '<' => self.consume_range_lt_dot_symmdiff(),
                 '>' => (TokenVariant::Gt, self.single_char_token_next()),
                 ';' => (TokenVariant::Semicolon, self.single_char_token_next()),
                 '+' => (TokenVariant::Plus, self.single_char_token_next()),
@@ -136,14 +140,15 @@ impl<'src> Lexer<'src> {
                 '*' => (TokenVariant::Asterix, self.single_char_token_next()),
                 '^' => (TokenVariant::Caret, self.single_char_token_next()),
                 '=' => (TokenVariant::Eq, self.single_char_token_next()),
+                '0'..='9' => self.consume_number(),
+                '"' => self.consume_string()?,
+                '.' | '<' => self.consume_range_lt_dot_symmdiff(),
                 '!' => self.consume_not_or_neq(),
                 '\\' => (TokenVariant::Backslash, self.single_char_token_next()),
-                '/' => match self.consume_comment_or_regex()? {
-                    Some(t) => t,
-                    None => continue,
-                },
                 _ => return Err((NOT_RECOGNIZED, self.location)),
-            });
+            };
+
+            tokens.push(token);
         }
 
         Ok(tokens)

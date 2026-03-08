@@ -27,7 +27,7 @@ fn main() {
         Ok(s) => s,
     };
 
-    let tokens = match Lexer::new(&file_contents).tokenize() {
+    let tokens = match Lexer::tokenize(&file_contents) {
         Err((e, loc)) => return println!("[{}] Lexer error: {} At [{}]", file_name, e, loc),
         Ok(tokens) => {
             if dbg_config.tokens {
@@ -37,7 +37,7 @@ fn main() {
         }
     };
 
-    let (ast, errs) = Parser::new(&tokens).parse();
+    let (ast, errs) = Parser::parse(&tokens);
     if !errs.is_empty() {
         for e in errs {
             println!(

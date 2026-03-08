@@ -57,10 +57,8 @@ pub enum TokenVariant {
     Documentation,
 }
 
-pub static DECLARATION_TOKEN_VARIANTS: [TokenVariant; 2] =
-    [TokenVariant::Type, TokenVariant::Validator];
-
 pub type Token<'src> = (TokenVariant, TokenData<'src>);
+pub type Tokens<'src> = Vec<Token<'src>>;
 
 impl fmt::Display for TokenVariant {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
