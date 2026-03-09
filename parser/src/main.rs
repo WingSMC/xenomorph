@@ -10,7 +10,7 @@ fn main() {
     let dbg_config = &config.debug;
     if dbg_config.plugins {
         dbg!(&plugins);
-        dbg!((plugins[0].provide)());
+        dbg!(plugins[0].provide_types.map(|p| p()));
     }
 
     let file_path = config.workdir.join(&config.parser.path);
@@ -28,7 +28,12 @@ fn main() {
     };
 
     let tokens = match Lexer::tokenize(&file_contents) {
-        Err((e, loc)) => return println!("[{}] Lexer error: {} At [{}]", file_name, e, loc),
+        Err(err) => {
+            return println!(
+                "[{}] Lexer error: {} At [{}]",
+                file_name, err.message, err.location
+            )
+        }
         Ok(tokens) => {
             if dbg_config.tokens {
                 print!("{:?}\n\n", tokens)

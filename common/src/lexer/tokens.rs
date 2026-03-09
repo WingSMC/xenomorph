@@ -1,14 +1,5 @@
+use crate::TokenData;
 use std::fmt;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TokenData<'src> {
-    /** The value of the token */
-    pub v: &'src str,
-    /** The line number of the token (0 indexed) */
-    pub l: usize,
-    /** The column number of the token (0 indexed) */
-    pub c: usize,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenVariant {

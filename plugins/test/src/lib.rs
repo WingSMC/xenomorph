@@ -15,7 +15,7 @@ static PLUGIN: XenoPlugin = XenoPlugin {
     name: NAME,
     version: VERSION,
     initialize: None,
-    provide_types: Some(*provide_types),
+    provide_types: Some(provide_types),
     provide_annotations: None,
     generate: None,
 };

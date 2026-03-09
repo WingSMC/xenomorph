@@ -25,7 +25,7 @@ pub fn create_completion_item(
     }
 }
 
-pub const static BUILTIN_ANNOTATION_COMPLETIONS: LazyLock<Vec<CompletionItem>> = LazyLock::new(|| {
+pub static BUILTIN_ANNOTATION_COMPLETIONS: LazyLock<Vec<CompletionItem>> = LazyLock::new(|| {
     BUILTIN_ANNOTATIONS
         .iter()
         .map(|annotation| {
@@ -38,17 +38,19 @@ pub const static BUILTIN_ANNOTATION_COMPLETIONS: LazyLock<Vec<CompletionItem>> =
         .collect()
 });
 
-pub const static BUILTIN_TYPE_COMPLETIONS: LazyLock<Vec<CompletionItem>> = LazyLock::new(|| {
+pub static BUILTIN_TYPE_COMPLETIONS: LazyLock<Vec<CompletionItem>> = LazyLock::new(|| {
     BUILTIN_TYPES
         .iter()
-        .map(|t| create_completion_item(
-            t.name,
-            t.documentation,
-            if (t.name.contains("color") || t.name.contains("Color")) {
-                CompletionItemKind::COLOR
-            } else {
-                CompletionItemKind::CLASS
-            },
-        ))
+        .map(|t| {
+            create_completion_item(
+                t.name,
+                t.documentation,
+                if t.name.contains("color") || t.name.contains("Color") {
+                    CompletionItemKind::COLOR
+                } else {
+                    CompletionItemKind::CLASS
+                },
+            )
+        })
         .collect()
 });

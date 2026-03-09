@@ -5,4 +5,4 @@ edition = "2021"
 
 [dependencies]
 xenomorph_common = { path = "../common" }
-tower-lsp = "0.15.0"
+tower-lsp = { version = "0.20.0" }

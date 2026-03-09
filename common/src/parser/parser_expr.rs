@@ -1,4 +1,4 @@
-use crate::lexer::TokenData;
+use crate::TokenData;
 use std::fmt;
 
 pub type BinaryExpr<'src> = Box<(Expr<'src>, Expr<'src>)>;
@@ -9,6 +9,7 @@ pub type TypeList<'src> = Vec<AnonymType<'src>>;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Declaration<'src> {
     TypeDecl {
+        docs: Option<&'src str>,
         name: &'src TokenData<'src>,
         t: Vec<Expr<'src>>,
     },
@@ -59,7 +60,7 @@ pub enum Expr<'src> {
 impl<'src> fmt::Display for Declaration<'src> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Declaration::TypeDecl { name, t } => {
+            Declaration::TypeDecl { name, t, .. } => {
                 write!(f, "type {} = ", name.v)?;
                 for (i, item) in t.iter().enumerate() {
                     if i > 0 {
