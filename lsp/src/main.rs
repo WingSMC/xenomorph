@@ -12,13 +12,12 @@ use tower_lsp::lsp_types::{
     TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions, TextEdit, Url,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server};
-use xenomorph_common::config::Config;
-use xenomorph_common::lexer::LexerLocation;
 use xenomorph_common::parser::XenoParseResult;
 use xenomorph_common::{
-    lexer::{Lexer, Token, TokenData, TokenVariant},
-    parser::{Declaration, ParseError, Parser},
+    lexer::{Lexer, Token, TokenVariant, Tokens},
+    parser::{Declaration, Parser},
     plugins::{load_plugins, XenoPlugin},
+    TokenData,
 };
 use xenomorph_lsp_common::types::{
     create_completion_item, BUILTIN_ANNOTATION_COMPLETIONS, BUILTIN_TYPE_COMPLETIONS,
@@ -47,7 +46,13 @@ impl<'src> Backend<'src> {
     fn parse_document(&self, uri: &Url) -> Option<(String, Tokens<'src>, XenoParseResult<'src>)> {
         let documents = self.document_map.lock().ok()?;
         let text = documents.get(uri)?.clone().to_string();
-        let tokens = Lexer::tokenize(&text)?;
+        let tokenization_result = Lexer::tokenize(&text);
+        let tokens = match tokenization_result {
+            Ok(tokens) => tokens,
+            Err(e) => {
+                return Some((text, Vec::new(), (Vec::new(), vec![e])));
+            }
+        };
         let parse_result = Parser::parse(&tokens);
 
         Some((text, tokens, parse_result))
@@ -58,7 +63,7 @@ impl<'src> Backend<'src> {
             .iter()
             .filter_map(|p| p.provide_types.map(|p| p()))
             .flatten()
-            .chain(BUILTIN_TYPE_COMPLETIONS.iter())
+            .chain(BUILTIN_TYPE_COMPLETIONS.iter().map(|t| t.clone()))
     }
 
     fn get_builtin_annotations(&self) -> Iter<CompletionItem> {
@@ -68,7 +73,7 @@ impl<'src> Backend<'src> {
     // Validate document and send diagnostics
     async fn validate_document(&self, uri: &Url) {
         let res = self.parse_document(uri);
-        let doc = match res {
+        let document = match res {
             Some(doc) => doc,
             None => {
                 self.client
@@ -80,9 +85,9 @@ impl<'src> Backend<'src> {
                 return;
             }
         };
-        let text = doc.0;
-        let tokens = doc.1;
-        let parse_result = doc.2;
+        let text = document.0;
+        let tokens = document.1;
+        let parse_result = document.2;
         let ast = parse_result.0;
         let errors = parse_result.1;
 
