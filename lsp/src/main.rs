@@ -1,40 +1,37 @@
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::Mutex;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse,
     Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DocumentFormattingParams, Documentation, GotoDefinitionParams,
-    GotoDefinitionResponse, Hover, HoverContents, HoverParams, HoverProviderCapability,
-    InitializeParams, InitializeResult, InitializedParams, InsertTextFormat, Location,
-    MarkupContent, MarkupKind, MessageType, OneOf, Position, Range, ServerCapabilities,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions, TextEdit, Url,
+    DidOpenTextDocumentParams, DocumentFormattingParams, DocumentSymbolParams,
+    DocumentSymbolResponse, Documentation, GotoDefinitionParams, GotoDefinitionResponse, Hover,
+    HoverContents, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
+    InitializedParams, InsertTextFormat, Location, MarkupContent, MarkupKind, MessageType, OneOf,
+    Position, Range, ServerCapabilities, SymbolInformation, SymbolKind, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextDocumentSyncOptions, TextEdit, Url,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server};
-use xenomorph_common::parser::XenoParseResult;
 use xenomorph_common::{
-    lexer::{Lexer, Token, TokenVariant, Tokens},
+    lexer::{Lexer, Token, TokenVariant},
     parser::{Declaration, Parser},
     plugins::{load_plugins, XenoPlugin},
-    TokenData,
+    ParseError, TokenData,
 };
 use xenomorph_lsp_common::types::{
     create_completion_item, BUILTIN_ANNOTATION_COMPLETIONS, BUILTIN_TYPE_COMPLETIONS,
 };
 
-type AstCache<'src> = (String, Tokens<'src>, XenoParseResult<'src>);
-
 #[derive(Debug)]
-struct Backend<'src> {
+struct Backend {
     client: Client,
     plugins: Vec<&'static XenoPlugin<'static>>,
-    document_map: Mutex<HashMap<Url, Rc<String>>>,
-    ast_cache: Mutex<HashMap<Url, AstCache<'src>>>,
+    document_map: Mutex<HashMap<Url, Arc<String>>>,
 }
 
 // Helper function to convert parser location to LSP position
-fn token_to_editor_location(location: &TokenData) -> Position {
+fn token_to_editor_location(location: &TokenData<'_>) -> Position {
     // Convert from 1-based to 0-based for LSP
     Position {
         line: (location.l - 1) as u32,
@@ -42,39 +39,29 @@ fn token_to_editor_location(location: &TokenData) -> Position {
     }
 }
 
-impl<'src> Backend<'src> {
-    fn parse_document(&self, uri: &Url) -> Option<(String, Tokens<'src>, XenoParseResult<'src>)> {
+impl Backend {
+    /// Returns a clone of the stored document text for the given URI.
+    fn get_document_text(&self, uri: &Url) -> Option<Arc<String>> {
         let documents = self.document_map.lock().ok()?;
-        let text = documents.get(uri)?.clone().to_string();
-        let tokenization_result = Lexer::tokenize(&text);
-        let tokens = match tokenization_result {
-            Ok(tokens) => tokens,
-            Err(e) => {
-                return Some((text, Vec::new(), (Vec::new(), vec![e])));
-            }
-        };
-        let parse_result = Parser::parse(&tokens);
-
-        Some((text, tokens, parse_result))
+        documents.get(uri).cloned()
     }
 
-    fn get_builtin_types(&self) -> Iter<CompletionItem> {
+    fn get_builtin_types(&self) -> impl Iterator<Item = CompletionItem> + '_ {
         self.plugins
             .iter()
             .filter_map(|p| p.provide_types.map(|p| p()))
             .flatten()
-            .chain(BUILTIN_TYPE_COMPLETIONS.iter().map(|t| t.clone()))
+            .chain(BUILTIN_TYPE_COMPLETIONS.iter().cloned())
     }
 
-    fn get_builtin_annotations(&self) -> Iter<CompletionItem> {
+    fn get_builtin_annotations(&self) -> impl Iterator<Item = CompletionItem> {
         BUILTIN_ANNOTATION_COMPLETIONS.iter().cloned()
     }
 
     // Validate document and send diagnostics
     async fn validate_document(&self, uri: &Url) {
-        let res = self.parse_document(uri);
-        let document = match res {
-            Some(doc) => doc,
+        let text = match self.get_document_text(uri) {
+            Some(t) => t,
             None => {
                 self.client
                     .show_message(
@@ -85,18 +72,12 @@ impl<'src> Backend<'src> {
                 return;
             }
         };
-        let text = document.0;
-        let tokens = document.1;
-        let parse_result = document.2;
-        let ast = parse_result.0;
-        let errors = parse_result.1;
 
-        if errors.len() > 0 {
-            let diagnostics = errors
+        let make_diagnostics = |errors: &[ParseError<'_>]| -> Vec<Diagnostic> {
+            errors
                 .iter()
                 .map(|err| {
-                    let start_pos = token_to_editor_location(err.location);
-                    // For end position, add the length of the token
+                    let start_pos = token_to_editor_location(&err.location);
                     let end_pos = Position {
                         line: start_pos.line,
                         character: start_pos.character + err.location.v.len() as u32,
@@ -113,16 +94,28 @@ impl<'src> Backend<'src> {
                         ..Default::default()
                     }
                 })
-                .collect();
+                .collect()
+        };
 
-            self.client
-                .publish_diagnostics(uri.clone(), diagnostics, None)
-                .await;
-        }
+        let diagnostics = match Lexer::tokenize(&text) {
+            Err(e) => make_diagnostics(&[e]),
+            Ok(tokens) => {
+                let (_ast, errors) = Parser::parse(&tokens);
+                make_diagnostics(&errors)
+            }
+        };
+
+        self.client
+            .publish_diagnostics(uri.clone(), diagnostics, None)
+            .await;
     }
 
     // Find the token at a given position
-    fn find_token_at_position(&self, tokens: &[Token], position: Position) -> Option<&Token> {
+    fn find_token_at_position<'a>(
+        &self,
+        tokens: &'a [Token<'a>],
+        position: Position,
+    ) -> Option<&'a Token<'a>> {
         tokens.iter().find(|(_, data)| {
             let token_start = token_to_editor_location(data);
             let token_end = Position {
@@ -288,7 +281,7 @@ impl LanguageServer for Backend {
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri;
-        let text = Rc::new(params.text_document.text);
+        let text = Arc::new(params.text_document.text);
 
         {
             let mut documents = self.document_map.lock().unwrap();
@@ -305,33 +298,26 @@ impl LanguageServer for Backend {
             let mut documents = self.document_map.lock().unwrap();
             if let Some(doc) = documents.get_mut(&uri) {
                 for change in params.content_changes {
-                    if let Some(range) = change.range {
+                    if let Some(_range) = change.range {
                         // Would need to implement proper incremental updates
                         // For simplicity, we're replacing the entire document
-                        *doc = Rc::new(change.text);
+                        *doc = Arc::new(change.text);
                     } else {
                         // Full document update
-                        *doc = Rc::new(change.text);
+                        *doc = Arc::new(change.text);
                     }
                 }
             }
-        }
-
-        // Clear cache and revalidate
-        {
-            let mut cache = self.ast_cache.lock().unwrap();
-            cache.remove(&uri);
         }
 
         self.validate_document(&uri).await;
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
-        let mut documents = self.document_map.lock().unwrap();
-        documents.remove(&params.text_document.uri);
-
-        let mut cache = self.ast_cache.lock().unwrap();
-        cache.remove(&params.text_document.uri);
+        {
+            let mut documents = self.document_map.lock().unwrap();
+            documents.remove(&params.text_document.uri);
+        }
 
         // Clear diagnostics when document is closed
         self.client
@@ -377,14 +363,12 @@ impl LanguageServer for Backend {
         // }
 
         // Plugin-provided completions
-        completions.extend(self.plugins.iter().flat_map(|p| (p.provide)()).map(|c| {
-            CompletionItem {
-                label: c.to_string(),
-                kind: Some(CompletionItemKind::PROPERTY),
-                detail: Some("Plugin provided".to_string()),
-                ..Default::default()
-            }
-        }));
+        completions.extend(
+            self.plugins
+                .iter()
+                .filter_map(|p| p.provide_types.map(|f| f()))
+                .flatten(),
+        );
 
         Ok(Some(CompletionResponse::Array(completions)))
     }
@@ -415,11 +399,21 @@ impl LanguageServer for Backend {
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
-        // if let Some((tokens, _)) = self.parse_document(&uri) {
-        //     if let Some(token) = self.find_token_at_position(&tokens, position) {
-        //         return Ok(self.get_hover_for_token(token));
-        //     }
-        // }
+        let text = match self.get_document_text(&uri) {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+
+        let tokens = match Lexer::tokenize(&text) {
+            Ok(tokens) => tokens,
+            Err(_) => return Ok(None),
+        };
+
+        let hover = if let Some(token) = self.find_token_at_position(&tokens, position) {
+            self.get_hover_for_token(token)
+        } else {
+            None
+        };
 
         Ok(None)
     }
@@ -427,10 +421,7 @@ impl LanguageServer for Backend {
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
         let uri = params.text_document.uri;
 
-        if let Some(text) = {
-            let documents = self.document_map.lock().unwrap();
-            documents.get(&uri).cloned()
-        } {
+        if let Some(text) = self.get_document_text(&uri) {
             let formatted = format_xenomorph(&text);
 
             let edit = TextEdit {
@@ -460,22 +451,24 @@ impl LanguageServer for Backend {
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
-        let (tokens, ast) = {
-            let cache = self.ast_cache.lock().unwrap();
-            if let Some((_, cached_tokens, (ast, _))) = cache.get(&uri) {
-                (cached_tokens.clone(), ast.clone())
-            } else {
-                return Ok(None);
-            }
+        let text = match self.get_document_text(&uri) {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+
+        let tokens = match Lexer::tokenize(&text) {
+            Ok(tokens) => tokens,
+            Err(_) => return Ok(None),
         };
 
         if let Some(token) = self.find_token_at_position(&tokens, position) {
             if token.0 == TokenVariant::Identifier {
                 let searched_name = token.1.v;
+                let (ast, _errors) = Parser::parse(&tokens);
 
                 for decl in &ast {
                     match decl {
-                        Declaration::TypeDecl { name, t } => {
+                        Declaration::TypeDecl { name, .. } => {
                             if name.v == searched_name {
                                 let range = Range {
                                     start: Position {
@@ -500,6 +493,54 @@ impl LanguageServer for Backend {
         }
 
         Ok(None)
+    }
+
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> Result<Option<DocumentSymbolResponse>> {
+        let uri = params.text_document.uri;
+
+        let text = match self.get_document_text(&uri) {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+
+        let tokens = match Lexer::tokenize(&text) {
+            Ok(tokens) => tokens,
+            Err(_) => return Ok(None),
+        };
+
+        let (ast, _errors) = Parser::parse(&tokens);
+
+        #[allow(deprecated)]
+        let symbols: Vec<SymbolInformation> = ast
+            .iter()
+            .map(|decl| match decl {
+                Declaration::TypeDecl { name, .. } => SymbolInformation {
+                    name: name.v.to_string(),
+                    kind: SymbolKind::STRUCT,
+                    tags: None,
+                    deprecated: None,
+                    location: Location {
+                        uri: uri.clone(),
+                        range: Range {
+                            start: Position {
+                                line: (name.l - 1) as u32,
+                                character: (name.c - 1) as u32,
+                            },
+                            end: Position {
+                                line: (name.l - 1) as u32,
+                                character: (name.c - 1 + name.v.len()) as u32,
+                            },
+                        },
+                    },
+                    container_name: None,
+                },
+            })
+            .collect();
+
+        Ok(Some(DocumentSymbolResponse::Flat(symbols)))
     }
 }
 
@@ -544,7 +585,6 @@ async fn main() {
         client,
         plugins: load_plugins(),
         document_map: Mutex::new(HashMap::new()),
-        ast_cache: Mutex::new(HashMap::new()),
     });
 
     Server::new(stdin, stdout, socket).serve(service).await;

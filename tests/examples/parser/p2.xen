@@ -1,0 +1,15 @@
+/**
+# Doc test
+*/
+type Test = {
+    name: string,
+    code: string,
+};
+
+/**
+# Doc test
+*/
+type DocTest = {
+    description: string,
+    tests: Test[],
+};

@@ -10,7 +10,7 @@ fn main() {
     let dbg_config = &config.debug;
     if dbg_config.plugins {
         dbg!(&plugins);
-        dbg!(plugins[0].provide_types.map(|p| p()));
+        // dbg!(plugins[0].provide_types.map(|p| p()));
     }
 
     let file_path = config.workdir.join(&config.parser.path);
