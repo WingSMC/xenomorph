@@ -13,6 +13,7 @@ use tower_lsp::lsp_types::{
     TextDocumentSyncKind, TextDocumentSyncOptions, TextEdit, Url,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server};
+use xenomorph_common::semantic::XenoDefNode;
 use xenomorph_common::{
     lexer::{Lexer, Token, TokenVariant},
     parser::{Declaration, Parser},
@@ -30,12 +31,22 @@ struct Backend {
     document_map: Mutex<HashMap<Url, Arc<String>>>,
 }
 
-// Helper function to convert parser location to LSP position
-fn token_to_editor_location(location: &TokenData<'_>) -> Position {
-    // Convert from 1-based to 0-based for LSP
-    Position {
-        line: (location.l - 1) as u32,
-        character: (location.c - 1) as u32,
+impl<'src> TokenData<'src> {
+    fn to_editor_position(&self) -> Position {
+        Position {
+            line: self.1.l,
+            character: self.1.c,
+        }
+    }
+    fn to_editor_range(&self) -> Range {
+        let start = self.to_editor_position();
+        Range {
+            start,
+            end: Position {
+                line: start.line,
+                character: start.character + self.1.v.len() as u32,
+            },
+        }
     }
 }
 
@@ -49,8 +60,9 @@ impl Backend {
     fn get_builtin_types(&self) -> impl Iterator<Item = CompletionItem> + '_ {
         self.plugins
             .iter()
-            .filter_map(|p| p.provide_types.map(|p| p()))
+            .filter_map(|p| p.provide_types.map(|f| f()))
             .flatten()
+            .map(|pc| create_completion_item(pc.label, pc.detail, CompletionItemKind::CLASS))
             .chain(BUILTIN_TYPE_COMPLETIONS.iter().cloned())
     }
 
@@ -77,17 +89,17 @@ impl Backend {
             errors
                 .iter()
                 .map(|err| {
-                    let start_pos = token_to_editor_location(&err.location);
+                    let start_pos = Position {
+                        line: err.location.l,
+                        character: err.location.c,
+                    };
                     let end_pos = Position {
                         line: start_pos.line,
                         character: start_pos.character + err.location.v.len() as u32,
                     };
 
                     Diagnostic {
-                        range: Range {
-                            start: start_pos,
-                            end: end_pos,
-                        },
+                        range: err.location.to_editor_range(),
                         severity: Some(DiagnosticSeverity::ERROR),
                         message: err.message.clone(),
                         source: Some("xenomorph".to_string()),
@@ -185,7 +197,7 @@ impl Backend {
     // Provide hover information for a token
     fn get_hover_for_token(&self, token: &Token) -> Option<Hover> {
         let range = Range {
-            start: token_to_editor_location(&token.1),
+            start: token.1.to_editor_position(),
             end: Position {
                 line: token_to_editor_location(&token.1).line,
                 character: token_to_editor_location(&token.1).character + token.1.v.len() as u32,
@@ -367,7 +379,8 @@ impl LanguageServer for Backend {
             self.plugins
                 .iter()
                 .filter_map(|p| p.provide_types.map(|f| f()))
-                .flatten(),
+                .flatten()
+                .map(|pc| create_completion_item(pc.label, pc.detail, CompletionItemKind::CLASS)),
         );
 
         Ok(Some(CompletionResponse::Array(completions)))
@@ -395,27 +408,14 @@ impl LanguageServer for Backend {
         Ok(resolved)
     }
 
-    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
-        let uri = params.text_document_position_params.text_document.uri;
-        let position = params.text_document_position_params.position;
-
-        let text = match self.get_document_text(&uri) {
-            Some(t) => t,
-            None => return Ok(None),
-        };
-
-        let tokens = match Lexer::tokenize(&text) {
-            Ok(tokens) => tokens,
-            Err(_) => return Ok(None),
-        };
-
-        let hover = if let Some(token) = self.find_token_at_position(&tokens, position) {
-            self.get_hover_for_token(token)
-        } else {
-            None
-        };
-
-        Ok(None)
+    async fn hover(&self, _params: HoverParams) -> Result<Option<Hover>> {
+        Ok(Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: "Hover information is not yet implemented.".to_string(),
+            }),
+            range: None,
+        }))
     }
 
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
@@ -461,36 +461,44 @@ impl LanguageServer for Backend {
             Err(_) => return Ok(None),
         };
 
+        let (ast, _errors) = Parser::parse(&tokens);
+
+        let def_tree = XenoDefNode::ast_to_def_tree(&ast);
+        // let
+
+        /*  Decommission
+        old, unused
+
         if let Some(token) = self.find_token_at_position(&tokens, position) {
-            if token.0 == TokenVariant::Identifier {
-                let searched_name = token.1.v;
-                let (ast, _errors) = Parser::parse(&tokens);
+                    if token.0 == TokenVariant::Identifier {
+                        let searched_name = token.1.v;
+                        let (ast, _errors) = Parser::parse(&tokens);
 
-                for decl in &ast {
-                    match decl {
-                        Declaration::TypeDecl { name, .. } => {
-                            if name.v == searched_name {
-                                let range = Range {
-                                    start: Position {
-                                        line: (name.l - 1) as u32,
-                                        character: (name.c - 1) as u32,
-                                    },
-                                    end: Position {
-                                        line: (name.l - 1) as u32,
-                                        character: (name.c - 1 + name.v.len()) as u32,
-                                    },
-                                };
+                        for decl in &ast {
+                            match decl {
+                                Declaration::TypeDecl { name, .. } => {
+                                    if name.v == searched_name {
+                                        let range = Range {
+                                            start: Position {
+                                                line: name.l,
+                                                character: name.c,
+                                            },
+                                            end: Position {
+                                                line: name.l,
+                                                character: name.c + name.v.len() as u32,
+                                            },
+                                        };
 
-                                return Ok(Some(GotoDefinitionResponse::Scalar(Location {
-                                    uri: uri.clone(),
-                                    range,
-                                })));
+                                        return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                                            uri: uri.clone(),
+                                            range,
+                                        })));
+                                    }
+                                }
                             }
                         }
-                    }
-                }
-            }
-        }
+                    } /
+                }*/
 
         Ok(None)
     }
@@ -526,12 +534,12 @@ impl LanguageServer for Backend {
                         uri: uri.clone(),
                         range: Range {
                             start: Position {
-                                line: (name.l - 1) as u32,
-                                character: (name.c - 1) as u32,
+                                line: name.l,
+                                character: name.c,
                             },
                             end: Position {
-                                line: (name.l - 1) as u32,
-                                character: (name.c - 1 + name.v.len()) as u32,
+                                line: name.l,
+                                character: name.c + name.v.len() as u32,
                             },
                         },
                     },

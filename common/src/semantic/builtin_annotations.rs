@@ -5,6 +5,16 @@ pub enum XenoAnnotationKind {
     Meta,
 }
 
+pub enum XenoParameterType<'a> {
+    None,
+    Literal,
+    Expression,
+    Identifier,
+    Type,
+    Annotation,
+    List(&'a [XenoParameterType<'a>]),
+}
+
 pub struct XenoAnnotation {
     pub name: &'static str,
     pub documentation: Option<&'static str>,

@@ -11,8 +11,8 @@ static COMMENT_NOT_TERMINATED: &str = "Comment not terminated";
 #[derive(Debug, Clone)]
 pub struct LexerLocation {
     pub src_index: usize,
-    pub line: usize,
-    pub column: usize,
+    pub line: u32,
+    pub column: u32,
 }
 
 impl fmt::Display for LexerLocation {
@@ -38,8 +38,8 @@ impl<'src> Lexer<'src> {
             it: src.chars().peekable(),
             location: LexerLocation {
                 src_index: 0,
-                line: 1,
-                column: 1,
+                line: 0,
+                column: 0,
             },
         }
     }
@@ -51,7 +51,7 @@ impl<'src> Lexer<'src> {
             self.location.column += 1;
             if c == '\n' {
                 self.location.line += 1;
-                self.location.column = 1;
+                self.location.column = 0;
             }
         }
         c

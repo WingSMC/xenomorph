@@ -10,9 +10,9 @@ pub struct TokenData<'src> {
     /** The value of the token */
     pub v: &'src str,
     /** The line number of the token (0 indexed) */
-    pub l: usize,
+    pub l: u32,
     /** The column number of the token (0 indexed) */
-    pub c: usize,
+    pub c: u32,
 }
 
 #[derive(Clone, Debug)]

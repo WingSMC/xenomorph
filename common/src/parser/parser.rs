@@ -123,7 +123,7 @@ impl<'src> Parser<'src> {
             }
         };
 
-        self.expect(TokenVariant::Semicolon);
+        self.expect(TokenVariant::Semicolon)?;
 
         Ok(dec)
     }
@@ -132,7 +132,7 @@ impl<'src> Parser<'src> {
         docs: Option<&'src str>,
     ) -> Result<Declaration<'src>, Vec<ParseError<'src>>> {
         let name = self.expect(TokenVariant::Identifier)?;
-        self.expect(TokenVariant::Eq);
+        self.expect(TokenVariant::Eq)?;
         let t = self.parse_anonym_type()?;
         Ok(Declaration::TypeDecl { name, t, docs })
     }

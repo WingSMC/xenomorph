@@ -1,7 +1,13 @@
 use crate::{config::Config, parser::XenoAst};
 use libloading::{Library, Symbol};
 use std::path::{Path, PathBuf};
-use tower_lsp::lsp_types::CompletionItem;
+
+#[derive(Debug, Clone)]
+pub struct PluginCompletion {
+    pub label: &'static str,
+    pub detail: Option<&'static str>,
+    pub documentation: Option<&'static str>,
+}
 
 #[derive(Debug)]
 pub struct XenoPlugin<'a> {
@@ -9,8 +15,8 @@ pub struct XenoPlugin<'a> {
     pub version: &'a str,
 
     pub initialize: Option<fn() -> ()>,
-    pub provide_types: Option<fn() -> Vec<CompletionItem>>,
-    pub provide_annotations: Option<fn() -> Vec<CompletionItem>>,
+    pub provide_types: Option<fn() -> &'static [PluginCompletion]>,
+    pub provide_annotations: Option<fn() -> &'static [PluginCompletion]>,
     // pub lint: fn(&Self) -> (),
     pub generate: Option<fn(ast: &XenoAst) -> ()>,
     // execute: fn(&str),

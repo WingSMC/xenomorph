@@ -10,6 +10,6 @@ type Test = {
 # Doc test
 */
 type DocTest = {
-    description: string,
-    tests: Test[],
+    description: string @annotaion(.0),
+    tests: Test[] TestType,
 };
