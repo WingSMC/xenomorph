@@ -9,11 +9,11 @@ use tower_lsp::lsp_types::{
     DocumentSymbolResponse, Documentation, GotoDefinitionParams, GotoDefinitionResponse, Hover,
     HoverContents, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
     InitializedParams, InsertTextFormat, Location, MarkupContent, MarkupKind, MessageType, OneOf,
-    Position, Range, ServerCapabilities, SymbolInformation, SymbolKind, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextDocumentSyncOptions, TextEdit, Url,
+    Position, Range, ServerCapabilities, SymbolInformation, SymbolKind,
+    TextDocumentContentChangeEvent, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TextDocumentSyncOptions, TextEdit, Url,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server};
-use xenomorph_common::semantic::XenoDefNode;
 use xenomorph_common::{
     lexer::{Lexer, Token, TokenVariant},
     parser::{Declaration, Parser},
@@ -87,19 +87,80 @@ impl Backend {
         BUILTIN_ANNOTATION_COMPLETIONS.iter().cloned()
     }
 
+    fn with_parsed_document<T, F>(&self, uri: &Url, f: F) -> Option<T>
+    where
+        F: for<'src> FnOnce(&Vec<Token<'src>>, &Vec<Declaration<'src>>) -> T,
+    {
+        let text = self.get_document_text(uri)?;
+        let tokens = Lexer::tokenize(text.as_str()).ok()?;
+        let (ast, _errors) = Parser::parse(&tokens);
+        Some(f(&tokens, &ast))
+    }
+
+    fn position_to_byte_offset(text: &str, position: Position) -> Option<usize> {
+        let mut line: u32 = 0;
+        let mut col_utf16: u32 = 0;
+
+        if position.line == 0 && position.character == 0 {
+            return Some(0);
+        }
+
+        for (idx, ch) in text.char_indices() {
+            if line == position.line && col_utf16 == position.character {
+                return Some(idx);
+            }
+
+            if ch == '\n' {
+                if line == position.line {
+                    return Some(idx);
+                }
+                line += 1;
+                col_utf16 = 0;
+                continue;
+            }
+
+            if line == position.line {
+                col_utf16 += ch.len_utf16() as u32;
+                if col_utf16 > position.character {
+                    return Some(idx + ch.len_utf8());
+                }
+            }
+        }
+
+        if line == position.line && col_utf16 == position.character {
+            return Some(text.len());
+        }
+
+        None
+    }
+
+    fn apply_content_change(text: &mut String, change: &TextDocumentContentChangeEvent) {
+        match change.range {
+            None => {
+                *text = change.text.clone();
+            }
+            Some(range) => {
+                let start = Self::position_to_byte_offset(text, range.start);
+                let end = Self::position_to_byte_offset(text, range.end);
+
+                match (start, end) {
+                    (Some(start), Some(end)) if start <= end && end <= text.len() => {
+                        text.replace_range(start..end, &change.text);
+                    }
+                    _ => {
+                        // Fallback to full replacement when range mapping fails.
+                        *text = change.text.clone();
+                    }
+                }
+            }
+        }
+    }
+
     // Validate document and send diagnostics
     async fn validate_document(&self, uri: &Url) {
         let text = match self.get_document_text(uri) {
             Some(t) => t,
-            None => {
-                self.client
-                    .show_message(
-                        MessageType::ERROR,
-                        "Failed to parse document for validation.",
-                    )
-                    .await;
-                return;
-            }
+            None => return,
         };
 
         let make_diagnostics = |errors: &[ParseError<'_>]| -> Vec<Diagnostic> {
@@ -136,7 +197,21 @@ impl Backend {
     ) -> Option<&'a Token<'a>> {
         tokens.iter().find(|(_, data)| {
             let token_range = data.to_editor_range();
-            token_range.start <= position && position <= token_range.end
+            token_range.start <= position && position < token_range.end
+        })
+    }
+
+    fn find_token_before_or_at_position<'a>(
+        &self,
+        tokens: &'a [Token<'a>],
+        position: Position,
+    ) -> Option<&'a Token<'a>> {
+        self.find_token_at_position(tokens, position).or_else(|| {
+            tokens.iter().rev().find(|(_, data)| {
+                let end = data.to_editor_range().end;
+                end.line < position.line
+                    || (end.line == position.line && end.character <= position.character)
+            })
         })
     }
 
@@ -187,14 +262,14 @@ impl Backend {
     ) -> Vec<CompletionItem> {
         let mut items = Vec::new();
 
-        if let Some(current_token) = self.find_token_at_position(tokens, position) {
+        if let Some(current_token) = self.find_token_before_or_at_position(tokens, position) {
             match current_token.0 {
                 TokenVariant::At => items.extend(self.get_builtin_annotations()),
                 TokenVariant::Colon => items.extend(
                     self.ast_to_definition_completions(&ast)
                         .chain(self.get_builtin_types()),
                 ),
-                TokenVariant::Eq => items.extend(vec![CompletionItem {
+                TokenVariant::Eq | TokenVariant::Semicolon => items.extend(vec![CompletionItem {
                     label: "struct".to_string(),
                     kind: Some(CompletionItemKind::SNIPPET),
                     detail: Some("Create a new struct type".to_string()),
@@ -302,18 +377,16 @@ impl LanguageServer for Backend {
 
         {
             let mut documents = self.document_map.lock().unwrap();
-            if let Some(doc) = documents.get_mut(&uri) {
-                for change in params.content_changes {
-                    if let Some(_range) = change.range {
-                        // Would need to implement proper incremental updates
-                        // For simplicity, we're replacing the entire document
-                        *doc = Arc::new(change.text);
-                    } else {
-                        // Full document update
-                        *doc = Arc::new(change.text);
-                    }
-                }
+            let mut updated = documents
+                .get(&uri)
+                .map(|d| d.as_ref().clone())
+                .unwrap_or_default();
+
+            for change in &params.content_changes {
+                Self::apply_content_change(&mut updated, change);
             }
+
+            documents.insert(uri.clone(), Arc::new(updated));
         }
 
         self.validate_document(&uri).await;
@@ -335,30 +408,13 @@ impl LanguageServer for Backend {
         let uri = params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
 
-        let mut completions: Vec<CompletionItem> = vec![
-            create_completion_item(
-                "type",
-                Some("Define a new type"),
-                CompletionItemKind::KEYWORD,
-            ),
-            create_completion_item(
-                "validator",
-                Some("Define a validator"),
-                CompletionItemKind::KEYWORD,
-            ),
-            create_completion_item("set", Some("Define a set"), CompletionItemKind::KEYWORD),
-            create_completion_item(
-                "enum",
-                Some("Define an enumeration"),
-                CompletionItemKind::KEYWORD,
-            ),
-        ];
+        let mut completions = Vec::new();
 
-        // Context-aware completions
-        // if let Some((tokens, _)) = self.parse_document(&uri) {
-        //     let context_completions = self.get_context_completions(&tokens, position);
-        //     completions.extend(context_completions);
-        // }
+        if let Some(context_completions) = self.with_parsed_document(&uri, |tokens, ast| {
+            self.get_context_completions(tokens, ast, position)
+        }) {
+            completions.extend(context_completions);
+        }
 
         // Plugin-provided completions
         completions.extend(
@@ -377,7 +433,7 @@ impl LanguageServer for Backend {
 
         if resolved.documentation.is_none() {
             let doc = match resolved.label.as_str() {
-                "type" => "Defines a new type in Xenomorph.\n\nExample:\n``````",
+                "type" => "Defines a new type in Xenomorph.\n\nExample:\n```xeno\ntype User = {\n  id: u64,\n  name: string\n};\n```",
                 "string" => "String data type.\n\nCan be constrained with regex patterns or length annotations.",
                 "u8" => "8-bit unsigned integer (0-255).\n\nCan be constrained with min/max annotations.",
                 _ => "",
@@ -394,14 +450,15 @@ impl LanguageServer for Backend {
         Ok(resolved)
     }
 
-    async fn hover(&self, _params: HoverParams) -> Result<Option<Hover>> {
-        Ok(Some(Hover {
-            contents: HoverContents::Markup(MarkupContent {
-                kind: MarkupKind::Markdown,
-                value: "Hover information is not yet implemented.".to_string(),
-            }),
-            range: None,
-        }))
+    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+
+        let hover = self.with_parsed_document(&uri, |tokens, ast| {
+            self.get_hover_for_location(position, tokens, ast)
+        });
+
+        Ok(hover.flatten())
     }
 
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
@@ -437,56 +494,15 @@ impl LanguageServer for Backend {
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
-        let text = match self.get_document_text(&uri) {
-            Some(t) => t,
-            None => return Ok(None),
-        };
+        let result = self.with_parsed_document(&uri, |tokens, ast| {
+            let definition = self.find_definition(position, tokens, ast)?;
+            Some(GotoDefinitionResponse::Scalar(Location {
+                uri: uri.clone(),
+                range: definition.to_editor_range(),
+            }))
+        });
 
-        let tokens = match Lexer::tokenize(&text) {
-            Ok(tokens) => tokens,
-            Err(_) => return Ok(None),
-        };
-
-        let (ast, _errors) = Parser::parse(&tokens);
-
-        let def_tree = XenoDefNode::ast_to_def_tree(&ast);
-        // let
-
-        /*  Decommission
-        old, unused
-
-        if let Some(token) = self.find_token_at_position(&tokens, position) {
-                    if token.0 == TokenVariant::Identifier {
-                        let searched_name = token.1.v;
-                        let (ast, _errors) = Parser::parse(&tokens);
-
-                        for decl in &ast {
-                            match decl {
-                                Declaration::TypeDecl { name, .. } => {
-                                    if name.v == searched_name {
-                                        let range = Range {
-                                            start: Position {
-                                                line: name.l,
-                                                character: name.c,
-                                            },
-                                            end: Position {
-                                                line: name.l,
-                                                character: name.c + name.v.len() as u32,
-                                            },
-                                        };
-
-                                        return Ok(Some(GotoDefinitionResponse::Scalar(Location {
-                                            uri: uri.clone(),
-                                            range,
-                                        })));
-                                    }
-                                }
-                            }
-                        }
-                    } /
-                }*/
-
-        Ok(None)
+        Ok(result.flatten())
     }
 
     async fn document_symbol(
@@ -495,46 +511,26 @@ impl LanguageServer for Backend {
     ) -> Result<Option<DocumentSymbolResponse>> {
         let uri = params.text_document.uri;
 
-        let text = match self.get_document_text(&uri) {
-            Some(t) => t,
-            None => return Ok(None),
-        };
-
-        let tokens = match Lexer::tokenize(&text) {
-            Ok(tokens) => tokens,
-            Err(_) => return Ok(None),
-        };
-
-        let (ast, _errors) = Parser::parse(&tokens);
-
-        #[allow(deprecated)]
-        let symbols: Vec<SymbolInformation> = ast
-            .iter()
-            .map(|decl| match decl {
-                Declaration::TypeDecl { name, .. } => SymbolInformation {
-                    name: name.v.to_string(),
-                    kind: SymbolKind::STRUCT,
-                    tags: None,
-                    deprecated: None,
-                    location: Location {
-                        uri: uri.clone(),
-                        range: Range {
-                            start: Position {
-                                line: name.l,
-                                character: name.c,
-                            },
-                            end: Position {
-                                line: name.l,
-                                character: name.c + name.v.len() as u32,
-                            },
+        let symbols = self.with_parsed_document(&uri, |_, ast| {
+            #[allow(deprecated)]
+            ast.iter()
+                .map(|decl| match decl {
+                    Declaration::TypeDecl { name, .. } => SymbolInformation {
+                        name: name.v.to_string(),
+                        kind: SymbolKind::STRUCT,
+                        tags: None,
+                        deprecated: None,
+                        location: Location {
+                            uri: uri.clone(),
+                            range: name.to_editor_range(),
                         },
+                        container_name: None,
                     },
-                    container_name: None,
-                },
-            })
-            .collect();
+                })
+                .collect::<Vec<SymbolInformation>>()
+        });
 
-        Ok(Some(DocumentSymbolResponse::Flat(symbols)))
+        Ok(symbols.map(DocumentSymbolResponse::Flat))
     }
 }
 

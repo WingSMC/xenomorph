@@ -3,21 +3,22 @@
 // Hover to view descriptions of existing attributes.
 // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
 {
-	"version": "0.2.0",
-	"configurations": [
-		{
-			"type": "extensionHost",
-			"request": "launch",
-			"name": "Extension",
-			"runtimeExecutable": "${execPath}",
-			"args": [
-				"--extensionDevelopmentPath=${workspaceFolder}/extensions/vscode/"
-			],
-			"outFiles": [
-				"${workspaceRoot}/extensions/vscode/client/out/**/*.js"
-			],
-			"autoAttachChildProcesses": true,
-			"preLaunchTask": "npm: build"
-		}
-	]
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "extensionHost",
+            "request": "launch",
+            "name": "Extension",
+            "runtimeExecutable": "${execPath}",
+            "args": [
+                "--extensionDevelopmentPath=${workspaceFolder}/extensions/vscode/"
+            ],
+            "outFiles": [
+                "${workspaceRoot}/extensions/vscode/client/out/**/*.js"
+            ],
+            "cwd": "${workspaceFolder}/tests/examples",
+            "autoAttachChildProcesses": true,
+            "preLaunchTask": "npm: build"
+        }
+    ]
 }
