@@ -10,15 +10,28 @@
         "name": "WingSMC",
         "url": "https://github.com/WingSMC"
     },
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/WingSMC/xenomorph.git",
+        "directory": "extensions/vscode"
+    },
     "categories": [
+        "Debuggers",
+        "Formatters",
+        "Linters",
         "Programming Languages",
-        "Snippets"
+        "Snippets",
+        "Testing"
     ],
     "scripts": {
         "build": "cd client && tsc && cd .. && nr setup:lsp",
         "setup:lsp": "cd ../../ && ((cp ./target/release/xenomorph_lsp{,.exe} ./extensions/vscode/server/ || true) 2>/dev/null) && cd ./extensions/vscode"
     },
     "main": "./client/out/extension",
+    "activationEvents": [
+        "onLanguage:xenomorph",
+        "onLanguage:xenomorph-toml"
+    ],
     "contributes": {
         "languages": [
             {
