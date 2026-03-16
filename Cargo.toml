@@ -1,5 +1,5 @@
 [workspace]
 resolver = "1"
-members = ["parser", "lsp", "common", "plugins/*"]
+members = ["parser", "lsp", "common", "plugins/*", "lsp_common"]
 
 #abi_stable?

@@ -1,27 +1,22 @@
-pub mod plugins;
 pub mod config;
+pub mod lexer;
+pub mod parser;
+pub mod plugins;
+pub mod semantic;
+pub mod utils;
 
-#[allow(dead_code)]
-pub trait XenoPlugin {
-    //fn name(&self) -> &str;
-    //fn version(&self) -> &str;
-
-    //fn initialize(&self);
-    //fn lint(&self);
-    //fn generate(&self) -> String;
-    //fn execute(&self, data: &str);
-    //fn cleanup(&self);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenData<'src> {
+    /** The value of the token */
+    pub v: &'src str,
+    /** The line number of the token (0 indexed) */
+    pub l: u32,
+    /** The column number of the token (0 indexed) */
+    pub c: u32,
 }
 
-#[derive(Debug, Clone, Copy)]
-#[repr(C)]
-pub struct Plugin<'a> {
-    pub name: &'a str,
-    pub version: &'a str,
-
-    pub provide: fn() -> Vec<&'a str>,
-    // lint: fn(),
-    // generate: fn() -> String,
-    // execute: fn(&str),
-    // cleanup: fn(),
+#[derive(Clone, Debug)]
+pub struct ParseError<'src> {
+    pub location: TokenData<'src>,
+    pub message: String,
 }

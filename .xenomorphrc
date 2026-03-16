@@ -1,5 +1,5 @@
 [parser]
-path = "./tests/examples/parser/p1.xen"
+path = "./tests/examples/parser/p2.xen"
 
 [plugins]
 path = "./target/release/"
@@ -7,5 +7,5 @@ plugins = ["test"]
 
 [debug]
 plugins = true
-tokens = false
-ast = false
+tokens = true
+ast = true

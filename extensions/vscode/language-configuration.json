@@ -1,26 +1,88 @@
 {
     "comments": {
-        "lineComment": "//"
+        "lineComment": {
+            "comment": "//",
+            "noIndent": false
+        },
+        "blockComment": [
+            {
+                "open": "/*",
+                "close": "*/"
+            }
+        ]
     },
     "brackets": [
-        ["{", "}"],
-        ["[", "]"],
-        ["(", ")"]
+        [
+            "{",
+            "}"
+        ],
+        [
+            "[",
+            "]"
+        ],
+        [
+            "(",
+            ")"
+        ]
     ],
     "autoClosingPairs": [
-        { "open": "{", "close": "}" },
-        { "open": "[", "close": "]" },
-        { "open": "(", "close": ")" },
-        { "open": "'", "close": "'", "notIn": ["string", "comment"] },
-        { "open": "\"", "close": "\"", "notIn": ["string"] },
-        { "open": "`", "close": "`", "notIn": ["string", "comment"] }
+        {
+            "open": "{",
+            "close": "}"
+        },
+        {
+            "open": "[",
+            "close": "]"
+        },
+        {
+            "open": "(",
+            "close": ")"
+        },
+        {
+            "open": "'",
+            "close": "'",
+            "notIn": [
+                "string",
+                "comment"
+            ]
+        },
+        {
+            "open": "\"",
+            "close": "\"",
+            "notIn": [
+                "string"
+            ]
+        },
+        {
+            "open": "`",
+            "close": "`",
+            "notIn": [
+                "string",
+                "comment"
+            ]
+        }
     ],
     "surroundingPairs": [
-        ["{", "}"],
-        ["[", "]"],
-        ["(", ")"],
-        ["\"", "\""],
-        ["'", "'"]
+        [
+            "{",
+            "}"
+        ],
+        [
+            "[",
+            "]"
+        ],
+        [
+            "(",
+            ")"
+        ],
+        [
+            "\"",
+            "\""
+        ],
+        [
+            "'",
+            "'"
+        ]
     ],
     "folding": {
         "markers": {

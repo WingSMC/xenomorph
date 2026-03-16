@@ -1,0 +1,12 @@
+type Color = {
+	r: u8;
+	g: u8;
+	b: u8;
+};
+
+type User = {
+	_id: u64 @SQLPrimary;
+	name: string @minlen(8);
+	age: u8 @min(13);
+	favouriteColor: Color;
+};

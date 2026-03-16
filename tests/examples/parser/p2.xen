@@ -1,0 +1,28 @@
+/**
+# Doc test
+*/
+type Test = {
+    name: string,
+    code: string,
+};
+
+/**
+Doc test
+*/
+type DocTest = {
+    description: string @annotaion(0),
+    tests: Test[] TestType
+};
+
+/**
+# Test type
+
+- Doc test
+*/
+type Color = "red" | "green" | "blue" | TT;
+type TT = {
+    name: string,
+    code: string,
+    favColor: Color,
+    other: Test @else()
+};

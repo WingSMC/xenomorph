@@ -16,7 +16,7 @@
     ],
     "scripts": {
         "build": "cd client && tsc && cd .. && nr setup:lsp",
-        "setup:lsp": "cd ../../ && (cp ./target/release/xenomorph_lsp{,.exe} ./extensions/vscode/server/ || true) && cd ./extensions/vscode"
+        "setup:lsp": "cd ../../ && ((cp ./target/release/xenomorph_lsp{,.exe} ./extensions/vscode/server/ || true) 2>/dev/null) && cd ./extensions/vscode"
     },
     "main": "./client/out/extension",
     "contributes": {
