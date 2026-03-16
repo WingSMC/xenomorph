@@ -3,7 +3,7 @@ use xenomorph_common::plugins::{PluginCompletion, XenoPlugin};
 static PROVIDED_TYPES: [PluginCompletion; 1] = [PluginCompletion {
     label: "TestType",
     detail: Some("A test type provided by the test plugin"),
-    documentation: None,
+    documentation: Some("**TestType** is a type provided by the __test plugin__ for testing purposes.\n\n- It has no special properties.\n- It is used to demonstrate how plugins can provide types to the Xenomorph ecosystem."),
 }];
 
 fn provide_types() -> &'static [PluginCompletion] {

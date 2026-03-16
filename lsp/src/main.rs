@@ -31,11 +31,15 @@ struct Backend {
     document_map: Mutex<HashMap<Url, Arc<String>>>,
 }
 
-impl<'src> TokenData<'src> {
+trait EditorPosition {
+    fn to_editor_position(&self) -> Position;
+    fn to_editor_range(&self) -> Range;
+}
+impl<'src> EditorPosition for TokenData<'src> {
     fn to_editor_position(&self) -> Position {
         Position {
-            line: self.1.l,
-            character: self.1.c,
+            line: self.l,
+            character: self.c,
         }
     }
     fn to_editor_range(&self) -> Range {
@@ -44,7 +48,7 @@ impl<'src> TokenData<'src> {
             start,
             end: Position {
                 line: start.line,
-                character: start.character + self.1.v.len() as u32,
+                character: start.character + self.v.len() as u32,
             },
         }
     }
@@ -55,6 +59,19 @@ impl Backend {
     fn get_document_text(&self, uri: &Url) -> Option<Arc<String>> {
         let documents = self.document_map.lock().ok()?;
         documents.get(uri).cloned()
+    }
+
+    fn ast_to_definition_completions<'src>(
+        &self,
+        ast: &'src Vec<Declaration>,
+    ) -> impl Iterator<Item = CompletionItem> + 'src {
+        ast.iter().filter_map(|decl| match decl {
+            Declaration::TypeDecl { name, docs, .. } => Some(create_completion_item(
+                name.v,
+                *docs,
+                CompletionItemKind::CLASS,
+            )),
+        })
     }
 
     fn get_builtin_types(&self) -> impl Iterator<Item = CompletionItem> + '_ {
@@ -88,23 +105,12 @@ impl Backend {
         let make_diagnostics = |errors: &[ParseError<'_>]| -> Vec<Diagnostic> {
             errors
                 .iter()
-                .map(|err| {
-                    let start_pos = Position {
-                        line: err.location.l,
-                        character: err.location.c,
-                    };
-                    let end_pos = Position {
-                        line: start_pos.line,
-                        character: start_pos.character + err.location.v.len() as u32,
-                    };
-
-                    Diagnostic {
-                        range: err.location.to_editor_range(),
-                        severity: Some(DiagnosticSeverity::ERROR),
-                        message: err.message.clone(),
-                        source: Some("xenomorph".to_string()),
-                        ..Default::default()
-                    }
+                .map(|err| Diagnostic {
+                    range: err.location.to_editor_range(),
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    message: err.message.clone(),
+                    source: Some("xenomorph".to_string()),
+                    ..Default::default()
                 })
                 .collect()
         };
@@ -122,72 +128,81 @@ impl Backend {
             .await;
     }
 
-    // Find the token at a given position
+    /// Find the token at a given position
     fn find_token_at_position<'a>(
         &self,
         tokens: &'a [Token<'a>],
         position: Position,
     ) -> Option<&'a Token<'a>> {
         tokens.iter().find(|(_, data)| {
-            let token_start = token_to_editor_location(data);
-            let token_end = Position {
-                line: token_start.line,
-                character: token_start.character + data.v.len() as u32,
-            };
-
-            position >= token_start && position <= token_end
+            let token_range = data.to_editor_range();
+            token_range.start <= position && position <= token_range.end
         })
     }
 
-    // Get completions based on context
-    fn get_context_completions(&self, tokens: &[Token], position: Position) -> Vec<CompletionItem> {
+    fn find_declaration<'src>(
+        &self,
+        location: Position,
+        tokens: &'src [Token<'src>],
+        ast: &'src Vec<Declaration<'src>>,
+    ) -> Option<&'src Declaration<'src>> {
+        let token = self.find_token_at_position(tokens, location)?;
+
+        if token.0 != TokenVariant::Identifier {
+            return None;
+        }
+
+        let searched_name = token.1.v;
+        for decl in ast {
+            match decl {
+                Declaration::TypeDecl { name, .. } => {
+                    if name.v == searched_name {
+                        return Some(decl);
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    fn find_definition<'src>(
+        &self,
+        location: Position,
+        tokens: &'src [Token<'src>],
+        ast: &'src Vec<Declaration<'src>>,
+    ) -> Option<&'src TokenData<'src>> {
+        let decl = self.find_declaration(location, tokens, ast)?;
+        return Some(match decl {
+            Declaration::TypeDecl { name, .. } => name,
+        });
+    }
+
+    /// Get completions based on context
+    fn get_context_completions(
+        &self,
+        tokens: &[Token],
+        ast: &Vec<Declaration>,
+        position: Position,
+    ) -> Vec<CompletionItem> {
         let mut items = Vec::new();
 
-        // Find the current token
         if let Some(current_token) = self.find_token_at_position(tokens, position) {
             match current_token.0 {
-                TokenVariant::At => {
-                    // After @ suggest annotations
-                    items.extend(self.get_builtin_annotations());
-                }
-                TokenVariant::Colon => {
-                    // After colon, suggest types
-                    items.extend(vec![
-                        // create_completion_item(
-                        //     "string",
-                        //     Some("String type"),
-                        //     CompletionItemKind::TYPE_PARAMETER,
-                        // ),
-                    ]);
-                }
-                TokenVariant::LCurly => {
-                    // Inside object definition, suggest common property names
-                    items.extend(vec![
-                        create_completion_item(
-                            "id",
-                            Some("Identifier property"),
-                            CompletionItemKind::PROPERTY,
-                        ),
-                        create_completion_item(
-                            "name",
-                            Some("Name property"),
-                            CompletionItemKind::PROPERTY,
-                        ),
-                        create_completion_item(
-                            "type",
-                            Some("Type property"),
-                            CompletionItemKind::PROPERTY,
-                        ),
-                        create_completion_item(
-                            "value",
-                            Some("Value property"),
-                            CompletionItemKind::PROPERTY,
-                        ),
-                    ]);
-                }
-                _ => {
-                    // Default completions
-                }
+                TokenVariant::At => items.extend(self.get_builtin_annotations()),
+                TokenVariant::Colon => items.extend(
+                    self.ast_to_definition_completions(&ast)
+                        .chain(self.get_builtin_types()),
+                ),
+                TokenVariant::Eq => items.extend(vec![CompletionItem {
+                    label: "struct".to_string(),
+                    kind: Some(CompletionItemKind::SNIPPET),
+                    detail: Some("Create a new struct type".to_string()),
+                    insert_text: Some("{\n\t${1:property}: ${2:type},\n\t$0\n}".to_string()),
+                    insert_text_format: Some(InsertTextFormat::SNIPPET),
+                    ..Default::default()
+                }]),
+                _ => {}
             }
         }
 
@@ -195,46 +210,25 @@ impl Backend {
     }
 
     // Provide hover information for a token
-    fn get_hover_for_token(&self, token: &Token) -> Option<Hover> {
-        let range = Range {
-            start: token.1.to_editor_position(),
-            end: Position {
-                line: token_to_editor_location(&token.1).line,
-                character: token_to_editor_location(&token.1).character + token.1.v.len() as u32,
-            },
-        };
+    fn get_hover_for_location(
+        &self,
+        location: Position,
+        tokens: &[Token],
+        ast: &Vec<Declaration>,
+    ) -> Option<Hover> {
+        let token = self.find_token_at_position(tokens, location)?;
 
-        let contents = match token.0 {
-            TokenVariant::Type => {
-                format!("**type**\n\nDefines a new type in Xenomorph.")
+        if token.0 != TokenVariant::Identifier {
+            return None;
+        }
+
+        let searched_name = token.1.v;
+        let def = self.find_declaration(location, tokens, ast)?;
+        let contents = match def {
+            Declaration::TypeDecl { name, docs, .. } if name.v == searched_name => {
+                format!("**{}**\n\n{}", name.v, docs.unwrap_or(""))
             }
-            TokenVariant::Set => {
-                format!("**set**\n\nDefines a set type that can contain elements of other types.")
-            }
-            TokenVariant::Enum => {
-                format!("**enum**\n\nDefines an enumeration of possible values.")
-            }
-            TokenVariant::At => {
-                format!("**@**\n\nIndicates the start of an annotation that provides metadata or validation rules.")
-            }
-            TokenVariant::Identifier => {
-                if token.1.v.starts_with('@') {
-                    // This is an annotation
-                    let annotation = &token.1.v[1..]; // Remove the @ prefix
-                    match annotation {
-                        "min" => format!("**@min**\n\nSpecifies a minimum value for numeric types."),
-                        "max" => format!("**@max**\n\nSpecifies a maximum value for numeric types."),
-                        "len" => format!("**@len**\n\nSpecifies a length or length range for strings or arrays."),
-                        "if" => format!("**@if**\n\nConditional validation that applies only when the condition is met."),
-                        "elseif" => format!("**@elesif**\n\nConditional validation that applies only when the preceeding conditions aren't met and this condition is met."),
-                        "else" => format!("**@else**\n\nAlternative validation when preceeding conditions are not met."),
-                        _ => format!("**@{}**\n\nAnnotation that provides metadata or validation rules.", annotation),
-                    }
-                } else {
-                    format!("**{}**\n\nIdentifier", token.1.v)
-                }
-            }
-            _ => return None, // No hover for other token types
+            _ => return None,
         };
 
         Some(Hover {
@@ -242,7 +236,7 @@ impl Backend {
                 kind: MarkupKind::Markdown,
                 value: contents,
             }),
-            range: Some(range),
+            range: Some(token.1.to_editor_range()),
         })
     }
 }
@@ -255,7 +249,7 @@ impl LanguageServer for Backend {
                 text_document_sync: Some(TextDocumentSyncCapability::Options(
                     TextDocumentSyncOptions {
                         open_close: Some(true),
-                        change: Some(TextDocumentSyncKind::INCREMENTAL),
+                        change: Some(TextDocumentSyncKind::FULL),
                         ..Default::default()
                     },
                 )),
@@ -358,14 +352,6 @@ impl LanguageServer for Backend {
                 Some("Define an enumeration"),
                 CompletionItemKind::KEYWORD,
             ),
-            CompletionItem {
-                label: "object literal".to_string(),
-                kind: Some(CompletionItemKind::SNIPPET),
-                detail: Some("Create a new object type".to_string()),
-                insert_text: Some("{\n\t${1:property}: ${2:type},\n\t$0\n}".to_string()),
-                insert_text_format: Some(InsertTextFormat::SNIPPET),
-                ..Default::default()
-            },
         ];
 
         // Context-aware completions

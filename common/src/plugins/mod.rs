@@ -17,8 +17,8 @@ pub struct XenoPlugin<'a> {
     pub initialize: Option<fn() -> ()>,
     pub provide_types: Option<fn() -> &'static [PluginCompletion]>,
     pub provide_annotations: Option<fn() -> &'static [PluginCompletion]>,
-    // pub lint: fn(&Self) -> (),
     pub generate: Option<fn(ast: &XenoAst) -> ()>,
+    // pub lint: fn(&Self) -> (),
     // execute: fn(&str),
     // cleanup: fn(),
 

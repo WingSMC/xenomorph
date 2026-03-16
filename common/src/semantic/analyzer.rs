@@ -23,7 +23,7 @@ pub fn find_token_under_cursor<'src>(
 ) -> Option<&'src TokenData<'src>> {
     for declaration in ast {
         match declaration {
-            Declaration::TypeDecl { name, t, .. } => {
+            Declaration::TypeDecl { name: _, t: _, .. } => {
                 return None;
             }
         }
