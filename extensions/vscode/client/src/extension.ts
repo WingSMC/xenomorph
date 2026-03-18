@@ -1,22 +1,21 @@
-import { join } from 'node:path'
-import { ExtensionContext } from 'vscode'
+import { join } from 'node:path';
+import { ExtensionContext } from 'vscode';
 import {
     Executable,
     LanguageClient,
     LanguageClientOptions,
-} from 'vscode-languageclient/node'
+} from 'vscode-languageclient/node';
 
 function createServerOptions(context: ExtensionContext): {
-    run: Executable
-    debug: Executable
+    run: Executable;
+    debug: Executable;
 } {
-    const command = context.asAbsolutePath(join('server', 'xenomorph_lsp'))
-    const options: Executable['options'] = {}
-    const args = ['--plugins', '../../../target/debug/']
+    const command = context.asAbsolutePath(join('server', 'xenomorph_lsp'));
+    const options: Executable['options'] = {};
     return {
-        run: { command, options, args },
-        debug: { command, options, args },
-    }
+        run: { command, options },
+        debug: { command, options },
+    };
 }
 
 const clientOptions: LanguageClientOptions = {
@@ -24,20 +23,20 @@ const clientOptions: LanguageClientOptions = {
     //synchronize: {
     //    fileEvents: workspace.createFileSystemWatcher('**/.clientrc'),
     //},
-}
+};
 
-let client: LanguageClient | undefined
+let client: LanguageClient | undefined;
 export function activate(context: ExtensionContext) {
     client = new LanguageClient(
         'xenomorph_language_client',
         'Xenomorph Language Client',
         createServerOptions(context),
-        clientOptions
-    )
+        clientOptions,
+    );
 
-    client.start()
+    client.start();
 }
 
 export function deactivate() {
-    return client?.stop()
+    return client?.stop();
 }

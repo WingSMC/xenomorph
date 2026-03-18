@@ -1,9 +1,10 @@
 {
-	"name": "xenomorph",
-	"scripts": {
-		"build": "nr build:xeno && nr build:extensions",
-		"build:xeno": "cargo build --release",
-		"build:extensions": "cd ./extensions/vscode && nr build && cd ../..",
-		"run:parser": "cargo run --release --package xenomorph_parser"
-	}
+    "name": "xenomorph",
+    "scripts": {
+        "build": "nr build:xeno && nr build:extensions",
+        "build:xeno": "cargo build --release",
+        "build:extensions": "cd ./extensions/vscode && nr build && cd ../..",
+        "run:parser": "cargo run --release --package xenomorph_parser",
+        "setup": "cd ./extensions/vscode/client && ni"
+    }
 }
