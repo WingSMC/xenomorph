@@ -5,6 +5,7 @@
         "build:xeno": "cargo build --release",
         "build:extensions": "cd ./extensions/vscode && nr build && cd ../..",
         "run:parser": "cargo run --release --package xenomorph_parser",
-        "setup": "cd ./extensions/vscode/client && ni"
+        "install:deps": "cd ./extensions/vscode/client && ni",
+        "setup:once": "npm install -g pnpm @antfu/ni"
     }
 }

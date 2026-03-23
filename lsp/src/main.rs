@@ -1,18 +1,9 @@
+use crate::formatter::format_xenomorph;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use tower_lsp::jsonrpc::Result;
-use tower_lsp::lsp_types::{
-    CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse,
-    Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DocumentFormattingParams, DocumentSymbolParams,
-    DocumentSymbolResponse, Documentation, GotoDefinitionParams, GotoDefinitionResponse, Hover,
-    HoverContents, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
-    InitializedParams, InsertTextFormat, Location, MarkupContent, MarkupKind, MessageType, OneOf,
-    Position, Range, ServerCapabilities, SymbolInformation, SymbolKind,
-    TextDocumentContentChangeEvent, TextDocumentSyncCapability, TextDocumentSyncKind,
-    TextDocumentSyncOptions, TextEdit, Url,
-};
+use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 use xenomorph_common::{
     lexer::{Lexer, Token, TokenVariant},
@@ -23,6 +14,8 @@ use xenomorph_common::{
 use xenomorph_lsp_common::types::{
     create_completion_item, BUILTIN_ANNOTATION_COMPLETIONS, BUILTIN_TYPE_COMPLETIONS,
 };
+
+mod formatter;
 
 #[derive(Debug)]
 struct Backend {
@@ -83,10 +76,23 @@ impl Backend {
             .chain(BUILTIN_TYPE_COMPLETIONS.iter().cloned())
     }
 
-    fn get_builtin_annotations(&self) -> impl Iterator<Item = CompletionItem> {
-        BUILTIN_ANNOTATION_COMPLETIONS.iter().cloned()
+    fn get_builtin_annotations(&self) -> impl Iterator<Item = CompletionItem> + '_ {
+        self.plugins
+            .iter()
+            .filter_map(|p| p.provide_annotations.map(|f| f()))
+            .flatten()
+            .map(|pc| create_completion_item(pc.label, pc.detail, CompletionItemKind::FUNCTION))
+            .chain(BUILTIN_ANNOTATION_COMPLETIONS.iter().cloned())
     }
 
+    fn with_tokens<T, F>(&self, uri: &Url, f: F) -> Option<T>
+    where
+        F: for<'src> FnOnce(&Vec<Token<'src>>) -> T,
+    {
+        let text = self.get_document_text(uri)?;
+        let tokens = Lexer::tokenize(text.as_str()).ok()?;
+        Some(f(&tokens))
+    }
     fn with_parsed_document<T, F>(&self, uri: &Url, f: F) -> Option<T>
     where
         F: for<'src> FnOnce(&Vec<Token<'src>>, &Vec<Declaration<'src>>) -> T,
@@ -265,7 +271,7 @@ impl Backend {
         if let Some(current_token) = self.find_token_before_or_at_position(tokens, position) {
             match current_token.0 {
                 TokenVariant::At => items.extend(self.get_builtin_annotations()),
-                TokenVariant::Colon => items.extend(
+                TokenVariant::Or => items.extend(
                     self.ast_to_definition_completions(&ast)
                         .chain(self.get_builtin_types()),
                 ),
@@ -298,12 +304,29 @@ impl Backend {
         }
 
         let searched_name = token.1.v;
-        let def = self.find_declaration(location, tokens, ast)?;
-        let contents = match def {
+        let def_opt = self.find_declaration(location, tokens, ast);
+
+        let contents = match def_opt {
+            Some(d) => match d {
             Declaration::TypeDecl { name, docs, .. } if name.v == searched_name => {
                 format!("**{}**\n\n{}", name.v, docs.unwrap_or(""))
             }
             _ => return None,
+            },
+            None => {
+                let builtin_info = self
+                    .get_builtin_types()
+                    .find(|item| item.label == searched_name)
+                    .or_else(|| {
+                        self.get_builtin_annotations()
+                            .find(|item| item.label == searched_name)
+                    });
+
+                match builtin_info {
+                    Some(i) => format!("**{}**\n\n{}", i.label, i.detail.unwrap_or_default()),
+                    None => return None,
+                }
+            }
         };
 
         Some(Hover {
@@ -331,10 +354,12 @@ impl LanguageServer for Backend {
                 completion_provider: Some(CompletionOptions {
                     resolve_provider: Some(true),
                     trigger_characters: Some(vec![
+                        "|".to_string(),
                         ".".to_string(),
                         ":".to_string(),
                         "@".to_string(),
                         "{".to_string(),
+                        " ".to_string(),
                     ]),
                     all_commit_characters: None,
                     work_done_progress_options: Default::default(),
@@ -344,6 +369,7 @@ impl LanguageServer for Backend {
                 document_formatting_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                references_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
             ..Default::default()
@@ -416,38 +442,11 @@ impl LanguageServer for Backend {
             completions.extend(context_completions);
         }
 
-        // Plugin-provided completions
-        completions.extend(
-            self.plugins
-                .iter()
-                .filter_map(|p| p.provide_types.map(|f| f()))
-                .flatten()
-                .map(|pc| create_completion_item(pc.label, pc.detail, CompletionItemKind::CLASS)),
-        );
-
         Ok(Some(CompletionResponse::Array(completions)))
     }
 
     async fn completion_resolve(&self, item: CompletionItem) -> Result<CompletionItem> {
-        let mut resolved = item.clone();
-
-        if resolved.documentation.is_none() {
-            let doc = match resolved.label.as_str() {
-                "type" => "Defines a new type in Xenomorph.\n\nExample:\n```xeno\ntype User = {\n  id: u64,\n  name: string\n};\n```",
-                "string" => "String data type.\n\nCan be constrained with regex patterns or length annotations.",
-                "u8" => "8-bit unsigned integer (0-255).\n\nCan be constrained with min/max annotations.",
-                _ => "",
-            };
-
-            if !doc.is_empty() {
-                resolved.documentation = Some(Documentation::MarkupContent(MarkupContent {
-                    kind: MarkupKind::Markdown,
-                    value: doc.to_string(),
-                }));
-            }
-        }
-
-        Ok(resolved)
+        Ok(item)
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
@@ -505,6 +504,35 @@ impl LanguageServer for Backend {
         Ok(result.flatten())
     }
 
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+
+        let result = self
+            .with_tokens(&uri, |tokens| {
+                let token = self.find_token_at_position(tokens, position)?;
+
+                Some(
+                    tokens
+                        .iter()
+                        .filter_map(|t| {
+                            if t.0 == TokenVariant::Identifier && t.1.v == token.1.v {
+                                Some(Location {
+                                    uri: uri.clone(),
+                                    range: t.1.to_editor_range(),
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<Location>>(),
+                )
+            })
+            .flatten();
+
+        Ok(result)
+    }
+
     async fn document_symbol(
         &self,
         params: DocumentSymbolParams,
@@ -532,38 +560,6 @@ impl LanguageServer for Backend {
 
         Ok(symbols.map(DocumentSymbolResponse::Flat))
     }
-}
-
-// TODO: implement a more sophisticated formatter
-fn format_xenomorph(text: &str) -> String {
-    let mut result = String::new();
-    let mut indent_level: u32 = 0;
-
-    for line in text.lines() {
-        let trimmed = line.trim();
-
-        if trimmed.is_empty() {
-            result.push('\n');
-            continue;
-        }
-
-        if trimmed.starts_with('}') || trimmed.starts_with(')') || trimmed.starts_with(']') {
-            indent_level = indent_level.saturating_sub(1);
-        }
-
-        for _ in 0..indent_level {
-            result.push_str("  "); // 2 spaces per indent level
-        }
-
-        result.push_str(trimmed);
-        result.push('\n');
-
-        if trimmed.ends_with('{') || trimmed.ends_with('(') || trimmed.ends_with('[') {
-            indent_level += 1;
-        }
-    }
-
-    result
 }
 
 #[tokio::main]

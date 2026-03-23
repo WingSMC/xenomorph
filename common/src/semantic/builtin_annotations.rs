@@ -39,6 +39,20 @@ pub static MAX: XenoAnnotation = XenoAnnotation {
     params: Some(&VALUE_PARAM),
 };
 
+pub static GT: XenoAnnotation = XenoAnnotation {
+    name: "gt",
+    documentation: Some("Specifies that some numeric value must be greater than the parameter."),
+    kind: XenoAnnotationKind::Validation,
+    params: Some(&VALUE_PARAM),
+};
+
+pub static LT: XenoAnnotation = XenoAnnotation {
+    name: "lt",
+    documentation: Some("Specifies that some numeric value must be less than the parameter."),
+    kind: XenoAnnotationKind::Validation,
+    params: Some(&VALUE_PARAM),
+};
+
 pub static LEN: XenoAnnotation = XenoAnnotation {
     name: "len",
     documentation: Some("Specifies the exact length for a string or list type."),
@@ -83,5 +97,6 @@ pub static ELSE: XenoAnnotation = XenoAnnotation {
     params: Some(&VALUE_PARAM),
 };
 
-pub static BUILTIN_ANNOTATIONS: [&'static XenoAnnotation; 8] =
-    [&MIN, &MAX, &LEN, &MINLEN, &MAXLEN, &IF, &ELSEIF, &ELSE];
+pub static BUILTIN_ANNOTATIONS: [&'static XenoAnnotation; 10] = [
+    &MIN, &MAX, &GT, &LT, &LEN, &MINLEN, &MAXLEN, &IF, &ELSEIF, &ELSE,
+];
