@@ -16,7 +16,7 @@ pub struct TokenData<'src> {
 }
 
 #[derive(Clone, Debug)]
-pub struct ParseError<'src> {
+pub struct XenoError<'src> {
     pub location: TokenData<'src>,
     pub message: String,
 }

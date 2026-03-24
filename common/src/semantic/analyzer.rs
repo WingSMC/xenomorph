@@ -2,33 +2,21 @@ use std::collections::HashMap;
 
 use crate::{
     parser::{Declaration, Expr},
-    TokenData,
+    TokenData, XenoError,
 };
 
-pub fn analyze<'src>(ast: &Vec<Declaration<'src>>) {
+pub fn analyze<'src>(ast: &Vec<Declaration<'src>>) -> Vec<XenoError<'src>> {
+    let mut errors = Vec::new();
+
     for declaration in ast {
         match declaration {
             Declaration::TypeDecl { t, .. } => {
-                validate_annotations(&t);
-                //print!("{:?}", t)
+                validate_annotations(t, &mut errors);
             }
         }
     }
-}
 
-pub fn find_token_under_cursor<'src>(
-    _line: u32,
-    _column: u32,
-    ast: &'src Vec<Declaration>,
-) -> Option<&'src TokenData<'src>> {
-    for declaration in ast {
-        match declaration {
-            Declaration::TypeDecl { name: _, t: _, .. } => {
-                return None;
-            }
-        }
-    }
-    None
+    errors
 }
 
 type XenoDefTree<'src> = HashMap<&'src str, XenoDefNode<'src>>;
@@ -81,32 +69,55 @@ impl XenoDefNode<'_> {
     }
 }
 
-fn validate_annotations(exprs: &Vec<Expr>) {
-    let mut valid_context = false; // Tracks if @if or @elseif has been encountered.
+/// Tracks the state of an @if / @elseif / @else annotation chain.
+#[derive(Clone, Copy, PartialEq)]
+enum IfChainState {
+    /// No active chain — we are outside any @if block.
+    None,
+    /// Just saw @if (or @elseif) — can be followed by @elseif or @else.
+    AfterIf,
+    /// Just saw @else — chain is closed, nothing else may follow.
+    AfterElse,
+}
+
+fn validate_annotations<'src>(exprs: &Vec<Expr<'src>>, errors: &mut Vec<XenoError<'src>>) {
+    let mut chain = IfChainState::None;
 
     for expr in exprs {
         match expr {
-            Expr::Annotation(id, _) => {
-                match id.v {
-                    "if" => {
-                        valid_context = true; // Start of a valid context.
-                    }
-                    "elseif" | "else" => {
-                        if !valid_context {
-                            panic!(
-                                "Semantic error: '{}' annotation must follow an '@if' or '@elseif'",
-                                id.v
-                            );
-                        }
-                    }
-                    _ => {
-                        valid_context = false;
-                    }
+            Expr::Struct(fields) => {
+                for field in fields {
+                    validate_annotations(&field.1, errors);
                 }
             }
-            _ => {
-                valid_context = false;
+            Expr::Annotation(id, _) => {
+                match id.v {
+                    "if" => chain = IfChainState::AfterIf,
+                    "elseif" => match chain {
+                        IfChainState::AfterIf => {}
+                        IfChainState::None | IfChainState::AfterElse => {
+                            errors.push(XenoError {
+                                location: (*id).clone(),
+                                message: "'@elseif' must follow an '@if' or another '@elseif'."
+                                    .to_string(),
+                            });
+                            chain = IfChainState::None; // Chain is broken; reset
+                        }
+                    },
+                    "else" => match chain {
+                        IfChainState::AfterIf => chain = IfChainState::AfterElse,
+                        IfChainState::None | IfChainState::AfterElse => {
+                            errors.push(XenoError {
+                                location: (*id).clone(),
+                                message: "'@else' must follow an '@if' or '@elseif'.".to_string(),
+                            });
+                            chain = IfChainState::None; // Chain is broken; reset
+                        }
+                    },
+                    _ => chain = IfChainState::None,
+                }
             }
+            _ => chain = IfChainState::None,
         }
     }
 }

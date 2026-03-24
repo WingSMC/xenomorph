@@ -9,7 +9,7 @@ use xenomorph_common::{
     lexer::{Lexer, Token, TokenVariant},
     parser::{Declaration, Parser},
     plugins::{load_plugins, XenoPlugin},
-    ParseError, TokenData,
+    TokenData, XenoError,
 };
 use xenomorph_lsp_common::types::{
     create_completion_item, BUILTIN_ANNOTATION_COMPLETIONS, BUILTIN_TYPE_COMPLETIONS,
@@ -169,7 +169,7 @@ impl Backend {
             None => return,
         };
 
-        let make_diagnostics = |errors: &[ParseError<'_>]| -> Vec<Diagnostic> {
+        let make_diagnostics = |errors: &[XenoError<'_>]| -> Vec<Diagnostic> {
             errors
                 .iter()
                 .map(|err| Diagnostic {
@@ -185,8 +185,9 @@ impl Backend {
         let diagnostics = match Lexer::tokenize(&text) {
             Err(e) => make_diagnostics(&[e]),
             Ok(tokens) => {
-                let (_ast, errors) = Parser::parse(&tokens);
-                make_diagnostics(&errors)
+                let (ast, errors) = Parser::parse(&tokens);
+                let semantic_errors = xenomorph_common::semantic::analyze(&ast);
+                make_diagnostics(&[errors, semantic_errors].concat())
             }
         };
 

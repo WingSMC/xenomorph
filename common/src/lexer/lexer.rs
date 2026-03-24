@@ -1,7 +1,7 @@
 use std::{fmt, iter::Peekable, str::Chars};
 
 use crate::lexer::{Token, TokenVariant, Tokens};
-use crate::{ParseError, TokenData};
+use crate::{TokenData, XenoError};
 
 static NOT_RECOGNIZED: &str = "Token not recognized";
 static MALFORMED_REGEX: &str = "Malformed regex";
@@ -103,10 +103,10 @@ impl<'src> Lexer<'src> {
         }
     }
 
-    pub fn tokenize(src: &'src str) -> Result<Tokens<'src>, ParseError<'src>> {
+    pub fn tokenize(src: &'src str) -> Result<Tokens<'src>, XenoError<'src>> {
         Self::new(src)._tokenize()
     }
-    fn _tokenize(mut self) -> Result<Tokens<'src>, ParseError<'src>> {
+    fn _tokenize(mut self) -> Result<Tokens<'src>, XenoError<'src>> {
         let mut tokens: Tokens<'src> = vec![];
         while let Some(c) = self.peek() {
             let token = match c {
@@ -144,7 +144,7 @@ impl<'src> Lexer<'src> {
                 '!' => self.consume_not_or_neq(),
                 '\\' => (TokenVariant::Backslash, self.single_char_token_next()),
                 _ => {
-                    return Err(ParseError {
+                    return Err(XenoError {
                         message: NOT_RECOGNIZED.to_string(),
                         location: self.token_single_at_lexer(),
                     });
@@ -188,7 +188,7 @@ impl<'src> Lexer<'src> {
         }
     }
 
-    fn consume_string(&mut self) -> Result<Token<'src>, ParseError<'src>> {
+    fn consume_string(&mut self) -> Result<Token<'src>, XenoError<'src>> {
         let initial_loc = self.location_snapshot();
         self.next();
 
@@ -204,7 +204,7 @@ impl<'src> Lexer<'src> {
             }
         }
 
-        Err(ParseError {
+        Err(XenoError {
             message: STRING_TERMINATION_ERROR.to_string(),
             location: self.token_from(&initial_loc),
         })
@@ -290,7 +290,7 @@ impl<'src> Lexer<'src> {
         )
     }
 
-    fn consume_comment_or_regex(&mut self) -> Result<Option<Token<'src>>, ParseError<'src>> {
+    fn consume_comment_or_regex(&mut self) -> Result<Option<Token<'src>>, XenoError<'src>> {
         let initial_loc = self.location_snapshot();
         self.next(); // skip first '/'
 
@@ -301,7 +301,7 @@ impl<'src> Lexer<'src> {
         }
     }
 
-    fn skip_line_comment(&mut self) -> Result<Option<Token<'src>>, ParseError<'src>> {
+    fn skip_line_comment(&mut self) -> Result<Option<Token<'src>>, XenoError<'src>> {
         self.next(); // skip second '/'
         while let Some(&c) = self.peek() {
             self.next(); // skip til after comment
@@ -316,7 +316,7 @@ impl<'src> Lexer<'src> {
     fn consume_doc_comment(
         &mut self,
         start: LexerLocation,
-    ) -> Result<Option<Token<'src>>, ParseError<'src>> {
+    ) -> Result<Option<Token<'src>>, XenoError<'src>> {
         self.next(); // skip '*'
 
         if let Some('*') = self.next() {
@@ -351,7 +351,7 @@ impl<'src> Lexer<'src> {
             }
         }
 
-        return Err(ParseError {
+        return Err(XenoError {
             message: COMMENT_NOT_TERMINATED.to_string(),
             location: self.token_from_but_not_including_lexer(&start),
         });
@@ -360,7 +360,7 @@ impl<'src> Lexer<'src> {
     fn consume_regex(
         &mut self,
         start: LexerLocation,
-    ) -> Result<Option<Token<'src>>, ParseError<'src>> {
+    ) -> Result<Option<Token<'src>>, XenoError<'src>> {
         let mut has_escape = false;
         while let Some(c) = self.next() {
             match c {
@@ -376,7 +376,7 @@ impl<'src> Lexer<'src> {
             }
         }
 
-        return Err(ParseError {
+        return Err(XenoError {
             message: MALFORMED_REGEX.to_string(),
             location: self.token_from_but_not_including_lexer(&start),
         });
