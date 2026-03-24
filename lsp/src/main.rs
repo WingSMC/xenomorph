@@ -162,7 +162,6 @@ impl Backend {
         }
     }
 
-    // Validate document and send diagnostics
     async fn validate_document(&self, uri: &Url) {
         let text = match self.get_document_text(uri) {
             Some(t) => t,
@@ -196,7 +195,6 @@ impl Backend {
             .await;
     }
 
-    /// Find the token at a given position
     fn find_token_at_position<'a>(
         &self,
         tokens: &'a [Token<'a>],
@@ -260,7 +258,6 @@ impl Backend {
         });
     }
 
-    /// Get completions based on context
     fn get_context_completions(
         &self,
         tokens: &[Token],
@@ -270,9 +267,17 @@ impl Backend {
         let mut items = Vec::new();
 
         if let Some(current_token) = self.find_token_before_or_at_position(tokens, position) {
+            let _ = self.client.log_message(
+                MessageType::INFO,
+                format!(
+                    "Current token at completion: {:?} with data {:?}",
+                    current_token.0, current_token.1
+                )
+                .as_str(),
+            );
             match current_token.0 {
                 TokenVariant::At => items.extend(self.get_builtin_annotations()),
-                TokenVariant::Or => items.extend(
+                TokenVariant::Or | TokenVariant::Colon => items.extend(
                     self.ast_to_definition_completions(&ast)
                         .chain(self.get_builtin_types()),
                 ),
@@ -291,7 +296,6 @@ impl Backend {
         items
     }
 
-    // Provide hover information for a token
     fn get_hover_for_location(
         &self,
         location: Position,
@@ -309,10 +313,10 @@ impl Backend {
 
         let contents = match def_opt {
             Some(d) => match d {
-            Declaration::TypeDecl { name, docs, .. } if name.v == searched_name => {
-                format!("**{}**\n\n{}", name.v, docs.unwrap_or(""))
-            }
-            _ => return None,
+                Declaration::TypeDecl { name, docs, .. } if name.v == searched_name => {
+                    format!("**{}**\n\n{}", name.v, docs.unwrap_or(""))
+                }
+                _ => return None,
             },
             None => {
                 let builtin_info = self
@@ -371,6 +375,10 @@ impl LanguageServer for Backend {
                 document_symbol_provider: Some(OneOf::Left(true)),
                 definition_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
+                rename_provider: Some(OneOf::Right(RenameOptions {
+                    prepare_provider: Some(true),
+                    work_done_progress_options: Default::default(),
+                })),
                 ..Default::default()
             },
             ..Default::default()
@@ -560,6 +568,86 @@ impl LanguageServer for Backend {
         });
 
         Ok(symbols.map(DocumentSymbolResponse::Flat))
+    }
+
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> Result<Option<PrepareRenameResponse>> {
+        let uri = params.text_document.uri;
+        let position = params.position;
+
+        let result = self.with_parsed_document(&uri, |tokens, ast| {
+            let token = self.find_token_at_position(tokens, position)?;
+
+            if token.0 != TokenVariant::Identifier {
+                return None;
+            }
+
+            // Only allow renaming user-defined declarations, not built-in types/annotations
+            let is_user_defined = ast.iter().any(|decl| match decl {
+                Declaration::TypeDecl { name, .. } => name.v == token.1.v,
+            });
+
+            if !is_user_defined {
+                return None;
+            }
+
+            Some(PrepareRenameResponse::RangeWithPlaceholder {
+                range: token.1.to_editor_range(),
+                placeholder: token.1.v.to_string(),
+            })
+        });
+
+        Ok(result.flatten())
+    }
+
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+        let new_name = params.new_name;
+
+        let result = self.with_parsed_document(&uri, |tokens, ast| {
+            let token = self.find_token_at_position(tokens, position)?;
+
+            if token.0 != TokenVariant::Identifier {
+                return None;
+            }
+
+            let old_name = token.1.v;
+
+            // Only allow renaming user-defined declarations, not built-in types/annotations
+            let is_user_defined = ast.iter().any(|decl| match decl {
+                Declaration::TypeDecl { name, .. } => name.v == old_name,
+            });
+
+            if !is_user_defined {
+                return None;
+            }
+
+            let edits: Vec<TextEdit> = tokens
+                .iter()
+                .filter(|t| t.0 == TokenVariant::Identifier && t.1.v == old_name)
+                .map(|t| TextEdit {
+                    range: t.1.to_editor_range(),
+                    new_text: new_name.clone(),
+                })
+                .collect();
+
+            if edits.is_empty() {
+                return None;
+            }
+
+            let mut changes = HashMap::new();
+            changes.insert(uri.clone(), edits);
+
+            Some(WorkspaceEdit {
+                changes: Some(changes),
+                ..Default::default()
+            })
+        });
+
+        Ok(result.flatten())
     }
 }
 

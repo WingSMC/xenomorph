@@ -5,6 +5,29 @@ use crate::{
     TokenData, XenoError,
 };
 
+pub struct Analyzer {
+    // on_before_ast, on_after_ast
+
+    // on_before_custom_decl, on_after_custom_decl
+    // on_before_decl, on_after_decl
+    //   on_before_type, on_after_type
+    //     on_before_expr, on_after_expr
+    //       on_before_struct, on_after_struct
+    //         on_before_field, on_after_field
+    //       on_before_enum, on_after_enum
+    //       on_before_list, on_after_list
+    //       on_before_set, on_after_set
+    //       on_before_annotation, on_after_annotation
+
+    // cache: HashMap<filename, {
+    //   text,
+    //   tokens,
+    //   ast,
+    //   def_tree,
+    //   errors,
+    //}>,
+}
+
 pub fn analyze<'src>(ast: &Vec<Declaration<'src>>) -> Vec<XenoError<'src>> {
     let mut errors = Vec::new();
 
