@@ -6,7 +6,8 @@
     "version": "0.0.1",
     "publisher": "WingSMC",
     "scripts": {
-        "build": "tsc"
+        "build": "vite build",
+        "typecheck": "tsc --noEmit"
     },
     "repository": {
         "type": "git",
@@ -24,6 +25,7 @@
         "@types/node": "^22.19.15",
         "@types/vscode": "^1.98.0",
         "@vscode/test-electron": "^2.4.1",
-        "typescript": "^5.2.2"
+        "typescript": "^6.0.2",
+        "vite": "^8.0.3"
     }
 }

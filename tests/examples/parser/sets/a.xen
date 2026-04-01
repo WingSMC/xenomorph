@@ -1,0 +1,7 @@
+type Nat = Zero | @succ(Nat);
+type List = Nil | @cons(Nat, List);
+
+type FavouriteColors = set ["red", "green", "blue"];
+type MyDogsFavouriteColors = set ["red"];
+type BothOurFavouriteColors = FavouriteColors * MyDogsFavouriteColors;
+type MyFavouriteColorsFromBoth = BothOurFavouriteColors \ MyDogsFavouriteColors;

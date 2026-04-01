@@ -24,7 +24,7 @@
         "Testing"
     ],
     "scripts": {
-        "build": "cd client && tsc && cd .. && nr setup:lsp",
+        "build": "cd client && nr build && cd .. && nr setup:lsp",
         "setup:lsp": "node ./scripts/copy-lsp.mjs",
         "package:windows-x64": "vsce package --target win32-x64",
         "package:linux-x64": "vsce package --target linux-x64"

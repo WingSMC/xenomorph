@@ -1,5 +1,5 @@
 [parser]
-path = "./tests/examples/parser/p2.xen"
+path = "./tests/examples/parser/sets/a.xen"
 
 [plugins]
 path = "./target/release/"

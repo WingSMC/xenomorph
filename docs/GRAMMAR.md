@@ -3,20 +3,20 @@
 ## Types
 
 - Bool: `bool`
-	- literals: `true`, `false`
+    - literals: `true`, `false`
 - Number `number`:
-	- Integers: e.g `i8`, `u64`, ...
-		- Literal: any number that doesn't fit the criteria of the other number types
-	- BigInt: `bigint`
-		- Literal: number ending with `b`
-	- Float: `f32`, `f64`
-		- Literal: `f64: 3.141592653`, `f32: 2.71f` notice the `f`
+    - Integers: e.g `i8`, `u64`, ...
+        - Literal: any number that doesn't fit the criteria of the other number types
+    - BigInt: `bigint`
+        - Literal: number ending with `b`
+    - Float: `f32`, `f64`
+        - Literal: `f64: 3.141592653`, `f32: 2.71f` notice the `f`
 - String:
-	- Unicode: `string`
+    - Unicode: `string`
 
 ## Complex types
 
-- Structs/Enums: `{...}` or with [generics](#Generics)  `<Generics>` `{}`
+- Structs/Enums: `{...}` or with [generics](#Generics) `<Generics>` `{}`
 - Lists/Tuples: `[a, b, c]` with literals or with types `(<Types>)[]` or `[string, i32]`
 
 ## Builtin validators:
@@ -49,7 +49,7 @@ Validators are executed in the order they are written in most contexts, but the 
 - `max(<number>)` use this as gte
 - `gt(<number>)`
 - `lt(<number>)`
-- `multipleof(<integer>)` you can test precision with this e.g. `0.031 multipleof(0.001)` is true.<br>*might break down if you write something too small*
+- `multipleof(<number>)` you can test precision with this e.g. `0.031 multipleof(0.001)` is true.<br>_might break down if you write something too small_
 
 ### String
 
@@ -71,7 +71,7 @@ Other fields are referenced by their name after a `$` prefix.
 - `max(<$field>)` less than or equal to another field
 - `in(<$field>)` is in another field (list)
 - `not in(<$field>)` is not in another field
-- `if(_ , (<$field> ([+-]<validator>)*)*)`	can be used on bool fields
+- `if(_ , (<$field> ([+-]<validator>)*)*)` can be used on bool fields
 - `if(<validator>*, (<$field> ([+-]<validator>)*)*)` can be used on any field with the appropriate validators
 - `elseif(<validator>*, <$field> (([+-]<validator>)*)*)` can be used right after `if` to specify the else if condition
 - `else(<$field> ([+-]<validator>)*)` can be used right after `if` to specify the else condition

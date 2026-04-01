@@ -20,7 +20,7 @@ Xenomorph is meant to be a universal schema descriptor. It is a front-end for pl
 - Install [Rust](https://rust-lang.org/learn/get-started/) (Recommended 1.94)
 - Install [Node.js](https://nodejs.org/en/download) (Recommended 24.11)
 
-- Run `npm run setup:once` or install these manually:
+- Run `npm run install:once` or install these manually:
     - Install [pnpm](https://pnpm.io/) because it's nicer than npm
     - Install [@antfu/ni](https://github.com/antfu-collective/ni) for npm run scripts to work
 
