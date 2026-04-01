@@ -84,13 +84,6 @@ impl<'src> Lexer<'src> {
         }
     }
 
-    fn token_from(&self, start: &LexerLocation) -> TokenData<'src> {
-        TokenData {
-            v: &self.src[start.src_index..=self.location.src_index],
-            l: start.line,
-            c: start.column,
-        }
-    }
     /**
     If you step over the last character of a token with next()
     so the current lexer location is one after the token, use this.
@@ -226,7 +219,7 @@ impl<'src> Lexer<'src> {
 
         Err(XenoError {
             message: STRING_TERMINATION_ERROR.to_string(),
-            location: self.token_from(&initial_loc),
+            location: self.token_from_but_not_including_lexer(&initial_loc),
         })
     }
 
@@ -237,7 +230,10 @@ impl<'src> Lexer<'src> {
         match self.peek() {
             Some('=') => {
                 self.next();
-                (TokenVariant::Neq, self.token_from(&initial_loc))
+                (
+                    TokenVariant::Neq,
+                    self.token_from_but_not_including_lexer(&initial_loc),
+                )
             }
             _ => (
                 TokenVariant::Not,
