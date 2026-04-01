@@ -352,7 +352,7 @@ impl Backend {
                 label: "type".to_string(),
                 kind: Some(CompletionItemKind::KEYWORD),
                 detail: Some("Declare a new type".to_string()),
-                insert_text: Some("type ${1:Name} = ${0}".to_string()),
+                insert_text: Some("type ${1:Name} = ${0};".to_string()),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
                 ..Default::default()
             });

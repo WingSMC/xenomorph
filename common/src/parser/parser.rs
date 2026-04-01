@@ -4,7 +4,7 @@ use crate::{
         AnonymType, BinaryExprType, Declaration, Expr, KeyValExpr, Literal, NumberType, TypeList,
     },
     utils::extract_documentation,
-    XenoError, TokenData,
+    TokenData, XenoError,
 };
 
 #[derive(Clone, Debug)]
@@ -105,12 +105,9 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_declaration(&mut self) -> Result<Declaration<'src>, Vec<XenoError<'src>>> {
-        let docs = if self.peek().map(|t| t.0) == Some(TokenVariant::Documentation) {
-            let d = self.expect(TokenVariant::Documentation).unwrap();
-            Some(extract_documentation(d))
-        } else {
-            None
-        };
+        let docs: Option<&'src str> = self.peek().and_then(|(v, d)| {
+            (*v == TokenVariant::Documentation).then_some(extract_documentation(d))
+        });
 
         let (var, d) = self.next().map_err(Parser::map_err_vec)?;
         let dec = match var {

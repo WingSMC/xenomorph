@@ -1,5 +1,13 @@
 import p1;
 
-type A = {
-    asd: Admin,
-}
+type UserName = string @len(3..50) @regex(/^[A-Z][a-z]+$/);
+type Email = string @regex(/^[\w.-]+@[\w.-]+\.\w+$/);
+type UserAge = u8 @min(0) @max(150);
+
+type User = {
+    name: UserName,
+    age: UserAge,
+    email: Email,
+    isActive: bool @if() @else(),
+    asd:TestType
+};
