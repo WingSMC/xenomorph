@@ -3,6 +3,7 @@
     "name": "xenomorph",
     "patterns": [
         { "include": "#comments" },
+        { "include": "#import-declarations" },
         { "include": "#type-declarations" },
         { "include": "#annotations" },
         { "include": "#keywords" },
@@ -40,11 +41,25 @@
             "patterns": [
                 {
                     "name": "keyword.control.xenomorph",
-                    "match": "\\b(type|set|enum|validator)\\b"
+                    "match": "\\b(type|set|enum|validator|import)\\b"
                 },
                 {
                     "name": "constant.language.boolean.xenomorph",
                     "match": "\\b(true|false)\\b"
+                }
+            ]
+        },
+        "import-declarations": {
+            "patterns": [
+                {
+                    "match": "\\b(import)\\s+([A-Za-z_][A-Za-z0-9_]*(?:/[A-Za-z_][A-Za-z0-9_]*)*)\\s*(;)",
+                    "captures": {
+                        "1": { "name": "keyword.control.import.xenomorph" },
+                        "2": { "name": "entity.name.import.xenomorph" },
+                        "3": {
+                            "name": "punctuation.terminator.statement.xenomorph"
+                        }
+                    }
                 }
             ]
         },

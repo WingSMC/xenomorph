@@ -1,5 +1,6 @@
 use crate::formatter::format_xenomorph;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
 use tower_lsp::jsonrpc::Result;
@@ -7,7 +8,10 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 use xenomorph_common::{
     lexer::{Lexer, Token, TokenVariant},
-    module::SharedModuleRegistry,
+    module::{
+        build_declaration_cache, load_module, new_registry, resolve_import, DeclarationInfo,
+        SharedModuleRegistry,
+    },
     parser::{Declaration, Parser},
     plugins::{load_plugins, XenoPlugin},
     TokenData, XenoError,
@@ -23,8 +27,9 @@ struct Backend {
     client: Client,
     plugins: Vec<&'static XenoPlugin<'static>>,
     document_map: Mutex<HashMap<Url, Arc<String>>>,
-    #[allow(dead_code)]
     module_registry: SharedModuleRegistry,
+    /// Cached declaration info from all loaded modules.
+    declaration_cache: Mutex<HashMap<String, DeclarationInfo>>,
 }
 
 trait EditorPosition {
@@ -190,13 +195,83 @@ impl Backend {
             Ok(tokens) => {
                 let (ast, errors) = Parser::parse(&tokens);
                 let semantic_errors = xenomorph_common::semantic::analyze(&ast);
-                make_diagnostics(&[errors, semantic_errors].concat())
+
+                // Validate imports: check if imported modules exist on disk
+                let mut import_errors: Vec<XenoError> = Vec::new();
+                if let Some(file_path) = uri.to_file_path().ok() {
+                    let workspace_root = file_path.parent().unwrap_or(Path::new("."));
+                    for decl in &ast {
+                        if let Declaration::Import { path, location } = decl {
+                            let segments: Vec<&str> = path.iter().map(|s| s.as_ref()).collect();
+                            match resolve_import(&segments, &file_path, workspace_root) {
+                                Ok((_, abs_path)) => {
+                                    if !abs_path.exists() {
+                                        import_errors.push(XenoError {
+                                            location: (*location).clone(),
+                                            message: format!(
+                                                "Module '{}' not found (expected at '{}')",
+                                                path.join("/"),
+                                                abs_path.display()
+                                            ),
+                                        });
+                                    }
+                                }
+                                Err(_) => {
+                                    import_errors.push(XenoError {
+                                        location: (*location).clone(),
+                                        message: format!(
+                                            "Cannot resolve module '{}'",
+                                            path.join("/")
+                                        ),
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    // Load the module graph and update the declaration cache
+                    self.reload_modules(&file_path);
+                }
+
+                make_diagnostics(&[errors, semantic_errors, import_errors].concat())
             }
         };
 
         self.client
             .publish_diagnostics(uri.clone(), diagnostics, None)
             .await;
+    }
+
+    /// Load/reload the module graph starting from the given file and rebuild the
+    /// declaration cache.
+    fn reload_modules(&self, file_path: &Path) {
+        let workspace_root = file_path.parent().unwrap_or(Path::new("."));
+
+        // Clear and reload the registry
+        {
+            let mut reg = self.module_registry.write().unwrap();
+            reg.modules.clear();
+        }
+
+        let _errors = load_module(file_path, workspace_root, &self.module_registry);
+
+        // Rebuild declaration cache
+        let new_cache = build_declaration_cache(&self.module_registry);
+        {
+            let mut cache = self.declaration_cache.lock().unwrap();
+            *cache = new_cache;
+        }
+    }
+
+    /// Get completion items from the cross-module declaration cache.
+    fn get_module_completions(&self) -> Vec<CompletionItem> {
+        let cache = self.declaration_cache.lock().unwrap();
+        cache
+            .values()
+            .map(|info| {
+                create_completion_item(&info.name, info.docs.as_deref(), CompletionItemKind::CLASS)
+            })
+            .collect()
     }
 
     fn find_token_at_position<'a>(
@@ -272,31 +347,96 @@ impl Backend {
     ) -> Vec<CompletionItem> {
         let mut items = Vec::new();
 
+        // Get all type completions (local + imported modules + builtins)
+        let all_types = || -> Vec<CompletionItem> {
+            let mut types: Vec<CompletionItem> = self
+                .ast_to_definition_completions(ast)
+                .chain(self.get_builtin_types())
+                .collect();
+            types.extend(self.get_module_completions());
+            // Deduplicate by label (local declarations take precedence)
+            let mut seen = std::collections::HashSet::new();
+            types.retain(|item| seen.insert(item.label.clone()));
+            types
+        };
+
         if let Some(current_token) = self.find_token_before_or_at_position(tokens, position) {
-            let _ = self.client.log_message(
-                MessageType::INFO,
-                format!(
-                    "Current token at completion: {:?} with data {:?}",
-                    current_token.0, current_token.1
-                )
-                .as_str(),
-            );
             match current_token.0 {
-                TokenVariant::At => items.extend(self.get_builtin_annotations()),
-                TokenVariant::Or | TokenVariant::Colon => items.extend(
-                    self.ast_to_definition_completions(&ast)
-                        .chain(self.get_builtin_types()),
-                ),
-                TokenVariant::Eq | TokenVariant::Semicolon => items.extend(vec![CompletionItem {
-                    label: "struct".to_string(),
-                    kind: Some(CompletionItemKind::SNIPPET),
-                    detail: Some("Create a new struct type".to_string()),
-                    insert_text: Some("{\n\t${1:property}: ${2:type},\n\t$0\n}".to_string()),
-                    insert_text_format: Some(InsertTextFormat::SNIPPET),
-                    ..Default::default()
-                }]),
-                _ => {}
+                // After @, suggest annotations
+                TokenVariant::At => {
+                    items.extend(self.get_builtin_annotations());
+                }
+                // After | or :, suggest types (local + imported + builtins)
+                TokenVariant::Or | TokenVariant::Colon => {
+                    items.extend(all_types());
+                }
+                // After =, suggest struct snippet + types
+                TokenVariant::Eq => {
+                    items.push(CompletionItem {
+                        label: "struct".to_string(),
+                        kind: Some(CompletionItemKind::SNIPPET),
+                        detail: Some("Create a new struct type".to_string()),
+                        insert_text: Some("{\n\t${1:property}: ${2:type},\n\t$0\n}".to_string()),
+                        insert_text_format: Some(InsertTextFormat::SNIPPET),
+                        ..Default::default()
+                    });
+                    items.push(CompletionItem {
+                        label: "enum".to_string(),
+                        kind: Some(CompletionItemKind::SNIPPET),
+                        detail: Some("Create a new enum type".to_string()),
+                        insert_text: Some(
+                            "enum {\n\t${1:variant}: ${2:type},\n\t$0\n}".to_string(),
+                        ),
+                        insert_text_format: Some(InsertTextFormat::SNIPPET),
+                        ..Default::default()
+                    });
+                    items.extend(all_types());
+                }
+                // After import keyword, no completions (path-based)
+                TokenVariant::Import => {}
+                // After an identifier (could be a type position), suggest annotations
+                TokenVariant::Identifier => {
+                    items.extend(self.get_builtin_annotations());
+                }
+                // After ), suggest annotations (e.g. after @annotation())
+                TokenVariant::RParen => {
+                    items.extend(self.get_builtin_annotations());
+                }
+                // After {, suggest property snippets
+                TokenVariant::LCurly | TokenVariant::Comma => {
+                    items.push(CompletionItem {
+                        label: "property".to_string(),
+                        kind: Some(CompletionItemKind::SNIPPET),
+                        detail: Some("Add a property".to_string()),
+                        insert_text: Some("${1:name}: ${2:type},".to_string()),
+                        insert_text_format: Some(InsertTextFormat::SNIPPET),
+                        ..Default::default()
+                    });
+                }
+                _ => {
+                    // Default: show types + annotations
+                    items.extend(all_types());
+                    items.extend(self.get_builtin_annotations());
+                }
             }
+        } else {
+            // No previous token (beginning of file) — suggest keywords
+            items.push(CompletionItem {
+                label: "type".to_string(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                detail: Some("Declare a new type".to_string()),
+                insert_text: Some("type ${1:Name} = ${0}".to_string()),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                ..Default::default()
+            });
+            items.push(CompletionItem {
+                label: "import".to_string(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                detail: Some("Import a module".to_string()),
+                insert_text: Some("import ${1:module};".to_string()),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                ..Default::default()
+            });
         }
 
         items
@@ -325,6 +465,7 @@ impl Backend {
                 _ => return None,
             },
             None => {
+                // Check builtins first
                 let builtin_info = self
                     .get_builtin_types()
                     .find(|item| item.label == searched_name)
@@ -335,7 +476,20 @@ impl Backend {
 
                 match builtin_info {
                     Some(i) => format!("**{}**\n\n{}", i.label, i.detail.unwrap_or_default()),
-                    None => return None,
+                    None => {
+                        // Check the cross-module declaration cache
+                        let cache = self.declaration_cache.lock().unwrap();
+                        match cache.get(searched_name) {
+                            Some(info) => {
+                                let docs = info.docs.as_deref().unwrap_or("");
+                                format!(
+                                    "**{}** *(from {})*\n\n{}",
+                                    info.name, info.module_path, docs
+                                )
+                            }
+                            None => return None,
+                        }
+                    }
                 }
             }
         };
@@ -669,7 +823,8 @@ async fn main() {
         client,
         plugins: load_plugins(),
         document_map: Mutex::new(HashMap::new()),
-        module_registry: xenomorph_common::module::new_registry(),
+        module_registry: new_registry(),
+        declaration_cache: Mutex::new(HashMap::new()),
     });
 
     Server::new(stdin, stdout, socket).serve(service).await;

@@ -79,7 +79,7 @@ impl fmt::Display for ModuleError {
 /// - `import_segments`: the parsed path segments, e.g. `["a", "b"]` for `import a/b;`
 /// - `current_file_abs`: absolute path of the file containing the import statement
 /// - `workspace_root`: absolute path of the workspace root (folder of the entry file)
-fn resolve_import(
+pub fn resolve_import(
     import_segments: &[&str],
     current_file_abs: &Path,
     workspace_root: &Path,
