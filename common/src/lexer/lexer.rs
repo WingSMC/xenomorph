@@ -113,8 +113,7 @@ impl<'src> Lexer<'src> {
                     // So Slash context = previous token is Identifier AND that Identifier
                     // was preceded by Import or by another Slash (for chained paths).
                     let is_slash_context = match tokens.len() {
-                        0 => false,
-                        1 => false,
+                        0 | 1 => false,
                         _ => {
                             let last = tokens.last().map(|t| t.0);
                             let second_last = tokens.get(tokens.len() - 2).map(|t| t.0);

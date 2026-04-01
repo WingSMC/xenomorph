@@ -10,7 +10,7 @@ type BrightColor = {
 * This is a comment for the Action type
 */
 type Admin = User & {
-    actions: [Date, Action][] @minlen(1, true) @maxlen(10),
+    actions: [Date, Action][] @minlen(1) @maxlen(10),
 };
 
 type User = {

@@ -105,11 +105,18 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_declaration(&mut self) -> Result<Declaration<'src>, Vec<XenoError<'src>>> {
-        let docs: Option<&'src str> = self.peek().and_then(|(v, d)| {
-            (*v == TokenVariant::Documentation).then_some(extract_documentation(d))
-        });
+        let maybe_doc = self.next().map_err(Parser::map_err_vec)?;
+        let docs = if maybe_doc.0 == TokenVariant::Documentation {
+            Some(extract_documentation(&maybe_doc.1))
+        } else {
+            None
+        };
 
-        let (var, d) = self.next().map_err(Parser::map_err_vec)?;
+        let (var, d) = if docs.is_some() {
+            self.next().map_err(Parser::map_err_vec)?
+        } else {
+            maybe_doc
+        };
         let dec = match var {
             TokenVariant::Type => self.parse_type_declaration(docs)?,
             TokenVariant::Import => {

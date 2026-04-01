@@ -9,5 +9,6 @@ type User = {
     age: UserAge,
     email: Email,
     isActive: bool @if() @else(),
-    asd:TestType
 };
+
+type UserList = User[] @len(1<.<1000);

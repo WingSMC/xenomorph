@@ -143,7 +143,7 @@
                 },
                 {
                     "name": "keyword.operator.range.xenomorph",
-                    "match": "\\.\\.|\\.<|<\\."
+                    "match": "<\\.<|\\.\\.|\\.<|<\\."
                 },
                 {
                     "name": "keyword.operator.set.xenomorph",
