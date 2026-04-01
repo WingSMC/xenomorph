@@ -114,10 +114,29 @@ impl<'src> Lexer<'src> {
                     self.next();
                     continue;
                 }
-                '/' => match self.consume_comment_or_regex()? {
-                    None => continue,
-                    Some(t) => t,
-                },
+                '/' => {
+                    // '/' is a Slash (path separator) only inside import paths.
+                    // An import path looks like: Import Identifier Slash Identifier ...
+                    // So Slash context = previous token is Identifier AND that Identifier
+                    // was preceded by Import or by another Slash (for chained paths).
+                    let is_slash_context = match tokens.len() {
+                        0 => false,
+                        1 => false,
+                        _ => {
+                            let last = tokens.last().map(|t| t.0);
+                            let second_last = tokens.get(tokens.len() - 2).map(|t| t.0);
+                            last == Some(TokenVariant::Identifier)
+                                && matches!(
+                                    second_last,
+                                    Some(TokenVariant::Import) | Some(TokenVariant::Slash)
+                                )
+                        }
+                    };
+                    match self.consume_comment_slash_or_regex(is_slash_context)? {
+                        None => continue,
+                        Some(t) => t,
+                    }
+                }
                 'a'..='z' | 'A'..='Z' | '_' => self.consume_word(),
                 '@' => (TokenVariant::At, self.single_char_token_next()),
                 ':' => (TokenVariant::Colon, self.single_char_token_next()),
@@ -180,6 +199,7 @@ impl<'src> Lexer<'src> {
 
         match word.as_str() {
             "type" => (TokenVariant::Type, token_data),
+            "import" => (TokenVariant::Import, token_data),
             "set" => (TokenVariant::Set, token_data),
             "enum" => (TokenVariant::Enum, token_data),
             "true" => (TokenVariant::True, token_data),
@@ -290,13 +310,20 @@ impl<'src> Lexer<'src> {
         )
     }
 
-    fn consume_comment_or_regex(&mut self) -> Result<Option<Token<'src>>, XenoError<'src>> {
+    fn consume_comment_slash_or_regex(
+        &mut self,
+        slash_context: bool,
+    ) -> Result<Option<Token<'src>>, XenoError<'src>> {
         let initial_loc = self.location_snapshot();
         self.next(); // skip first '/'
 
         match self.peek() {
             Some(&'/') => self.skip_line_comment(),
             Some(&'*') => self.consume_doc_comment(initial_loc),
+            _ if slash_context => Ok(Some((
+                TokenVariant::Slash,
+                self.token_from_but_not_including_lexer(&initial_loc),
+            ))),
             _ => self.consume_regex(initial_loc),
         }
     }

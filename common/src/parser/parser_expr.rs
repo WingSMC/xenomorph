@@ -8,6 +8,10 @@ pub type TypeList<'src> = Vec<AnonymType<'src>>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Declaration<'src> {
+    Import {
+        path: Vec<&'src str>,
+        location: &'src TokenData<'src>,
+    },
     TypeDecl {
         docs: Option<&'src str>,
         name: &'src TokenData<'src>,
@@ -63,6 +67,9 @@ pub enum Expr<'src> {
 impl<'src> fmt::Display for Declaration<'src> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Declaration::Import { path, .. } => {
+                write!(f, "import {}", path.join("/"))
+            }
             Declaration::TypeDecl { name, t, .. } => {
                 write!(f, "type {} = ", name.v)?;
                 for (i, item) in t.iter().enumerate() {

@@ -1,3 +1,5 @@
+import p1;
+
 /**
 # Doc test
 */
@@ -11,7 +13,7 @@ Doc test
 */
 type DocTest = {
     description: string @annotaion(0),
-    tests: Test[] TestType
+    tests: Test[] TestType,
 };
 
 /**

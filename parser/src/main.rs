@@ -1,6 +1,11 @@
 use std::fs;
 use xenomorph_common::{
-    config::Config, lexer::Lexer, parser::Parser, plugins::load_plugins, semantic::analyze,
+    config::Config,
+    lexer::Lexer,
+    module::{build_declaration_cache, load_workspace},
+    parser::Parser,
+    plugins::load_plugins,
+    semantic::analyze,
 };
 
 fn main() {
@@ -27,6 +32,30 @@ fn main() {
         Some(name) => name.to_string_lossy(),
     };
 
+    // Load the full module graph starting from the entry file
+    let abs_entry = match file_path.canonicalize() {
+        Ok(p) => p,
+        Err(e) => {
+            println!("Error: Cannot resolve entry file '{}': {}", file_path.display(), e);
+            return;
+        }
+    };
+
+    let (registry, module_errors) = load_workspace(&abs_entry);
+    for me in &module_errors {
+        println!("[module] {}", me);
+    }
+
+    // Build the declaration cache across all modules
+    let decl_cache = build_declaration_cache(&registry);
+    if dbg_config.ast {
+        println!("Declaration cache:");
+        for (name, info) in &decl_cache {
+            println!("  {} (from {})", name, info.module_path);
+        }
+    }
+
+    // Also run the single-file pipeline for the entry file for backwards compat
     let file_contents = match fs::read_to_string(&file_path) {
         Err(e) => return println!("Error: {}", e),
         Ok(s) => s,
@@ -62,5 +91,11 @@ fn main() {
         print!("{:#?}\n\n", ast)
     }
 
-    analyze(&ast);
+    let semantic_errors = analyze(&ast);
+    for e in &semantic_errors {
+        println!(
+            "[{}] Semantic error: {} At [{}]",
+            file_name, e.message, e.location
+        );
+    }
 }

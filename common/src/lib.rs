@@ -1,5 +1,6 @@
 pub mod config;
 pub mod lexer;
+pub mod module;
 pub mod parser;
 pub mod plugins;
 pub mod semantic;

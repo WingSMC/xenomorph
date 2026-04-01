@@ -115,6 +115,16 @@ impl<'src> Parser<'src> {
         let (var, d) = self.next().map_err(Parser::map_err_vec)?;
         let dec = match var {
             TokenVariant::Type => self.parse_type_declaration(docs)?,
+            TokenVariant::Import => {
+                if docs.is_some() {
+                    return Err(vec![XenoError {
+                        location: d.clone(),
+                        message: "Import declarations cannot have documentation comments."
+                            .to_string(),
+                    }]);
+                }
+                self.parse_import_declaration(d)?
+            }
             _ => {
                 return Err(vec![XenoError {
                     location: d.clone(),
@@ -135,6 +145,21 @@ impl<'src> Parser<'src> {
         self.expect(TokenVariant::Eq)?;
         let t = self.parse_anonym_type()?;
         Ok(Declaration::TypeDecl { name, t, docs })
+    }
+    fn parse_import_declaration(
+        &mut self,
+        location: &'src TokenData<'src>,
+    ) -> Result<Declaration<'src>, Vec<XenoError<'src>>> {
+        let first = self.expect(TokenVariant::Identifier)?;
+        let mut path = vec![first.v];
+
+        while self.peek().map(|t| t.0) == Some(TokenVariant::Slash) {
+            self.next().map_err(Parser::map_err_vec)?; // consume '/'
+            let segment = self.expect(TokenVariant::Identifier)?;
+            path.push(segment.v);
+        }
+
+        Ok(Declaration::Import { path, location })
     }
     fn parse_anonym_type(&mut self) -> Result<AnonymType<'src>, Vec<XenoError<'src>>> {
         let mut list: Vec<Expr<'src>> = Vec::new();
@@ -232,7 +257,9 @@ impl<'src> Parser<'src> {
             }
 
             TokenVariant::Type
+            | TokenVariant::Import
             | TokenVariant::Validator
+            | TokenVariant::Slash
             | TokenVariant::Dot
             | TokenVariant::Comma
             | TokenVariant::Colon

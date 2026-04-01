@@ -5,6 +5,7 @@ use std::fmt;
 pub enum TokenVariant {
     Identifier,
     Type,
+    Import,
     Validator,
     Set,
     Enum,
@@ -25,6 +26,7 @@ pub enum TokenVariant {
     Plus,
     Minus,
     Backslash,
+    Slash,
     Dollar,
     Asterix,
     Caret,
@@ -56,6 +58,7 @@ impl fmt::Display for TokenVariant {
         match self {
             TokenVariant::Identifier => write!(f, "Identifier"),
             TokenVariant::Type => write!(f, "Type"),
+            TokenVariant::Import => write!(f, "Import"),
             TokenVariant::Validator => write!(f, "Validator"),
             TokenVariant::Set => write!(f, "Set"),
             TokenVariant::Enum => write!(f, "Enum"),
@@ -75,6 +78,7 @@ impl fmt::Display for TokenVariant {
             TokenVariant::Minus => write!(f, "Minus"),
             TokenVariant::Asterix => write!(f, "Asterix"),
             TokenVariant::Backslash => write!(f, "Backslash"),
+            TokenVariant::Slash => write!(f, "Slash"),
             TokenVariant::Dollar => write!(f, "Dollar"),
             TokenVariant::At => write!(f, "At"),
             TokenVariant::Eq => write!(f, "Eq"),

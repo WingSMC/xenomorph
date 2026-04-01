@@ -7,6 +7,7 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 use xenomorph_common::{
     lexer::{Lexer, Token, TokenVariant},
+    module::SharedModuleRegistry,
     parser::{Declaration, Parser},
     plugins::{load_plugins, XenoPlugin},
     TokenData, XenoError,
@@ -22,6 +23,8 @@ struct Backend {
     client: Client,
     plugins: Vec<&'static XenoPlugin<'static>>,
     document_map: Mutex<HashMap<Url, Arc<String>>>,
+    #[allow(dead_code)]
+    module_registry: SharedModuleRegistry,
 }
 
 trait EditorPosition {
@@ -59,6 +62,7 @@ impl Backend {
         ast: &'src Vec<Declaration>,
     ) -> impl Iterator<Item = CompletionItem> + 'src {
         ast.iter().filter_map(|decl| match decl {
+            Declaration::Import { .. } => None,
             Declaration::TypeDecl { name, docs, .. } => Some(create_completion_item(
                 name.v,
                 *docs,
@@ -235,6 +239,7 @@ impl Backend {
         let searched_name = token.1.v;
         for decl in ast {
             match decl {
+                Declaration::Import { .. } => {}
                 Declaration::TypeDecl { name, .. } => {
                     if name.v == searched_name {
                         return Some(decl);
@@ -254,6 +259,7 @@ impl Backend {
     ) -> Option<&'src TokenData<'src>> {
         let decl = self.find_declaration(location, tokens, ast)?;
         return Some(match decl {
+            Declaration::Import { .. } => return None,
             Declaration::TypeDecl { name, .. } => name,
         });
     }
@@ -551,8 +557,9 @@ impl LanguageServer for Backend {
         let symbols = self.with_parsed_document(&uri, |_, ast| {
             #[allow(deprecated)]
             ast.iter()
-                .map(|decl| match decl {
-                    Declaration::TypeDecl { name, .. } => SymbolInformation {
+                .filter_map(|decl| match decl {
+                    Declaration::Import { .. } => None,
+                    Declaration::TypeDecl { name, .. } => Some(SymbolInformation {
                         name: name.v.to_string(),
                         kind: SymbolKind::STRUCT,
                         tags: None,
@@ -562,7 +569,7 @@ impl LanguageServer for Backend {
                             range: name.to_editor_range(),
                         },
                         container_name: None,
-                    },
+                    }),
                 })
                 .collect::<Vec<SymbolInformation>>()
         });
@@ -586,6 +593,7 @@ impl LanguageServer for Backend {
 
             // Only allow renaming user-defined declarations, not built-in types/annotations
             let is_user_defined = ast.iter().any(|decl| match decl {
+                Declaration::Import { .. } => false,
                 Declaration::TypeDecl { name, .. } => name.v == token.1.v,
             });
 
@@ -618,6 +626,7 @@ impl LanguageServer for Backend {
 
             // Only allow renaming user-defined declarations, not built-in types/annotations
             let is_user_defined = ast.iter().any(|decl| match decl {
+                Declaration::Import { .. } => false,
                 Declaration::TypeDecl { name, .. } => name.v == old_name,
             });
 
@@ -660,6 +669,7 @@ async fn main() {
         client,
         plugins: load_plugins(),
         document_map: Mutex::new(HashMap::new()),
+        module_registry: xenomorph_common::module::new_registry(),
     });
 
     Server::new(stdin, stdout, socket).serve(service).await;

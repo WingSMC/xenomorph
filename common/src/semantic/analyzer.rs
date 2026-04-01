@@ -33,6 +33,7 @@ pub fn analyze<'src>(ast: &Vec<Declaration<'src>>) -> Vec<XenoError<'src>> {
 
     for declaration in ast {
         match declaration {
+            Declaration::Import { .. } => { /* imports handled by module loader */ }
             Declaration::TypeDecl { t, .. } => {
                 validate_annotations(t, &mut errors);
             }
@@ -57,6 +58,7 @@ impl XenoDefNode<'_> {
 
         for declaration in ast {
             match declaration {
+                Declaration::Import { .. } => {}
                 Declaration::TypeDecl { name, docs, t } => {
                     let node = XenoDefNode {
                         name: name.v,
