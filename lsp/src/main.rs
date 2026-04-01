@@ -417,9 +417,29 @@ impl Backend {
                 }
                 // After import keyword, no completions (path-based)
                 TokenVariant::Import => {}
-                // After an identifier (could be a type position), suggest annotations
+                // After/inside an identifier: use previous token context
+                // so Ctrl+Space after ':' still suggests types.
                 TokenVariant::Identifier => {
-                    items.extend(self.get_builtin_annotations());
+                    let token_idx = tokens.iter().position(|t| {
+                        t.1.l == current_token.1.l
+                            && t.1.c == current_token.1.c
+                            && t.1.v == current_token.1.v
+                            && t.0 == current_token.0
+                    });
+
+                    let prev_variant = token_idx
+                        .and_then(|idx| idx.checked_sub(1))
+                        .and_then(|idx| tokens.get(idx))
+                        .map(|t| t.0);
+
+                    match prev_variant {
+                        Some(TokenVariant::Colon) | Some(TokenVariant::Or) => {
+                            items.extend(all_types());
+                        }
+                        _ => {
+                            items.extend(self.get_builtin_annotations());
+                        }
+                    }
                 }
                 // After ), suggest annotations (e.g. after @annotation())
                 TokenVariant::RParen => {

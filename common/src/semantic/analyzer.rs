@@ -18,14 +18,6 @@ pub struct Analyzer {
     //       on_before_list, on_after_list
     //       on_before_set, on_after_set
     //       on_before_annotation, on_after_annotation
-
-    // cache: HashMap<filename, {
-    //   text,
-    //   tokens,
-    //   ast,
-    //   def_tree,
-    //   errors,
-    //}>,
 }
 
 pub fn analyze<'src>(ast: &Vec<Declaration<'src>>) -> Vec<XenoError<'src>> {
