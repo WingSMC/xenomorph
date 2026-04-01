@@ -39,8 +39,16 @@ pub struct DeclarationInfo {
     pub name: String,
     /// Which module (ModulePath) this declaration comes from.
     pub module_path: ModulePath,
+    /// The absolute filesystem path of the module.
+    pub abs_path: PathBuf,
     /// Documentation string, if any.
     pub docs: Option<String>,
+    /// Line number (0-indexed) of the declaration name in its file.
+    pub line: u32,
+    /// Column number (0-indexed) of the declaration name in its file.
+    pub column: u32,
+    /// Length of the declaration name.
+    pub name_len: u32,
 }
 
 /// The shared module map — designed to be wrapped in Arc<RwLock<>> for
@@ -239,7 +247,11 @@ pub fn build_declaration_cache(registry: &SharedModuleRegistry) -> HashMap<Strin
                             DeclarationInfo {
                                 name: name.v.to_string(),
                                 module_path: module_path.clone(),
+                                abs_path: module_data.abs_path.clone(),
                                 docs: docs.map(|d| d.to_string()),
+                                line: name.l,
+                                column: name.c,
+                                name_len: name.v.len() as u32,
                             },
                         );
                     }

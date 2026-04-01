@@ -662,7 +662,54 @@ impl LanguageServer for Backend {
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
-        let result = self.with_parsed_document(&uri, |tokens, ast| {
+        // First try: local definition in the same file
+        let local_result = self.with_parsed_document(&uri, |tokens, ast| {
+            let token = self.find_token_at_position(tokens, position)?;
+
+            // If cursor is on the import path (identifier after `import` keyword),
+            // resolve the import and jump to that file.
+            if token.0 == TokenVariant::Identifier {
+                for decl in ast.iter() {
+                    if let Declaration::Import { path, location } = decl {
+                        // Check if the cursor token is part of this import declaration.
+                        // The import path identifiers are on the same line as the import keyword.
+                        let import_line = location.l;
+                        if token.1.l == import_line {
+                            // Resolve the import to a file path
+                            if let Some(file_path) = uri.to_file_path().ok() {
+                                let workspace_root = file_path.parent().unwrap_or(Path::new("."));
+                                let segments: Vec<&str> = path.iter().map(|s| s.as_ref()).collect();
+                                if let Ok((_, abs_path)) =
+                                    resolve_import(&segments, &file_path, workspace_root)
+                                {
+                                    if abs_path.exists() {
+                                        if let Ok(target_uri) = Url::from_file_path(&abs_path) {
+                                            return Some(GotoDefinitionResponse::Scalar(
+                                                Location {
+                                                    uri: target_uri,
+                                                    range: Range {
+                                                        start: Position {
+                                                            line: 0,
+                                                            character: 0,
+                                                        },
+                                                        end: Position {
+                                                            line: 0,
+                                                            character: 0,
+                                                        },
+                                                    },
+                                                },
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                            return None;
+                        }
+                    }
+                }
+            }
+
+            // Try local declaration in the same file
             let definition = self.find_definition(position, tokens, ast)?;
             Some(GotoDefinitionResponse::Scalar(Location {
                 uri: uri.clone(),
@@ -670,7 +717,40 @@ impl LanguageServer for Backend {
             }))
         });
 
-        Ok(result.flatten())
+        if let Some(Some(response)) = local_result {
+            return Ok(Some(response));
+        }
+
+        // Second try: check the cross-module declaration cache for imported types
+        let cross_module_result = self.with_tokens(&uri, |tokens| {
+            let token = self.find_token_at_position(tokens, position)?;
+            if token.0 != TokenVariant::Identifier {
+                return None;
+            }
+
+            let searched_name = token.1.v;
+            let cache = self.declaration_cache.lock().unwrap();
+            let info = cache.get(searched_name)?;
+
+            let target_uri = Url::from_file_path(&info.abs_path).ok()?;
+            let target_range = Range {
+                start: Position {
+                    line: info.line,
+                    character: info.column,
+                },
+                end: Position {
+                    line: info.line,
+                    character: info.column + info.name_len,
+                },
+            };
+
+            Some(GotoDefinitionResponse::Scalar(Location {
+                uri: target_uri,
+                range: target_range,
+            }))
+        });
+
+        Ok(cross_module_result.flatten())
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
