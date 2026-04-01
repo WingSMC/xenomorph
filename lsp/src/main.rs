@@ -347,6 +347,25 @@ impl Backend {
     ) -> Vec<CompletionItem> {
         let mut items = Vec::new();
 
+        let add_top_level_snippets = |items: &mut Vec<CompletionItem>| {
+            items.push(CompletionItem {
+                label: "type".to_string(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                detail: Some("Declare a new type".to_string()),
+                insert_text: Some("type ${1:Name} = ${0}".to_string()),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                ..Default::default()
+            });
+            items.push(CompletionItem {
+                label: "import".to_string(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                detail: Some("Import a module".to_string()),
+                insert_text: Some("import ${1:module};".to_string()),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                ..Default::default()
+            });
+        };
+
         // Get all type completions (local + imported modules + builtins)
         let all_types = || -> Vec<CompletionItem> {
             let mut types: Vec<CompletionItem> = self
@@ -392,6 +411,10 @@ impl Backend {
                     });
                     items.extend(all_types());
                 }
+                // Between declarations (top-level), only suggest declaration snippets
+                TokenVariant::Semicolon => {
+                    add_top_level_snippets(&mut items);
+                }
                 // After import keyword, no completions (path-based)
                 TokenVariant::Import => {}
                 // After an identifier (could be a type position), suggest annotations
@@ -420,23 +443,8 @@ impl Backend {
                 }
             }
         } else {
-            // No previous token (beginning of file) — suggest keywords
-            items.push(CompletionItem {
-                label: "type".to_string(),
-                kind: Some(CompletionItemKind::KEYWORD),
-                detail: Some("Declare a new type".to_string()),
-                insert_text: Some("type ${1:Name} = ${0}".to_string()),
-                insert_text_format: Some(InsertTextFormat::SNIPPET),
-                ..Default::default()
-            });
-            items.push(CompletionItem {
-                label: "import".to_string(),
-                kind: Some(CompletionItemKind::KEYWORD),
-                detail: Some("Import a module".to_string()),
-                insert_text: Some("import ${1:module};".to_string()),
-                insert_text_format: Some(InsertTextFormat::SNIPPET),
-                ..Default::default()
-            });
+            // No previous token (beginning of file) — only declaration snippets
+            add_top_level_snippets(&mut items);
         }
 
         items
