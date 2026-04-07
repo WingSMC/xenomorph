@@ -8,10 +8,7 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 use xenomorph_common::{
     lexer::{Lexer, Token, TokenVariant},
-    module::{
-        build_declaration_cache, load_module, new_registry, resolve_import, DeclarationInfo,
-        SharedModuleRegistry,
-    },
+    module::{DeclarationInfo, XenoRegistry},
     parser::{Declaration, Parser},
     plugins::{load_plugins, XenoPlugin},
     TokenData, XenoError,
@@ -27,7 +24,7 @@ struct Backend {
     client: Client,
     plugins: Vec<&'static XenoPlugin<'static>>,
     document_map: Mutex<HashMap<Url, Arc<String>>>,
-    module_registry: SharedModuleRegistry,
+    module_registry: XenoRegistry,
     /// Cached declaration info from all loaded modules.
     declaration_cache: Mutex<HashMap<String, DeclarationInfo>>,
 }
@@ -199,11 +196,10 @@ impl Backend {
                 // Validate imports: check if imported modules exist on disk
                 let mut import_errors: Vec<XenoError> = Vec::new();
                 if let Some(file_path) = uri.to_file_path().ok() {
-                    let workspace_root = file_path.parent().unwrap_or(Path::new("."));
                     for decl in &ast {
                         if let Declaration::Import { path, location } = decl {
                             let segments: Vec<&str> = path.iter().map(|s| s.as_ref()).collect();
-                            match resolve_import(&segments, &file_path, workspace_root) {
+                            match self.module_registry.resolve_import(&segments, &file_path) {
                                 Ok((_, abs_path)) => {
                                     if !abs_path.exists() {
                                         import_errors.push(XenoError {
@@ -245,18 +241,12 @@ impl Backend {
     /// Load/reload the module graph starting from the given file and rebuild the
     /// declaration cache.
     fn reload_modules(&self, file_path: &Path) {
-        let workspace_root = file_path.parent().unwrap_or(Path::new("."));
+        self.module_registry.purge();
 
-        // Clear and reload the registry
-        {
-            let mut reg = self.module_registry.write().unwrap();
-            reg.modules.clear();
-        }
-
-        let _errors = load_module(file_path, workspace_root, &self.module_registry);
+        let _errors = self.module_registry.load_module(file_path);
 
         // Rebuild declaration cache
-        let new_cache = build_declaration_cache(&self.module_registry);
+        let new_cache = self.module_registry.build_declaration_cache();
         {
             let mut cache = self.declaration_cache.lock().unwrap();
             *cache = new_cache;
@@ -705,10 +695,9 @@ impl LanguageServer for Backend {
                         if token.1.l == import_line {
                             // Resolve the import to a file path
                             if let Some(file_path) = uri.to_file_path().ok() {
-                                let workspace_root = file_path.parent().unwrap_or(Path::new("."));
                                 let segments: Vec<&str> = path.iter().map(|s| s.as_ref()).collect();
                                 if let Ok((_, abs_path)) =
-                                    resolve_import(&segments, &file_path, workspace_root)
+                                    self.module_registry.resolve_import(&segments, &file_path)
                                 {
                                     if abs_path.exists() {
                                         if let Ok(target_uri) = Url::from_file_path(&abs_path) {
@@ -927,11 +916,20 @@ async fn main() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
+    let registry_opt = XenoRegistry::init(None);
+    let reg = match registry_opt {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Failed to initialize xenomorph module registry: {}", e);
+            return;
+        }
+    };
+
     let (service, socket) = LspService::new(|client| Backend {
         client,
         plugins: load_plugins(),
         document_map: Mutex::new(HashMap::new()),
-        module_registry: new_registry(),
+        module_registry: reg,
         declaration_cache: Mutex::new(HashMap::new()),
     });
 
