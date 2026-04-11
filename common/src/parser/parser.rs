@@ -1,5 +1,5 @@
 use crate::{
-    lexer::{Token, TokenVariant, Tokens},
+    lexer::{Token, TokenVariant, XenoTokens},
     parser::{
         AnonymType, BinaryExprType, Declaration, Expr, KeyValExpr, Literal, NumberType, TypeList,
     },
@@ -9,7 +9,7 @@ use crate::{
 
 #[derive(Clone, Debug)]
 pub struct Parser<'src> {
-    pub tokens: &'src Tokens<'src>,
+    pub tokens: &'src XenoTokens<'src>,
     pub current: usize,
 }
 
@@ -17,11 +17,11 @@ pub type XenoAst<'src> = Vec<Declaration<'src>>;
 pub type XenoParseResult<'src> = (XenoAst<'src>, Vec<XenoError<'src>>);
 
 impl<'src> Parser<'src> {
-    fn new(tokens: &'src Tokens<'src>) -> Self {
+    fn new(tokens: &'src XenoTokens<'src>) -> Self {
         Self { tokens, current: 0 }
     }
 
-    pub fn parse(tokens: &'src Tokens<'src>) -> XenoParseResult<'src> {
+    pub fn parse(tokens: &'src XenoTokens<'src>) -> XenoParseResult<'src> {
         Self::new(tokens)._parse()
     }
     fn _parse(mut self) -> XenoParseResult<'src> {
@@ -42,7 +42,7 @@ impl<'src> Parser<'src> {
     }
 
     pub fn parse_range(
-        _tokens: &'src Tokens<'src>,
+        _tokens: &'src XenoTokens<'src>,
         _old_ast: Vec<Declaration<'src>>,
         _range: (usize, usize),
     ) -> XenoParseResult<'src> {

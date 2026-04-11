@@ -1,6 +1,6 @@
 use std::{fmt, iter::Peekable, str::Chars};
 
-use crate::lexer::{Token, TokenVariant, Tokens};
+use crate::lexer::{Token, TokenVariant, XenoTokens};
 use crate::{TokenData, XenoError};
 
 static NOT_RECOGNIZED: &str = "Token not recognized";
@@ -96,11 +96,11 @@ impl<'src> Lexer<'src> {
         }
     }
 
-    pub fn tokenize(src: &'src str) -> Result<Tokens<'src>, XenoError<'src>> {
+    pub fn tokenize(src: &'src str) -> Result<XenoTokens<'src>, XenoError<'src>> {
         Self::new(src)._tokenize()
     }
-    fn _tokenize(mut self) -> Result<Tokens<'src>, XenoError<'src>> {
-        let mut tokens: Tokens<'src> = vec![];
+    fn _tokenize(mut self) -> Result<XenoTokens<'src>, XenoError<'src>> {
+        let mut tokens: XenoTokens<'src> = vec![];
         while let Some(c) = self.peek() {
             let token = match c {
                 ' ' | '\n' | '\t' | '\r' => {

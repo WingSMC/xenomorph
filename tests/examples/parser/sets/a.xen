@@ -1,3 +1,5 @@
+import b;
+
 type Nat = Zero | @succ(Nat);
 type List = Nil | @cons(Nat, List);
 

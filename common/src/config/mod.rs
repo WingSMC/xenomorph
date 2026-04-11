@@ -24,7 +24,7 @@ pub struct Config {
 #[derive(Deserialize, Debug, Clone)]
 pub struct ParserConfig {
     #[serde(default = "default_parser_path")]
-    pub path: String,
+    pub entry: String,
 }
 #[repr(Rust)]
 #[derive(Deserialize, Debug, Clone)]
@@ -87,7 +87,7 @@ impl Default for Config {
 impl Default for ParserConfig {
     fn default() -> Self {
         Self {
-            path: default_parser_path(),
+            entry: default_parser_path(),
         }
     }
 }

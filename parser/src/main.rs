@@ -4,24 +4,16 @@ fn main() {
     let config = Config::get();
     let plugins = load_plugins();
 
-    let dbg_config = &config.debug;
-    if dbg_config.plugins {
-        println!("{:?}", &plugins);
-        println!(
-            "{:?}",
-            &plugins
-                .iter()
-                .map(|p| p.provide_types.map(|provide| provide()))
-        );
+    if config.debug.plugins {
+        println!("[Debug] Loaded plugins: {:?}", &plugins);
     }
 
-    let file_path = config.workdir.join(&config.parser.path);
-    // Load the full module graph starting from the entry file
+    let file_path = config.workdir.join(&config.parser.entry);
     let abs_entry = match file_path.canonicalize() {
         Ok(p) => p,
         Err(e) => {
-            println!(
-                "Error: Cannot resolve entry file '{}': {}",
+            eprintln!(
+                "[Module Error]: Cannot resolve entry file '{}': {}",
                 file_path.display(),
                 e
             );
@@ -29,22 +21,19 @@ fn main() {
         }
     };
 
-    let (registry, module_errors) = XenoRegistry::load_workspace(&abs_entry);
-    for me in &module_errors {
-        println!("[module] {}", me);
-    }
-
-    let reg = match registry {
-        Some(r) => r,
-        None => {
-            println!("Error: Failed to initialize module registry. Aborting.");
+    let reg = match XenoRegistry::load_workspace() {
+        Ok(r) => r,
+        Err(e) => {
+            for err in e {
+                eprintln!("[Module Error]: {}", err);
+            }
             return;
         }
     };
 
     let decl_cache = reg.build_declaration_cache();
-    if dbg_config.ast {
-        println!("Declaration cache:");
+    if config.debug.ast {
+        println!("[Debug] Declaration cache:");
         for (name, info) in &decl_cache {
             println!("  {} (from {})", name, info.module_path);
         }

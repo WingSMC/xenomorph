@@ -8,7 +8,7 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 use xenomorph_common::{
     lexer::{Lexer, Token, TokenVariant},
-    module::{DeclarationInfo, XenoRegistry},
+    module::{types::DeclarationInfo, XenoRegistry},
     parser::{Declaration, Parser},
     plugins::{load_plugins, XenoPlugin},
     TokenData, XenoError,
@@ -24,7 +24,7 @@ struct Backend {
     client: Client,
     plugins: Vec<&'static XenoPlugin<'static>>,
     document_map: Mutex<HashMap<Url, Arc<String>>>,
-    module_registry: XenoRegistry,
+    module_registry: XenoRegistry<'static>,
     /// Cached declaration info from all loaded modules.
     declaration_cache: Mutex<HashMap<String, DeclarationInfo>>,
 }
@@ -198,8 +198,7 @@ impl Backend {
                 if let Some(file_path) = uri.to_file_path().ok() {
                     for decl in &ast {
                         if let Declaration::Import { path, location } = decl {
-                            let segments: Vec<&str> = path.iter().map(|s| s.as_ref()).collect();
-                            match self.module_registry.resolve_import(&segments, &file_path) {
+                            match self.module_registry.resolve_import(&path) {
                                 Ok((_, abs_path)) => {
                                     if !abs_path.exists() {
                                         import_errors.push(XenoError {
@@ -240,10 +239,10 @@ impl Backend {
 
     /// Load/reload the module graph starting from the given file and rebuild the
     /// declaration cache.
-    fn reload_modules(&self, file_path: &Path) {
+    fn reload_modules(&self, import: &[&str]) {
         self.module_registry.purge();
 
-        let _errors = self.module_registry.load_module(file_path);
+        let _errors = self.module_registry.load_module(import);
 
         // Rebuild declaration cache
         let new_cache = self.module_registry.build_declaration_cache();
@@ -697,7 +696,7 @@ impl LanguageServer for Backend {
                             if let Some(file_path) = uri.to_file_path().ok() {
                                 let segments: Vec<&str> = path.iter().map(|s| s.as_ref()).collect();
                                 if let Ok((_, abs_path)) =
-                                    self.module_registry.resolve_import(&segments, &file_path)
+                                    self.module_registry.resolve_import(&segments)
                                 {
                                     if abs_path.exists() {
                                         if let Ok(target_uri) = Url::from_file_path(&abs_path) {
@@ -913,25 +912,24 @@ impl LanguageServer for Backend {
 
 #[tokio::main]
 async fn main() {
-    let stdin = tokio::io::stdin();
-    let stdout = tokio::io::stdout();
-
-    let registry_opt = XenoRegistry::init(None);
+    let registry_opt = XenoRegistry::new();
     let reg = match registry_opt {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("Failed to initialize xenomorph module registry: {}", e);
+            eprintln!("{}", e);
             return;
         }
     };
 
-    let (service, socket) = LspService::new(|client| Backend {
+    let (service, socket) = LspService::new(move |client| Backend {
         client,
         plugins: load_plugins(),
         document_map: Mutex::new(HashMap::new()),
-        module_registry: reg,
         declaration_cache: Mutex::new(HashMap::new()),
+        module_registry: reg,
     });
 
-    Server::new(stdin, stdout, socket).serve(service).await;
+    Server::new(tokio::io::stdin(), tokio::io::stdout(), socket)
+        .serve(service)
+        .await;
 }
