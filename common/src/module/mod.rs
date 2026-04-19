@@ -1,7 +1,7 @@
 use ouroboros::self_referencing;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
 pub mod types;
@@ -9,7 +9,7 @@ pub mod types;
 use crate::config::Config;
 use crate::lexer::{Lexer, XenoTokens};
 use crate::module::types::{DeclarationInfo, ModuleError, ModulePath};
-use crate::parser::{Declaration, Parser, XenoAst};
+use crate::parser::{Declaration, Expr, Parser, XenoAst};
 use crate::utils::calculate_hash;
 
 /// Information about a single module (one .xen file).
@@ -18,6 +18,8 @@ use crate::utils::calculate_hash;
 pub struct ModuleData {
     /// The absolute filesystem path.
     pub abs_path: PathBuf,
+    /// Module path relative to workspace root, using '/' separators (e.g. "a/b").
+    pub module_path: ModulePath,
     /// Owned source text — tokens and AST borrow from this.
     pub source: String,
     /// Hash of the source text, used for change detection.
@@ -36,30 +38,39 @@ pub struct ModuleData {
     #[borrows(tokens)]
     #[covariant]
     pub ast: XenoAst<'this>,
+    #[borrows(ast, abs_path, module_path)]
+    #[covariant]
+    pub declarations: HashMap<&'this str, DeclarationInfo>,
 }
 
 /// Determines the workspace root and entry module path from the config.
 /// Returns `(workspace_root, entry_module_name)` or a `ModuleError` if the entry file cannot be resolved.
 fn get_root() -> Result<(PathBuf, String), ModuleError> {
     let config = Config::get();
-    let joined = config.workdir.join(&config.parser.entry);
+    let mut joined = config
+        .workdir
+        .join(Path::new(&config.parser.entry).components());
+    joined.add_extension("xen");
     let entry_file = joined.canonicalize().map_err(|e| ModuleError {
         module_path: config.parser.entry.clone(),
         message: format!("Cannot resolve entry file '{:?}': {}", joined, e),
         location: None,
     })?;
 
+    let root_err = || ModuleError {
+        module_path: config.parser.entry.clone(),
+        message: format!(
+            "Cannot determine workspace root from entry file '{}'",
+            entry_file.display()
+        ),
+        location: None,
+    };
+
     let root = entry_file
         .parent()
-        .ok_or_else(|| ModuleError {
-            module_path: config.parser.entry.clone(),
-            message: format!(
-                "Cannot determine workspace root from entry file '{}'",
-                entry_file.display()
-            ),
-            location: None,
-        })?
-        .to_path_buf();
+        .ok_or_else(root_err)?
+        .canonicalize()
+        .map_err(|_| root_err())?;
 
     Ok((
         root,
@@ -81,9 +92,8 @@ fn get_root() -> Result<(PathBuf, String), ModuleError> {
 /// Thread-safe handle to a ModuleRegistry.
 pub struct XenoRegistry {
     module_cache: RwLock<HashMap<ModulePath, ModuleData>>,
-    declaration_cache: RwLock<HashMap<String, DeclarationInfo>>,
-    root: PathBuf,
-    entry: String,
+    pub root: PathBuf,
+    pub entry: String,
 }
 
 impl XenoRegistry {
@@ -93,7 +103,6 @@ impl XenoRegistry {
         let (root, entry) = get_root()?;
         Ok(XenoRegistry {
             module_cache: RwLock::new(HashMap::default()),
-            declaration_cache: RwLock::new(HashMap::default()),
             root,
             entry,
         })
@@ -110,6 +119,43 @@ impl XenoRegistry {
         }
 
         Ok(reg)
+    }
+
+    pub fn load_module_from_uri(&self, uri: &str) -> Vec<ModuleError> {
+        let path_res = PathBuf::from(uri).canonicalize().map_err(|e| ModuleError {
+            module_path: uri.to_string(),
+            message: format!("Cannot resolve URI '{}': {}", uri, e),
+            location: None,
+        });
+        let path = match path_res {
+            Ok(p) => p,
+            Err(e) => return vec![e],
+        };
+
+        let root = self.root.as_path();
+        let relative = match path.strip_prefix(root) {
+            Ok(r) => r,
+            Err(e) => {
+                return vec![ModuleError {
+                    module_path: uri.to_string(),
+                    message: format!(
+                        "URI '{}' is not within the workspace root '{}': {}",
+                        uri,
+                        root.display(),
+                        e
+                    ),
+                    location: None,
+                }]
+            }
+        };
+
+        let segments: Vec<&str> = relative
+            .iter()
+            .filter_map(|s| s.to_str())
+            .map(|s| s.trim_end_matches(".xen"))
+            .collect();
+
+        self.load_module(&segments, true, None)
     }
 
     /// Recursively loads a .xen file and all its imports into the registry.
@@ -163,11 +209,11 @@ impl XenoRegistry {
         }
 
         let mut errors: Vec<ModuleError> = Vec::new();
-
         // Insert this module into the registry and extract imports so we can recursively load them.
         let imports: Vec<(Vec<String>, String)> = {
             let module_data_res: Result<ModuleData, Vec<ModuleError>> = ModuleDataTryBuilder {
                 abs_path,
+                module_path: module_path.clone(),
                 source,
                 hash,
                 changed: true,
@@ -193,6 +239,50 @@ impl XenoRegistry {
 
                     Ok(ast)
                 },
+                declarations_builder:
+                    |ast: &XenoAst, abs_path: &PathBuf, module_path: &ModulePath| {
+                        Ok(ast
+                            .iter()
+                            .filter_map(|d| match d {
+                                Declaration::TypeDecl { docs, name, t } => Some((
+                                    name.v,
+                                    DeclarationInfo {
+                                        name: name.v.to_string(),
+                                        module_path: module_path.to_string(),
+                                        abs_path: abs_path.clone(),
+                                        docs: docs.map(|d| d.to_string()),
+                                        line: name.l,
+                                        column: name.c,
+                                        name_len: name.v.len() as u32,
+                                        fields: {
+                                            let v = t
+                                                .iter()
+                                                .filter_map(|item| match item {
+                                                    Expr::Struct(fields) => {
+                                                        Some(fields.iter().filter_map(|(d, e)| {
+                                                            let t = e.get(0)?;
+                                                            match t {
+                                                                Expr::Identifier(id) => Some((
+                                                                    d.v.to_string(),
+                                                                    id.v.to_string(),
+                                                                )),
+                                                                _ => None,
+                                                            }
+                                                        }))
+                                                    }
+                                                    _ => None,
+                                                })
+                                                .flatten()
+                                                // TODO guarantee 0th expr is type
+                                                .collect::<Vec<(String, String)>>();
+                                            (!v.is_empty()).then_some(v)
+                                        },
+                                    },
+                                )),
+                                _ => None,
+                            })
+                            .collect())
+                    },
             }
             .try_build();
 
@@ -253,36 +343,6 @@ impl XenoRegistry {
         errors
     }
 
-    /// Builds a declaration cache from all modules in the registry.
-    /// Maps declaration name → DeclarationInfo (including which module it came from).
-    pub fn build_declaration_cache(&self) -> () {
-        let modules = self.module_cache.read().unwrap();
-        let mut cache = self.declaration_cache.write().unwrap();
-
-        for (module_path, module_data) in modules.iter() {
-            let ast = module_data.borrow_ast();
-            for decl in ast {
-                match decl {
-                    Declaration::Import { .. } => {}
-                    Declaration::TypeDecl { name, docs, .. } => {
-                        cache.insert(
-                            name.v.to_string(),
-                            DeclarationInfo {
-                                name: name.v.to_string(),
-                                module_path: module_path.clone(),
-                                abs_path: module_data.borrow_abs_path().clone(),
-                                docs: docs.map(|d| d.to_string()),
-                                line: name.l,
-                                column: name.c,
-                                name_len: name.v.len() as u32,
-                            },
-                        );
-                    }
-                }
-            }
-        }
-    }
-
     /// Resolves an import path (e.g. `["a", "b"]`) relative to the entry file.
     /// - `import_array`: the parsed path segments, e.g. `["a", "b"]` for `import a/b;`
     pub fn resolve_import(
@@ -294,12 +354,10 @@ impl XenoRegistry {
         let import_str = import_str
             .map(|s| s.to_string())
             .unwrap_or_else(|| import_array.join("/"));
-        let canonical = root
-            .join(&import_str)
-            .with_added_extension(".xen")
-            .canonicalize();
+        let mut pathbuf = root.join(&import_str);
+        pathbuf.add_extension("xen");
 
-        match canonical {
+        match pathbuf.canonicalize() {
             Ok(p) => Ok((import_str, p)),
             Err(e) => Err(ModuleError {
                 module_path: import_str.clone(),
@@ -307,11 +365,6 @@ impl XenoRegistry {
                 location: None,
             }),
         }
-    }
-
-    pub fn purge(&self) {
-        let mut reg = self.module_cache.write().unwrap();
-        reg.clear();
     }
 
     /// Suggest available module paths that start with the given `path_so_far`.
@@ -349,6 +402,84 @@ impl XenoRegistry {
                 .collect()
         } else {
             Vec::new()
+        }
+    }
+
+    pub fn find_declaration(&self, current_module: &str, name: &str) -> Option<DeclarationInfo> {
+        self._find_declaration(
+            current_module,
+            name,
+            &self.module_cache.read().unwrap(),
+            &mut HashSet::new(),
+        )
+    }
+    fn _find_declaration<'s, 'c: 's>(
+        &self,
+        current_module: &'c str,
+        name: &str,
+        cache: &'c HashMap<String, ModuleData>,
+        tried: &'s mut HashSet<&'c str>,
+    ) -> Option<DeclarationInfo> {
+        tried.insert(current_module);
+
+        let module = cache.get(current_module)?;
+        let d_opt = module.borrow_declarations().get(&name);
+        match d_opt {
+            Some(d) => return Some(d.clone()),
+            _ => {}
+        }
+
+        for import in module.borrow_imports() {
+            if tried.contains(import.as_str()) {
+                return None;
+            }
+
+            tried.insert(import);
+            if let Some(m) = cache.get(import) {
+                if let Some(d) = m.borrow_declarations().get(name) {
+                    return Some(d.clone());
+                }
+            }
+        }
+
+        None
+    }
+
+    pub fn get_all_declarations_in_scope(&self, current_module: &str) -> Vec<DeclarationInfo> {
+        let mut decls = Vec::new();
+
+        self._get_all_declarations_in_scope(
+            current_module,
+            &mut decls,
+            &self.module_cache.read().unwrap(),
+            &mut HashSet::new(),
+        );
+
+        decls
+    }
+    fn _get_all_declarations_in_scope<'s, 'c: 's>(
+        &self,
+        current_module: &'c str,
+        decls: &mut Vec<DeclarationInfo>,
+        cache: &'c HashMap<String, ModuleData>,
+        tried: &'s mut HashSet<&'c str>,
+    ) {
+        tried.insert(current_module);
+
+        let module = cache.get(current_module);
+        if let Some(m) = module {
+            decls.extend(m.borrow_declarations().values().cloned());
+
+            for import in m.borrow_imports() {
+                if tried.contains(import.as_str()) {
+                    continue;
+                }
+
+                let imported_module = cache.get(import);
+                if let Some(im) = imported_module {
+                    decls.extend(im.borrow_declarations().values().cloned());
+                }
+            }
         }
     }
 }
