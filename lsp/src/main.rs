@@ -1,14 +1,13 @@
 use crate::formatter::format_xenomorph;
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::RwLock;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 use xenomorph_common::{
     lexer::{Lexer, Token, TokenVariant},
-    module::{types::DeclarationInfo, XenoRegistry},
+    module::XenoRegistry,
     parser::{Declaration, Parser},
     plugins::{load_plugins, XenoPlugin},
     TokenData, XenoError,
@@ -19,14 +18,11 @@ use xenomorph_lsp_common::types::{
 
 mod formatter;
 
-#[derive(Debug)]
 struct Backend {
     client: Client,
     plugins: Vec<&'static XenoPlugin<'static>>,
-    document_map: Mutex<HashMap<Url, Arc<String>>>,
-    module_registry: XenoRegistry<'static>,
-    /// Cached declaration info from all loaded modules.
-    declaration_cache: Mutex<HashMap<String, DeclarationInfo>>,
+    document_map: RwLock<HashMap<Url, Arc<String>>>,
+    module_registry: XenoRegistry,
 }
 
 trait EditorPosition {
@@ -55,7 +51,7 @@ impl<'src> EditorPosition for TokenData<'src> {
 impl Backend {
     /// Returns a clone of the stored document text for the given URI.
     fn get_document_text(&self, uri: &Url) -> Option<Arc<String>> {
-        let documents = self.document_map.lock().ok()?;
+        let documents = self.document_map.read().ok()?;
         documents.get(uri).cloned()
     }
 
@@ -198,7 +194,7 @@ impl Backend {
                 if let Some(file_path) = uri.to_file_path().ok() {
                     for decl in &ast {
                         if let Declaration::Import { path, location } = decl {
-                            match self.module_registry.resolve_import(&path) {
+                            match self.module_registry.resolve_import(&path, None) {
                                 Ok((_, abs_path)) => {
                                     if !abs_path.exists() {
                                         import_errors.push(XenoError {
@@ -235,32 +231,6 @@ impl Backend {
         self.client
             .publish_diagnostics(uri.clone(), diagnostics, None)
             .await;
-    }
-
-    /// Load/reload the module graph starting from the given file and rebuild the
-    /// declaration cache.
-    fn reload_modules(&self, import: &[&str]) {
-        self.module_registry.purge();
-
-        let _errors = self.module_registry.load_module(import);
-
-        // Rebuild declaration cache
-        let new_cache = self.module_registry.build_declaration_cache();
-        {
-            let mut cache = self.declaration_cache.lock().unwrap();
-            *cache = new_cache;
-        }
-    }
-
-    /// Get completion items from the cross-module declaration cache.
-    fn get_module_completions(&self) -> Vec<CompletionItem> {
-        let cache = self.declaration_cache.lock().unwrap();
-        cache
-            .values()
-            .map(|info| {
-                create_completion_item(&info.name, info.docs.as_deref(), CompletionItemKind::CLASS)
-            })
-            .collect()
     }
 
     fn find_token_at_position<'a>(
@@ -493,20 +463,16 @@ impl Backend {
 
                 match builtin_info {
                     Some(i) => format!("**{}**\n\n{}", i.label, i.detail.unwrap_or_default()),
-                    None => {
-                        // Check the cross-module declaration cache
-                        let cache = self.declaration_cache.lock().unwrap();
-                        match cache.get(searched_name) {
-                            Some(info) => {
-                                let docs = info.docs.as_deref().unwrap_or("");
-                                format!(
-                                    "**{}** *(from {})*\n\n{}",
-                                    info.name, info.module_path, docs
-                                )
-                            }
-                            None => return None,
+                    None => match self.module_registry.find_declaration(current_module, name) {
+                        Some(info) => {
+                            let docs = info.docs.as_deref().unwrap_or("");
+                            format!(
+                                "**{}** *(from {})*\n\n{}",
+                                info.name, info.module_path, docs
+                            )
                         }
-                    }
+                        None => return None,
+                    },
                 }
             }
         };
@@ -577,7 +543,7 @@ impl LanguageServer for Backend {
         let text = Arc::new(params.text_document.text);
 
         {
-            let mut documents = self.document_map.lock().unwrap();
+            let mut documents = self.document_map.write().unwrap();
             documents.insert(uri.clone(), text);
         }
 
@@ -588,7 +554,7 @@ impl LanguageServer for Backend {
         let uri = params.text_document.uri;
 
         {
-            let mut documents = self.document_map.lock().unwrap();
+            let mut documents = self.document_map.write().unwrap();
             let mut updated = documents
                 .get(&uri)
                 .map(|d| d.as_ref().clone())
@@ -606,7 +572,7 @@ impl LanguageServer for Backend {
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         {
-            let mut documents = self.document_map.lock().unwrap();
+            let mut documents = self.document_map.write().unwrap();
             documents.remove(&params.text_document.uri);
         }
 
@@ -696,7 +662,7 @@ impl LanguageServer for Backend {
                             if let Some(file_path) = uri.to_file_path().ok() {
                                 let segments: Vec<&str> = path.iter().map(|s| s.as_ref()).collect();
                                 if let Ok((_, abs_path)) =
-                                    self.module_registry.resolve_import(&segments)
+                                    self.module_registry.resolve_import(&segments, None)
                                 {
                                     if abs_path.exists() {
                                         if let Ok(target_uri) = Url::from_file_path(&abs_path) {
@@ -745,7 +711,7 @@ impl LanguageServer for Backend {
             }
 
             let searched_name = token.1.v;
-            let cache = self.declaration_cache.lock().unwrap();
+            let cache = self.module_registry.read().unwrap();
             let info = cache.get(searched_name)?;
 
             let target_uri = Url::from_file_path(&info.abs_path).ok()?;
@@ -924,8 +890,7 @@ async fn main() {
     let (service, socket) = LspService::new(move |client| Backend {
         client,
         plugins: load_plugins(),
-        document_map: Mutex::new(HashMap::new()),
-        declaration_cache: Mutex::new(HashMap::new()),
+        document_map: RwLock::new(HashMap::new()),
         module_registry: reg,
     });
 

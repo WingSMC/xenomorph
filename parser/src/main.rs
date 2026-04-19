@@ -8,19 +8,6 @@ fn main() {
         println!("[Debug] Loaded plugins: {:?}", &plugins);
     }
 
-    let file_path = config.workdir.join(&config.parser.entry);
-    let abs_entry = match file_path.canonicalize() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!(
-                "[Module Error]: Cannot resolve entry file '{}': {}",
-                file_path.display(),
-                e
-            );
-            return;
-        }
-    };
-
     let reg = match XenoRegistry::load_workspace() {
         Ok(r) => r,
         Err(e) => {
@@ -31,11 +18,20 @@ fn main() {
         }
     };
 
-    let decl_cache = reg.build_declaration_cache();
-    if config.debug.ast {
-        println!("[Debug] Declaration cache:");
-        for (name, info) in &decl_cache {
-            println!("  {} (from {})", name, info.module_path);
+    for module in reg.module_cache.read().unwrap().values() {
+        println!("Module: {}", module.borrow_module_path());
+        println!("  AST: {:?}", module.borrow_ast());
+        println!("  Declarations:");
+        for d in module.borrow_declarations().values() {
+            println!("{:?}", d);
         }
     }
+
+    // let decl_cache = reg.get_all_declarations_in_scope(reg.entry.as_str());
+    // if config.debug.ast {
+    //     println!("[Debug] Declaration cache:");
+    //     for (name, info) in &decl_cache {
+    //         println!("  {} (from {})", name, info.module_path);
+    //     }
+    // }
 }

@@ -47,9 +47,7 @@ pub struct ModuleData {
 /// Returns `(workspace_root, entry_module_name)` or a `ModuleError` if the entry file cannot be resolved.
 fn get_root() -> Result<(PathBuf, String), ModuleError> {
     let config = Config::get();
-    let mut joined = config
-        .workdir
-        .join(Path::new(&config.parser.entry).components());
+    let mut joined = config.workdir.join(Path::new(&config.parser.entry));
     joined.add_extension("xen");
     let entry_file = joined.canonicalize().map_err(|e| ModuleError {
         module_path: config.parser.entry.clone(),
@@ -91,7 +89,7 @@ fn get_root() -> Result<(PathBuf, String), ModuleError> {
 
 /// Thread-safe handle to a ModuleRegistry.
 pub struct XenoRegistry {
-    module_cache: RwLock<HashMap<ModulePath, ModuleData>>,
+    pub module_cache: RwLock<HashMap<ModulePath, ModuleData>>,
     pub root: PathBuf,
     pub entry: String,
 }
@@ -121,6 +119,8 @@ impl XenoRegistry {
         Ok(reg)
     }
 
+    /// Loads a module from a given URI (e.g. "C:/workspace/src/api/user.xen")
+    /// and all its imports into the registry. Wrapper for `XenoRegistry::load_module`.
     pub fn load_module_from_uri(&self, uri: &str) -> Vec<ModuleError> {
         let path_res = PathBuf::from(uri).canonicalize().map_err(|e| ModuleError {
             module_path: uri.to_string(),
@@ -165,12 +165,15 @@ impl XenoRegistry {
     ///            This is used when we want to reload a module due to a file change.
     /// Returns a list of module-level errors (file not found, parse errors, etc.) and a boolean indicating whether the module was **actually** (re)loaded.
     /// The boolean is used for change detection.
+    // TODO import diagnostics & completion & recovery
     pub fn load_module(
         &self,
         import_segments: &[&str],
         force: bool,
         import_str: Option<&str>,
     ) -> Vec<ModuleError> {
+        println!("Load module: {:?}", import_segments);
+
         // Resolve the import segment array to an absolute
         // file path and a canonical module path
         let (module_path, abs_path) = match self.resolve_import(import_segments, import_str) {
@@ -208,87 +211,23 @@ impl XenoRegistry {
             }
         }
 
-        let mut errors: Vec<ModuleError> = Vec::new();
         // Insert this module into the registry and extract imports so we can recursively load them.
+        let mut errors: Vec<ModuleError> = Vec::new();
         let imports: Vec<(Vec<String>, String)> = {
-            let module_data_res: Result<ModuleData, Vec<ModuleError>> = ModuleDataTryBuilder {
+            let module_data_res = XenoRegistry::_create_module_data(
+                &module_path,
                 abs_path,
-                module_path: module_path.clone(),
                 source,
                 hash,
-                changed: true,
-                analysis_errors: Vec::new(),
-                imports: Vec::new(),
-                tokens_builder: |source| {
-                    Lexer::tokenize(source).map_err(|e| {
-                        vec![ModuleError {
-                            module_path: module_path.clone(),
-                            message: format!("Lexer error: {} at {}", e.message, e.location),
-                            location: Some((e.location.l, e.location.c, e.location.v.len() as u32)),
-                        }]
-                    })
-                },
-                ast_builder: |tokens| {
-                    let (ast, parse_errors) = Parser::parse(tokens);
-
-                    errors.extend(parse_errors.iter().map(|e| ModuleError {
-                        module_path: module_path.clone(),
-                        message: format!("Parse error: {} at {}", e.message, e.location),
-                        location: Some((e.location.l, e.location.c, e.location.v.len() as u32)),
-                    }));
-
-                    Ok(ast)
-                },
-                declarations_builder:
-                    |ast: &XenoAst, abs_path: &PathBuf, module_path: &ModulePath| {
-                        Ok(ast
-                            .iter()
-                            .filter_map(|d| match d {
-                                Declaration::TypeDecl { docs, name, t } => Some((
-                                    name.v,
-                                    DeclarationInfo {
-                                        name: name.v.to_string(),
-                                        module_path: module_path.to_string(),
-                                        abs_path: abs_path.clone(),
-                                        docs: docs.map(|d| d.to_string()),
-                                        line: name.l,
-                                        column: name.c,
-                                        name_len: name.v.len() as u32,
-                                        fields: {
-                                            let v = t
-                                                .iter()
-                                                .filter_map(|item| match item {
-                                                    Expr::Struct(fields) => {
-                                                        Some(fields.iter().filter_map(|(d, e)| {
-                                                            let t = e.get(0)?;
-                                                            match t {
-                                                                Expr::Identifier(id) => Some((
-                                                                    d.v.to_string(),
-                                                                    id.v.to_string(),
-                                                                )),
-                                                                _ => None,
-                                                            }
-                                                        }))
-                                                    }
-                                                    _ => None,
-                                                })
-                                                .flatten()
-                                                // TODO guarantee 0th expr is type
-                                                .collect::<Vec<(String, String)>>();
-                                            (!v.is_empty()).then_some(v)
-                                        },
-                                    },
-                                )),
-                                _ => None,
-                            })
-                            .collect())
-                    },
-            }
-            .try_build();
+                &mut errors,
+            );
 
             let mut md = match module_data_res {
-                Err(e) => return e,
                 Ok(r) => r,
+                Err(e) => {
+                    errors.extend(e);
+                    return errors;
+                }
             };
 
             md.with_analysis_errors_mut(|ae| ae.extend(errors.iter().cloned()));
@@ -319,25 +258,11 @@ impl XenoRegistry {
 
         // Recursively load imports
         for (segments, joined) in imports {
-            let ss = segments.iter().map(|s| s.as_str()).collect::<Vec<&str>>();
-            match self.resolve_import(&ss, Some(&joined)) {
-                Err(e) => errors.push(e),
-                Ok((_joined, import_abs)) => {
-                    if !import_abs.exists() {
-                        errors.push(ModuleError {
-                            module_path: module_path.clone(),
-                            message: format!(
-                                "Imported module '{}' not found at '{}'",
-                                joined,
-                                import_abs.display()
-                            ),
-                            location: None,
-                        });
-                        continue;
-                    }
-                    errors.extend(self.load_module(&ss, false, Some(&joined)));
-                }
-            }
+            errors.extend(self.load_module(
+                segments.iter().map(|s| s.as_str()),
+                false,
+                Some(&joined),
+            ));
         }
 
         errors
@@ -481,5 +406,87 @@ impl XenoRegistry {
                 }
             }
         }
+    }
+
+    fn _create_module_data(
+        module_path: &ModulePath,
+        abs_path: PathBuf,
+        source: String,
+        hash: u64,
+        errors: &mut Vec<ModuleError>,
+    ) -> Result<ModuleData, Vec<ModuleError>> {
+        ModuleDataTryBuilder {
+            abs_path,
+            module_path: module_path.clone(),
+            source,
+            hash,
+            changed: true,
+            analysis_errors: Vec::new(),
+            imports: Vec::new(),
+            tokens_builder: |source| {
+                Lexer::tokenize(source).map_err(|e| {
+                    vec![ModuleError {
+                        module_path: module_path.clone(),
+                        message: format!("Lexer error: {} at {}", e.message, e.location),
+                        location: Some((e.location.l, e.location.c, e.location.v.len() as u32)),
+                    }]
+                })
+            },
+            ast_builder: |tokens| {
+                let (ast, parse_errors) = Parser::parse(tokens);
+
+                errors.extend(parse_errors.iter().map(|e| ModuleError {
+                    module_path: module_path.clone(),
+                    message: format!("Parse error: {} at {}", e.message, e.location),
+                    location: Some((e.location.l, e.location.c, e.location.v.len() as u32)),
+                }));
+
+                Ok(ast)
+            },
+            declarations_builder: |ast: &XenoAst, abs_path: &PathBuf, module_path: &ModulePath| {
+                Ok(ast
+                    .iter()
+                    .filter_map(|d| match d {
+                        Declaration::TypeDecl { docs, name, t } => Some((
+                            name.v,
+                            DeclarationInfo {
+                                name: name.v.to_string(),
+                                module_path: module_path.to_string(),
+                                abs_path: abs_path.clone(),
+                                docs: docs.map(|d| d.to_string()),
+                                line: name.l,
+                                column: name.c,
+                                name_len: name.v.len() as u32,
+                                fields: {
+                                    let v = t
+                                        .iter()
+                                        .filter_map(|item| match item {
+                                            Expr::Struct(fields) => {
+                                                Some(fields.iter().filter_map(|(d, e)| {
+                                                    let t = e.get(0)?;
+                                                    match t {
+                                                        Expr::Identifier(id) => Some((
+                                                            d.v.to_string(),
+                                                            id.v.to_string(),
+                                                        )),
+                                                        _ => None,
+                                                    }
+                                                }))
+                                            }
+                                            _ => None,
+                                        })
+                                        .flatten()
+                                        // TODO guarantee 0th expr is type
+                                        .collect::<Vec<(String, String)>>();
+                                    (!v.is_empty()).then_some(v)
+                                },
+                            },
+                        )),
+                        _ => None,
+                    })
+                    .collect())
+            },
+        }
+        .try_build()
     }
 }
