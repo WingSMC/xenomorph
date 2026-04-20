@@ -259,7 +259,7 @@ impl XenoRegistry {
         // Recursively load imports
         for (segments, joined) in imports {
             errors.extend(self.load_module(
-                segments.iter().map(|s| s.as_str()),
+                &segments.iter().map(|s| s.as_str()).collect::<Vec<&str>>(),
                 false,
                 Some(&joined),
             ));
