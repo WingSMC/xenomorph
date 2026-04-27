@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -26,6 +27,10 @@ pub struct ParserConfig {
     #[serde(default = "default_parser_path")]
     pub entry: String,
 }
+/// Re-export for plugins to use without adding toml as a direct dependency.
+pub use toml::Value as ConfigValue;
+pub type PluginConfigs = HashMap<String, ConfigValue>;
+
 #[repr(Rust)]
 #[derive(Deserialize, Debug, Clone)]
 pub struct PluginsConfig {
@@ -34,6 +39,11 @@ pub struct PluginsConfig {
 
     #[serde(default = "default_plugins_list")]
     pub plugins: Vec<String>,
+
+    /// Per-plugin configuration sections, e.g. `[plugins.typescript]`.
+    /// Plugins can read their own config and other plugins' configs.
+    #[serde(flatten)]
+    pub config: PluginConfigs,
 }
 #[repr(Rust)]
 #[derive(Deserialize, Debug, Clone)]
@@ -105,6 +115,7 @@ impl Default for PluginsConfig {
         Self {
             path: default_plugins_path(),
             plugins: default_plugins_list(),
+            config: HashMap::new(),
         }
     }
 }

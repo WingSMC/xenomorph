@@ -2,8 +2,8 @@ import alma/korte;
 import a;
 import b;
 
-type Nat = Zero | @succ(Nat);
-type List = Nil | @cons(Nat, List);
+// type Nat = Zero | @succ(Nat);
+// type List = Nil | @cons(Nat, List);
 
 /** asd */
 type FavouriteColors = set ["red", "green", "blue"];

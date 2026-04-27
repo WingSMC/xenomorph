@@ -20,8 +20,8 @@ pub struct XenoPlugin<'a> {
     pub initialize: Option<fn() -> ()>,
     pub provide_types: Option<fn() -> &'static [PluginCompletion]>,
     pub provide_annotations: Option<fn() -> &'static [PluginCompletion]>,
-    pub register_generator: Option<fn() -> Box<dyn AnalyzerListener<'a>>>,
-    pub register_analyzer: Option<fn() -> Box<dyn AnalyzerListener<'a>>>,
+    pub register_generator: Option<fn() -> Box<dyn for<'b> AnalyzerListener<'b>>>,
+    pub register_analyzer: Option<fn() -> Box<dyn for<'b> AnalyzerListener<'b>>>,
     // execute: fn(&[&str]),
     // cleanup: fn(),
 

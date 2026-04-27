@@ -831,7 +831,7 @@ impl LanguageServer for Backend {
 
 #[tokio::main]
 async fn main() {
-    let reg = match XenoRegistry::new() {
+    let reg = match XenoRegistry::new(false) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("{}", e);

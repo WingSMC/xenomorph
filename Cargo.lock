@@ -940,6 +940,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "xenomorph_typescript"
+version = "0.1.0"
+dependencies = [
+ "xenomorph_common",
+]
+
+[[package]]
 name = "yansi"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

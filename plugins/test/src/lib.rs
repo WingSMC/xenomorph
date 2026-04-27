@@ -18,7 +18,8 @@ static PLUGIN: XenoPlugin = XenoPlugin {
     initialize: None,
     provide_types: Some(provide_types),
     provide_annotations: None,
-    generate: None,
+    register_generator: None,
+    register_analyzer: None,
 };
 
 #[no_mangle]

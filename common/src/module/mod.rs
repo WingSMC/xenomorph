@@ -11,7 +11,7 @@ use crate::lexer::{Lexer, Token, XenoTokens};
 use crate::module::types::{DeclarationInfo, ErrorPhase, ModuleError, ModulePath};
 use crate::parser::{Declaration, Expr, Parser, XenoAst};
 use crate::plugins::XenoPlugin;
-use crate::semantic::analyze;
+use crate::semantic::Analyzer;
 use crate::utils::calculate_hash;
 
 /// Information about a single module (one .xen file).
@@ -103,22 +103,25 @@ pub struct XenoRegistry {
     pub root: PathBuf,
     pub entry: String,
     pub plugins: &'static Vec<&'static XenoPlugin<'static>>,
+    pub analyzer: Analyzer,
 }
 
 impl XenoRegistry {
-    pub fn new() -> Result<XenoRegistry, ModuleError> {
+    pub fn new(generation_mode: bool) -> Result<XenoRegistry, ModuleError> {
         let (root, entry) = get_root()?;
+        let plugins = XenoPlugin::get_plugins();
         Ok(XenoRegistry {
             module_cache: RwLock::new(HashMap::default()),
             root,
             entry,
-            plugins: XenoPlugin::get_plugins(),
+            analyzer: Analyzer::new(generation_mode, plugins),
+            plugins,
         })
     }
 
     /// Initializes a new `XenoRegistry` and loads the entire workspace starting from the entry module.
-    pub fn load_workspace() -> Result<XenoRegistry, Vec<ModuleError>> {
-        let reg = XenoRegistry::new().map_err(|e| vec![e])?;
+    pub fn load_workspace(generation_mode: bool) -> Result<XenoRegistry, Vec<ModuleError>> {
+        let reg = XenoRegistry::new(generation_mode).map_err(|e| vec![e])?;
         let errs = reg.load_module(&[&reg.entry], true, None);
         if !errs.is_empty() {
             return Err(errs);
@@ -303,40 +306,11 @@ impl XenoRegistry {
             let cache = self.module_cache.read().unwrap();
             let md = cache.get(&module_path).unwrap();
 
-            let mut known_types: HashSet<&str> = HashSet::new();
-            let mut known_annotations: HashSet<&str> = HashSet::new();
+            let xeno_errors =
+                self.analyzer
+                    .run(md.borrow_ast(), md, &imports, &cache, self.plugins, &Config::get().plugins.config);
 
-            for t in &crate::semantic::BUILTIN_TYPES {
-                known_types.insert(t.name);
-            }
-            for a in &crate::semantic::BUILTIN_ANNOTATIONS {
-                known_annotations.insert(a.name);
-            }
-            for plugin in self.plugins {
-                if let Some(provide) = plugin.provide_types {
-                    for pc in provide() {
-                        known_types.insert(pc.label);
-                    }
-                }
-                if let Some(provide) = plugin.provide_annotations {
-                    for pc in provide() {
-                        known_annotations.insert(pc.label);
-                    }
-                }
-            }
-            for name in md.borrow_declarations().keys() {
-                known_types.insert(name);
-            }
-            for import in &imports {
-                if let Some(m) = cache.get(import) {
-                    for name in m.borrow_declarations().keys() {
-                        known_types.insert(name);
-                    }
-                }
-            }
-
-            let analyzer_errors: Vec<ModuleError> =
-                analyze(md.borrow_ast(), &known_types, &known_annotations)
+            let analyzer_errors: Vec<ModuleError> = xeno_errors
                     .iter()
                     .map(|e| ModuleError {
                         module_path: module_path.clone(),
@@ -357,8 +331,8 @@ impl XenoRegistry {
         {
             let mut cache = self.module_cache.write().unwrap();
             let md = cache.get_mut(&module_path).unwrap();
-            md.with_analyzer_errors_mut(|errs| *errs = analyzer_errors.clone());
-            md.with_module_errors_mut(|errs| *errs = import_errors.clone());
+            md.with_analyzer_errors_mut(|errs: &mut Vec<ModuleError>| *errs = analyzer_errors.clone());
+            md.with_module_errors_mut(|errs: &mut Vec<ModuleError>| *errs = import_errors.clone());
         }
 
         errors.extend(lexer_errs);

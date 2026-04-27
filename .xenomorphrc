@@ -3,7 +3,10 @@ entry = "tests/examples/parser/sets/a"
 
 [plugins]
 path = "./target/release/"
-plugins = ["test"]
+plugins = ["test", "xenomorph_typescript"]
+
+[plugins.typescript]
+output = "./tests/out/typescript/"
 
 [debug]
 plugins = true

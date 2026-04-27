@@ -1,5 +1,5 @@
 use crate::TokenData;
-use std::{any::Any, fmt};
+use std::{/* any::Any, */ fmt};
 
 pub type BinaryExpr<'src> = Box<(Expr<'src>, Expr<'src>)>;
 pub type KeyValExpr<'src> = (&'src TokenData<'src>, AnonymType<'src>);
@@ -23,6 +23,8 @@ pub enum Declaration<'src> {
     // Custom {
     //     plugin_id: &'static str,
     //     decl_id: &'static str,
+    //     docs: Option<&'src str>,
+    //     name: Option<&'src TokenData<'src>>,
     //     value: Box<dyn Any>,
     // },
 }
@@ -84,7 +86,11 @@ impl<'src> fmt::Display for Declaration<'src> {
                     write!(f, "{}", item)?;
                 }
                 write!(f, "")
-            }
+            } // Declaration::Custom {
+              //     plugin_id, decl_id, ..
+              // } => {
+              //     write!(f, "<custom: {}:{}>", plugin_id, decl_id)
+              // }
         }
     }
 }
