@@ -265,7 +265,6 @@ impl XenoRegistry {
         self._load_module_inner(module_path, abs_path, source, hash)
     }
 
-    /// Shared implementation for loading a module from source text.
     fn _load_module_inner(
         &self,
         module_path: ModulePath,
@@ -274,30 +273,45 @@ impl XenoRegistry {
         hash: u64,
     ) -> Vec<ModuleError> {
         let mut errors: Vec<ModuleError> = Vec::new();
-        let imports: Vec<(Vec<String>, String)> = {
-            let module_data_res = Self::_create_module_data(&module_path, abs_path, source, hash);
 
-            let mut md = match module_data_res {
-                Ok(r) => r,
-                Err(e) => {
-                    errors.extend(e);
-                    return errors;
-                }
-            };
+        let md = match Self::_create_module_data(&module_path, abs_path, source, hash) {
+            Ok(r) => r,
+            Err(e) => {
+                errors.extend(e);
+                return errors;
+            }
+        };
 
-            // Build known-name sets for validation
+        // ── Step 1: Insert into cache immediately to break import cycles ──
+        // Any recursive load_module call for this module will now find it and return early.
+        let imports = md.borrow_imports().to_vec();
+        {
+            self.module_cache
+                .write()
+                .unwrap()
+                .insert(module_path.clone(), md);
+        }
+
+        // ── Step 2: Load imports (cycle-safe now) ──
+        for import in &imports {
+            let segments: Vec<&str> = import.split('/').collect();
+            errors.extend(self.load_module(&segments, false, Some(import)));
+        }
+
+        // ── Step 3: Analyze with full scope (read lock only) ──
+        let (analyzer_errors, import_errors, lexer_errs, parser_errs) = {
+            let cache = self.module_cache.read().unwrap();
+            let md = cache.get(&module_path).unwrap();
+
             let mut known_types: HashSet<&str> = HashSet::new();
             let mut known_annotations: HashSet<&str> = HashSet::new();
 
-            // Builtins
             for t in &crate::semantic::BUILTIN_TYPES {
                 known_types.insert(t.name);
             }
             for a in &crate::semantic::BUILTIN_ANNOTATIONS {
                 known_annotations.insert(a.name);
             }
-
-            // Plugin-provided names
             for plugin in self.plugins {
                 if let Some(provide) = plugin.provide_types {
                     for pc in provide() {
@@ -310,30 +324,17 @@ impl XenoRegistry {
                     }
                 }
             }
-
-            // This module's own declarations
             for name in md.borrow_declarations().keys() {
                 known_types.insert(name);
             }
-
-            // Declarations from already-loaded imported modules
-            let imported_names: Vec<String> = {
-                let cache = self.module_cache.read().unwrap();
-                md.borrow_imports()
-                    .iter()
-                    .flat_map(|import| {
-                        cache
-                            .get(import)
-                            .into_iter()
-                            .flat_map(|m| m.borrow_declarations().keys().map(|k| k.to_string()))
-                    })
-                    .collect()
-            };
-            for name in &imported_names {
-                known_types.insert(name);
+            for import in &imports {
+                if let Some(m) = cache.get(import) {
+                    for name in m.borrow_declarations().keys() {
+                        known_types.insert(name);
+                    }
+                }
             }
 
-            // Run semantic analyzer
             let analyzer_errors: Vec<ModuleError> =
                 analyze(md.borrow_ast(), &known_types, &known_annotations)
                     .iter()
@@ -344,47 +345,26 @@ impl XenoRegistry {
                         phase: ErrorPhase::Analyzer,
                     })
                     .collect();
-            md.with_analyzer_errors_mut(|errs| *errs = analyzer_errors);
 
-            // Validate imports
-            let import_errors = self.validate_imports(&md, &module_path);
-            md.with_module_errors_mut(|errs| *errs = import_errors);
+            let import_errors = self.validate_imports(md, &module_path);
+            let lexer_errs = md.borrow_lexer_errors().clone();
+            let parser_errs = md.borrow_parser_errors().clone();
 
-            let import_paths: Vec<(Vec<String>, String)> = md
-                .borrow_ast()
-                .iter()
-                .filter_map(|d| match d {
-                    Declaration::Import { path, .. } => {
-                        let owned = path.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-                        let joined = owned.join("/");
-                        Some((owned, joined))
-                    }
-                    _ => None,
-                })
-                .collect();
-
-            // Collect all errors for return
-            errors.extend(md.borrow_lexer_errors().iter().cloned());
-            errors.extend(md.borrow_parser_errors().iter().cloned());
-            errors.extend(md.borrow_analyzer_errors().iter().cloned());
-            errors.extend(md.borrow_module_errors().iter().cloned());
-
-            self.module_cache
-                .write()
-                .unwrap()
-                .insert(module_path.clone(), md);
-
-            import_paths
+            (analyzer_errors, import_errors, lexer_errs, parser_errs)
         };
 
-        // Recursively load imports from disk
-        for (segments, joined) in imports {
-            errors.extend(self.load_module(
-                &segments.iter().map(|s| s.as_str()).collect::<Vec<&str>>(),
-                false,
-                Some(&joined),
-            ));
+        // ── Step 4: Write error fields back into the cached module ──
+        {
+            let mut cache = self.module_cache.write().unwrap();
+            let md = cache.get_mut(&module_path).unwrap();
+            md.with_analyzer_errors_mut(|errs| *errs = analyzer_errors.clone());
+            md.with_module_errors_mut(|errs| *errs = import_errors.clone());
         }
+
+        errors.extend(lexer_errs);
+        errors.extend(parser_errs);
+        errors.extend(analyzer_errors);
+        errors.extend(import_errors);
 
         errors
     }
