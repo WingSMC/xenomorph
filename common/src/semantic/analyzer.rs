@@ -223,9 +223,13 @@ impl Analyzer {
             .map(|k| k.to_string())
             .collect();
 
-        // Imported declarations grouped by module
+        // Imported declarations grouped by module (skip self-imports)
+        let module_path_str = module_data.borrow_module_path().to_string();
         let mut imported_types: HashMap<String, Vec<String>> = HashMap::new();
         for import in imports {
+            if import == &module_path_str {
+                continue; // skip self-import
+            }
             if let Some(m) = cache.get(import) {
                 let names: Vec<String> = m
                     .borrow_declarations()
@@ -237,7 +241,7 @@ impl Analyzer {
         }
 
         let scope = ScopeInfo {
-            module_path: module_data.borrow_module_path().to_string(),
+            module_path: module_path_str,
             abs_path: module_data.borrow_abs_path().to_path_buf(),
             own_types,
             imported_types,
@@ -267,6 +271,20 @@ impl Analyzer {
 
         // Walk the AST
         let mut errors = Vec::new();
+
+        // Check for self-imports
+        for decl in ast {
+            if let Declaration::Import { path, location } = decl {
+                let import_path = path.join("/");
+                if import_path == scope.module_path {
+                    errors.push(XenoError {
+                        location: (*location).clone(),
+                        message: format!("Module '{}' cannot import itself", import_path),
+                    });
+                }
+            }
+        }
+
         walk_ast(&mut listeners, ast, &mut errors);
 
         // Notify listeners that the module is done
@@ -310,13 +328,13 @@ fn walk_decl<'src>(
         Declaration::TypeDecl { t, .. } => {
             walk_type(ls, t, errors);
         }
-        Declaration::Import { .. } => {} // Declaration::Custom {
-                                         //     plugin_id,
-                                         //     decl_id,
-                                         //     name,
-                                         //     docs,
-                                         //     value,
-                                         // } => walk_custom(plugin_id, decl_id, name, docs, value, ls, errors),
+        _ => {} // Declaration::Custom {
+                //     plugin_id,
+                //     decl_id,
+                //     name,
+                //     docs,
+                //     value,
+                // } => walk_custom(plugin_id, decl_id, name, docs, value, ls, errors),
     }
     for l in ls.iter_mut() {
         l.on_after_decl(decl, errors);
@@ -459,7 +477,6 @@ impl XenoDefNode<'_> {
 
         for declaration in ast {
             match declaration {
-                Declaration::Import { .. } => {}
                 Declaration::TypeDecl { name, docs, t } => {
                     let node = XenoDefNode {
                         name: name.v,
@@ -470,19 +487,20 @@ impl XenoDefNode<'_> {
                         })),
                     };
                     def_tree.insert(name.v, node);
-                } // Declaration::Custom { docs, name, .. } => {
-                  //     if let Some(n) = name {
-                  //         def_tree.insert(
-                  //             n.v,
-                  //             XenoDefNode {
-                  //                 name: n.v,
-                  //                 docs: *docs,
-                  //                 fields: None,
-                  //                 meta: None,
-                  //             },
-                  //         );
-                  //     }
-                  // }
+                }
+                _ => {} // Declaration::Custom { docs, name, .. } => {
+                        //     if let Some(n) = name {
+                        //         def_tree.insert(
+                        //             n.v,
+                        //             XenoDefNode {
+                        //                 name: n.v,
+                        //                 docs: *docs,
+                        //                 fields: None,
+                        //                 meta: None,
+                        //             },
+                        //         );
+                        //     }
+                        // }
             }
         }
 
