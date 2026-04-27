@@ -1,4 +1,4 @@
-use crate::{config::Config, parser::XenoAst};
+use crate::{config::Config, semantic::AnalyzerListener};
 use libloading::{Library, Symbol};
 use std::{
     path::{Path, PathBuf},
@@ -20,9 +20,9 @@ pub struct XenoPlugin<'a> {
     pub initialize: Option<fn() -> ()>,
     pub provide_types: Option<fn() -> &'static [PluginCompletion]>,
     pub provide_annotations: Option<fn() -> &'static [PluginCompletion]>,
-    pub generate: Option<fn(ast: &XenoAst) -> ()>,
-    // pub lint: fn(&Self) -> (),
-    // execute: fn(&str),
+    pub register_generator: Option<fn() -> Box<dyn AnalyzerListener<'a>>>,
+    pub register_analyzer: Option<fn() -> Box<dyn AnalyzerListener<'a>>>,
+    // execute: fn(&[&str]),
     // cleanup: fn(),
 
     // parse_custom_declaration

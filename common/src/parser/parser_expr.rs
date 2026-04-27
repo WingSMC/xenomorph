@@ -1,12 +1,12 @@
 use crate::TokenData;
-use std::fmt;
+use std::{any::Any, fmt};
 
 pub type BinaryExpr<'src> = Box<(Expr<'src>, Expr<'src>)>;
 pub type KeyValExpr<'src> = (&'src TokenData<'src>, AnonymType<'src>);
 pub type AnonymType<'src> = Vec<Expr<'src>>;
 pub type TypeList<'src> = Vec<AnonymType<'src>>;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub enum Declaration<'src> {
     Import {
         path: Vec<&'src str>,
@@ -20,6 +20,11 @@ pub enum Declaration<'src> {
         // from: Location
         // to: Location
     },
+    // Custom {
+    //     plugin_id: &'static str,
+    //     decl_id: &'static str,
+    //     value: Box<dyn Any>,
+    // },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

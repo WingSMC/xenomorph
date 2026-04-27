@@ -1,44 +1,257 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    parser::{Declaration, Expr},
+    parser::{AnonymType, Declaration, Expr, KeyValExpr, TypeList},
+    semantic::{if_validator::IfChainValidator, name_validator::NameValidator},
     TokenData, XenoError,
 };
 
-pub struct Analyzer {
-    // on_before_ast, on_after_ast
+/// Trait for AST walk event listeners. All methods have default no-op
+/// implementations so listeners only need to override the events they
+/// care about.
+#[allow(unused_variables)]
+pub trait AnalyzerListener<'src> {
+    fn on_before_ast(&mut self, ast: &[Declaration<'src>], errors: &mut Vec<XenoError<'src>>) {}
+    fn on_after_ast(&mut self, ast: &[Declaration<'src>], errors: &mut Vec<XenoError<'src>>) {}
 
-    // on_before_custom_decl, on_after_custom_decl
-    // on_before_decl, on_after_decl
-    //   on_before_type, on_after_type
-    //     on_before_expr, on_after_expr
-    //       on_before_struct, on_after_struct
-    //         on_before_field, on_after_field
-    //       on_before_enum, on_after_enum
-    //       on_before_list, on_after_list
-    //       on_before_set, on_after_set
-    //       on_before_annotation, on_after_annotation
+    fn on_before_decl(&mut self, decl: &Declaration<'src>, errors: &mut Vec<XenoError<'src>>) {}
+    fn on_after_decl(&mut self, decl: &Declaration<'src>, errors: &mut Vec<XenoError<'src>>) {}
+
+    fn on_before_type(&mut self, exprs: &AnonymType<'src>, errors: &mut Vec<XenoError<'src>>) {}
+    fn on_after_type(&mut self, exprs: &AnonymType<'src>, errors: &mut Vec<XenoError<'src>>) {}
+
+    fn on_before_expr(&mut self, expr: &Expr<'src>, errors: &mut Vec<XenoError<'src>>) {}
+    fn on_after_expr(&mut self, expr: &Expr<'src>, errors: &mut Vec<XenoError<'src>>) {}
+
+    fn on_before_struct(&mut self, fields: &[KeyValExpr<'src>], errors: &mut Vec<XenoError<'src>>) {
+    }
+    fn on_after_struct(&mut self, fields: &[KeyValExpr<'src>], errors: &mut Vec<XenoError<'src>>) {}
+
+    fn on_before_field(
+        &mut self,
+        key: &TokenData<'src>,
+        value: &AnonymType<'src>,
+        errors: &mut Vec<XenoError<'src>>,
+    ) {
+    }
+    fn on_after_field(
+        &mut self,
+        key: &TokenData<'src>,
+        value: &AnonymType<'src>,
+        errors: &mut Vec<XenoError<'src>>,
+    ) {
+    }
+
+    fn on_before_enum(&mut self, variants: &[KeyValExpr<'src>], errors: &mut Vec<XenoError<'src>>) {
+    }
+    fn on_after_enum(&mut self, variants: &[KeyValExpr<'src>], errors: &mut Vec<XenoError<'src>>) {}
+
+    fn on_before_list(&mut self, inner: &TypeList<'src>, errors: &mut Vec<XenoError<'src>>) {}
+    fn on_after_list(&mut self, inner: &TypeList<'src>, errors: &mut Vec<XenoError<'src>>) {}
+
+    fn on_before_set(&mut self, inner: &TypeList<'src>, errors: &mut Vec<XenoError<'src>>) {}
+    fn on_after_set(&mut self, inner: &TypeList<'src>, errors: &mut Vec<XenoError<'src>>) {}
+
+    fn on_before_annotation(
+        &mut self,
+        name: &TokenData<'src>,
+        args: &TypeList<'src>,
+        errors: &mut Vec<XenoError<'src>>,
+    ) {
+    }
+    fn on_after_annotation(
+        &mut self,
+        name: &TokenData<'src>,
+        args: &TypeList<'src>,
+        errors: &mut Vec<XenoError<'src>>,
+    ) {
+    }
 }
 
-pub fn analyze<'src>(
-    ast: &Vec<Declaration<'src>>,
-    known_types: &HashSet<&str>,
-    known_annotations: &HashSet<&str>,
-) -> Vec<XenoError<'src>> {
-    let mut errors = Vec::new();
+pub struct Analyzer<'src, 'a> {
+    listeners: Vec<Box<dyn AnalyzerListener<'src> + 'a>>,
+}
 
-    for declaration in ast {
-        match declaration {
-            Declaration::Import { .. } => { /* imports handled by module loader */ }
-            Declaration::TypeDecl { t, .. } => {
-                validate_annotations(t, &mut errors);
-                validate_names(t, known_types, known_annotations, &mut errors);
-            }
+impl<'src, 'a> Analyzer<'src, 'a> {
+    pub fn new() -> Self {
+        Analyzer {
+            listeners: Vec::new(),
         }
     }
 
-    errors
+    pub fn add_listener(&mut self, listener: impl AnalyzerListener<'src> + 'a) {
+        self.listeners.push(Box::new(listener));
+    }
+
+    pub fn analyze(mut self, ast: &[Declaration<'src>]) -> Vec<XenoError<'src>> {
+        let mut errors = Vec::new();
+        walk_ast(&mut self.listeners, ast, &mut errors);
+        errors
+    }
 }
+
+// ── Walk functions (free functions to avoid &mut self borrow issues) ─
+
+type Listeners<'src, 'a> = [Box<dyn AnalyzerListener<'src> + 'a>];
+
+fn walk_ast<'src>(
+    ls: &mut Listeners<'src, '_>,
+    ast: &[Declaration<'src>],
+    errors: &mut Vec<XenoError<'src>>,
+) {
+    for l in ls.iter_mut() {
+        l.on_before_ast(ast, errors);
+    }
+    for decl in ast {
+        walk_decl(ls, decl, errors);
+    }
+    for l in ls.iter_mut() {
+        l.on_after_ast(ast, errors);
+    }
+}
+
+fn walk_decl<'src>(
+    ls: &mut Listeners<'src, '_>,
+    decl: &Declaration<'src>,
+    errors: &mut Vec<XenoError<'src>>,
+) {
+    for l in ls.iter_mut() {
+        l.on_before_decl(decl, errors);
+    }
+    match decl {
+        Declaration::Import { .. } => {}
+        Declaration::TypeDecl { t, .. } => {
+            walk_type(ls, t, errors);
+        }
+    }
+    for l in ls.iter_mut() {
+        l.on_after_decl(decl, errors);
+    }
+}
+
+fn walk_type<'src>(
+    ls: &mut Listeners<'src, '_>,
+    exprs: &AnonymType<'src>,
+    errors: &mut Vec<XenoError<'src>>,
+) {
+    for l in ls.iter_mut() {
+        l.on_before_type(exprs, errors);
+    }
+    for expr in exprs {
+        walk_expr(ls, expr, errors);
+    }
+    for l in ls.iter_mut() {
+        l.on_after_type(exprs, errors);
+    }
+}
+
+fn walk_expr<'src>(
+    ls: &mut Listeners<'src, '_>,
+    expr: &Expr<'src>,
+    errors: &mut Vec<XenoError<'src>>,
+) {
+    for l in ls.iter_mut() {
+        l.on_before_expr(expr, errors);
+    }
+    match expr {
+        Expr::Struct(fields) => {
+            for l in ls.iter_mut() {
+                l.on_before_struct(fields, errors);
+            }
+            for (key, value) in fields {
+                for l in ls.iter_mut() {
+                    l.on_before_field(key, value, errors);
+                }
+                walk_type(ls, value, errors);
+                for l in ls.iter_mut() {
+                    l.on_after_field(key, value, errors);
+                }
+            }
+            for l in ls.iter_mut() {
+                l.on_after_struct(fields, errors);
+            }
+        }
+        Expr::Enum(variants) => {
+            for l in ls.iter_mut() {
+                l.on_before_enum(variants, errors);
+            }
+            for (key, value) in variants {
+                for l in ls.iter_mut() {
+                    l.on_before_field(key, value, errors);
+                }
+                walk_type(ls, value, errors);
+                for l in ls.iter_mut() {
+                    l.on_after_field(key, value, errors);
+                }
+            }
+            for l in ls.iter_mut() {
+                l.on_after_enum(variants, errors);
+            }
+        }
+        Expr::List(inner) => {
+            for l in ls.iter_mut() {
+                l.on_before_list(inner, errors);
+            }
+            for anon_type in inner {
+                walk_type(ls, anon_type, errors);
+            }
+            for l in ls.iter_mut() {
+                l.on_after_list(inner, errors);
+            }
+        }
+        Expr::Set(inner) => {
+            for l in ls.iter_mut() {
+                l.on_before_set(inner, errors);
+            }
+            for anon_type in inner {
+                walk_type(ls, anon_type, errors);
+            }
+            for l in ls.iter_mut() {
+                l.on_after_set(inner, errors);
+            }
+        }
+        Expr::Annotation(name, args) => {
+            for l in ls.iter_mut() {
+                l.on_before_annotation(name, args, errors);
+            }
+            for anon_type in args {
+                walk_type(ls, anon_type, errors);
+            }
+            for l in ls.iter_mut() {
+                l.on_after_annotation(name, args, errors);
+            }
+        }
+        Expr::Not(inner) => {
+            walk_expr(ls, inner, errors);
+        }
+        Expr::BinaryExpr(_, pair) => {
+            walk_expr(ls, &pair.0, errors);
+            walk_expr(ls, &pair.1, errors);
+        }
+        Expr::Identifier(_) | Expr::Literal(_) | Expr::Regex(_) | Expr::FieldAccess(_) => {}
+    }
+    for l in ls.iter_mut() {
+        l.on_after_expr(expr, errors);
+    }
+}
+
+// ── Convenience: default analyzer with built-in listeners ───────────
+
+pub fn analyze<'src>(
+    ast: &[Declaration<'src>],
+    known_types: &HashSet<&str>,
+    known_annotations: &HashSet<&str>,
+) -> Vec<XenoError<'src>> {
+    let mut analyzer = Analyzer::new();
+    analyzer.add_listener(IfChainValidator::new());
+    analyzer.add_listener(NameValidator::new(
+        known_types.clone(),
+        known_annotations.clone(),
+    ));
+    analyzer.analyze(ast)
+}
+
+// ── Def tree (unchanged, kept for plugin use) ───────────────────────
 
 type XenoDefTree<'src> = HashMap<&'src str, XenoDefNode<'src>>;
 pub struct XenoDefNode<'src> {
@@ -88,122 +301,5 @@ impl XenoDefNode<'_> {
             }
         }
         None
-    }
-}
-
-/// Tracks the state of an @if / @elseif / @else annotation chain.
-#[derive(Clone, Copy, PartialEq)]
-enum IfChainState {
-    /// No active chain — we are outside any @if block.
-    None,
-    /// Just saw @if (or @elseif) — can be followed by @elseif or @else.
-    AfterIf,
-    /// Just saw @else — chain is closed, nothing else may follow.
-    AfterElse,
-}
-
-fn validate_names<'src>(
-    exprs: &Vec<Expr<'src>>,
-    known_types: &HashSet<&str>,
-    known_annotations: &HashSet<&str>,
-    errors: &mut Vec<XenoError<'src>>,
-) {
-    for expr in exprs {
-        match expr {
-            Expr::Identifier(id) => {
-                if !known_types.contains(id.v) {
-                    errors.push(XenoError {
-                        location: (*id).clone(),
-                        message: format!("Unknown type '{}'", id.v),
-                    });
-                }
-            }
-            Expr::Annotation(id, args) => {
-                if !known_annotations.contains(id.v) {
-                    errors.push(XenoError {
-                        location: (*id).clone(),
-                        message: format!("Unknown annotation '@{}'", id.v),
-                    });
-                }
-                for anon_type in args {
-                    validate_names(anon_type, known_types, known_annotations, errors);
-                }
-            }
-            Expr::Struct(fields) | Expr::Enum(fields) => {
-                for (_, field_exprs) in fields {
-                    validate_names(field_exprs, known_types, known_annotations, errors);
-                }
-            }
-            Expr::List(inner) | Expr::Set(inner) => {
-                for anon_type in inner {
-                    validate_names(anon_type, known_types, known_annotations, errors);
-                }
-            }
-            Expr::Not(inner) => {
-                validate_names(
-                    &vec![*inner.clone()],
-                    known_types,
-                    known_annotations,
-                    errors,
-                );
-            }
-            Expr::BinaryExpr(_, pair) => {
-                validate_names(
-                    &vec![pair.0.clone()],
-                    known_types,
-                    known_annotations,
-                    errors,
-                );
-                validate_names(
-                    &vec![pair.1.clone()],
-                    known_types,
-                    known_annotations,
-                    errors,
-                );
-            }
-            Expr::Literal(_) | Expr::Regex(_) | Expr::FieldAccess(_) => {}
-        }
-    }
-}
-
-fn validate_annotations<'src>(exprs: &Vec<Expr<'src>>, errors: &mut Vec<XenoError<'src>>) {
-    let mut chain = IfChainState::None;
-
-    for expr in exprs {
-        match expr {
-            Expr::Struct(fields) => {
-                for field in fields {
-                    validate_annotations(&field.1, errors);
-                }
-            }
-            Expr::Annotation(id, _) => {
-                match id.v {
-                    "if" => chain = IfChainState::AfterIf,
-                    "elseif" => match chain {
-                        IfChainState::AfterIf => {}
-                        IfChainState::None | IfChainState::AfterElse => {
-                            errors.push(XenoError {
-                                location: (*id).clone(),
-                                message: "'@elseif' must follow an '@if' or another '@elseif'."
-                                    .to_string(),
-                            });
-                            chain = IfChainState::None; // Chain is broken; reset
-                        }
-                    },
-                    "else" => match chain {
-                        IfChainState::AfterIf => chain = IfChainState::AfterElse,
-                        IfChainState::None | IfChainState::AfterElse => {
-                            errors.push(XenoError {
-                                location: (*id).clone(),
-                                message: "'@else' must follow an '@if' or '@elseif'.".to_string(),
-                            });
-                            chain = IfChainState::None; // Chain is broken; reset
-                        }
-                    },
-                    _ => chain = IfChainState::None,
-                }
-            }
-            _ => chain = IfChainState::None,
-        }
     }
 }
