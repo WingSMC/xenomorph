@@ -1,13 +1,6 @@
-use xenomorph_common::{config::Config, module::XenoRegistry, plugins::load_plugins};
+use xenomorph_common::module::XenoRegistry;
 
 fn main() {
-    let config = Config::get();
-    let plugins = load_plugins();
-
-    if config.debug.plugins {
-        println!("[Debug] Loaded plugins: {:?}", &plugins);
-    }
-
     let reg = match XenoRegistry::load_workspace() {
         Ok(r) => r,
         Err(e) => {
@@ -26,12 +19,4 @@ fn main() {
             println!("{:?}", d);
         }
     }
-
-    // let decl_cache = reg.get_all_declarations_in_scope(reg.entry.as_str());
-    // if config.debug.ast {
-    //     println!("[Debug] Declaration cache:");
-    //     for (name, info) in &decl_cache {
-    //         println!("  {} (from {})", name, info.module_path);
-    //     }
-    // }
 }

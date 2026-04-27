@@ -7,9 +7,11 @@ use std::sync::RwLock;
 pub mod types;
 
 use crate::config::Config;
-use crate::lexer::{Lexer, XenoTokens};
-use crate::module::types::{DeclarationInfo, ModuleError, ModulePath};
+use crate::lexer::{Lexer, Token, XenoTokens};
+use crate::module::types::{DeclarationInfo, ErrorPhase, ModuleError, ModulePath};
 use crate::parser::{Declaration, Expr, Parser, XenoAst};
+use crate::plugins::XenoPlugin;
+use crate::semantic::analyze;
 use crate::utils::calculate_hash;
 
 /// Information about a single module (one .xen file).
@@ -24,8 +26,14 @@ pub struct ModuleData {
     pub source: String,
     /// Hash of the source text, used for change detection.
     pub hash: u64,
-    /// Errors encountered during lexing/parsing/analysis of this module.
-    pub analysis_errors: Vec<ModuleError>,
+    /// Lexer errors.
+    pub lexer_errors: Vec<ModuleError>,
+    /// Parser errors.
+    pub parser_errors: Vec<ModuleError>,
+    /// Semantic analyzer errors.
+    pub analyzer_errors: Vec<ModuleError>,
+    /// Module-level errors (file not found, import resolution, etc.)
+    pub module_errors: Vec<ModuleError>,
     /// Modules that this module imports
     pub imports: Vec<ModulePath>,
     /// Changed flag
@@ -44,7 +52,6 @@ pub struct ModuleData {
 }
 
 /// Determines the workspace root and entry module path from the config.
-/// Returns `(workspace_root, entry_module_name)` or a `ModuleError` if the entry file cannot be resolved.
 fn get_root() -> Result<(PathBuf, String), ModuleError> {
     let config = Config::get();
     let mut joined = config.workdir.join(Path::new(&config.parser.entry));
@@ -53,6 +60,7 @@ fn get_root() -> Result<(PathBuf, String), ModuleError> {
         module_path: config.parser.entry.clone(),
         message: format!("Cannot resolve entry file '{:?}': {}", joined, e),
         location: None,
+        phase: ErrorPhase::Module,
     })?;
 
     let root_err = || ModuleError {
@@ -62,6 +70,7 @@ fn get_root() -> Result<(PathBuf, String), ModuleError> {
             entry_file.display()
         ),
         location: None,
+        phase: ErrorPhase::Module,
     };
 
     let root = entry_file
@@ -83,68 +92,78 @@ fn get_root() -> Result<(PathBuf, String), ModuleError> {
                     entry_file.display()
                 ),
                 location: None,
+                phase: ErrorPhase::Module,
             })?,
     ))
 }
 
-/// Thread-safe handle to a ModuleRegistry.
+/// Thread-safe module registry. Single source of truth for all module data.
 pub struct XenoRegistry {
     pub module_cache: RwLock<HashMap<ModulePath, ModuleData>>,
     pub root: PathBuf,
     pub entry: String,
+    pub plugins: &'static Vec<&'static XenoPlugin<'static>>,
 }
 
 impl XenoRegistry {
-    /// Initializes the registry by determining the workspace root and entry module from the config.
-    /// If the **entry file** or **root directory** cannot be resolved, returns a ModuleError.
     pub fn new() -> Result<XenoRegistry, ModuleError> {
         let (root, entry) = get_root()?;
         Ok(XenoRegistry {
             module_cache: RwLock::new(HashMap::default()),
             root,
             entry,
+            plugins: XenoPlugin::get_plugins(),
         })
     }
 
-    /// Initializes a new `XenoRegistry` and loads
-    /// the entire workspace starting from the entry module.
+    /// Initializes a new `XenoRegistry` and loads the entire workspace starting from the entry module.
     pub fn load_workspace() -> Result<XenoRegistry, Vec<ModuleError>> {
         let reg = XenoRegistry::new().map_err(|e| vec![e])?;
         let errs = reg.load_module(&[&reg.entry], true, None);
-
         if !errs.is_empty() {
             return Err(errs);
         }
-
         Ok(reg)
     }
 
-    /// Loads a module from a given URI (e.g. "C:/workspace/src/api/user.xen")
-    /// and all its imports into the registry. Wrapper for `XenoRegistry::load_module`.
+    // ── Path utilities ──────────────────────────────────────────────
+
+    /// Converts an absolute file path to a ModulePath relative to the workspace root.
+    /// e.g. "C:/workspace/api/user.xen" → "api/user"
+    pub fn abs_path_to_module_path(&self, abs_path: &Path) -> Option<ModulePath> {
+        let canonical = abs_path.canonicalize().ok()?;
+        let relative = canonical.strip_prefix(&self.root).ok()?;
+        Some(relative.with_extension("").to_str()?.replace('\\', "/"))
+    }
+
+    // ── Module loading ──────────────────────────────────────────────
+
+    /// Loads a module from a given absolute file path string.
     pub fn load_module_from_uri(&self, uri: &str) -> Vec<ModuleError> {
         let path_res = PathBuf::from(uri).canonicalize().map_err(|e| ModuleError {
             module_path: uri.to_string(),
             message: format!("Cannot resolve URI '{}': {}", uri, e),
             location: None,
+            phase: ErrorPhase::Module,
         });
         let path = match path_res {
             Ok(p) => p,
             Err(e) => return vec![e],
         };
 
-        let root = self.root.as_path();
-        let relative = match path.strip_prefix(root) {
+        let relative = match path.strip_prefix(&self.root) {
             Ok(r) => r,
             Err(e) => {
                 return vec![ModuleError {
                     module_path: uri.to_string(),
                     message: format!(
-                        "URI '{}' is not within the workspace root '{}': {}",
+                        "URI '{}' is not within workspace root '{}': {}",
                         uri,
-                        root.display(),
+                        self.root.display(),
                         e
                     ),
                     location: None,
+                    phase: ErrorPhase::Module,
                 }]
             }
         };
@@ -158,37 +177,68 @@ impl XenoRegistry {
         self.load_module(&segments, true, None)
     }
 
-    /// Recursively loads a .xen file and all its imports into the registry.
-    /// Returns a list of module-level errors (file not found, parse errors, etc.)
-    /// - `import_segments`: the absolute import path segments, e.g. `["a", "b"]` for `import a/b;`
-    /// - `force`: If true, forces reloading (this is skipped later if hash matches).
-    ///            This is used when we want to reload a module due to a file change.
-    /// Returns a list of module-level errors (file not found, parse errors, etc.) and a boolean indicating whether the module was **actually** (re)loaded.
-    /// The boolean is used for change detection.
-    // TODO import diagnostics & completion & recovery
+    /// Loads a module from in-memory source text (e.g. unsaved editor buffer).
+    /// Returns all errors for this module (lexer + parser + analyzer + module).
+    pub fn load_module_from_source(&self, abs_path: &Path, source: String) -> Vec<ModuleError> {
+        let module_path = match self.abs_path_to_module_path(abs_path) {
+            Some(mp) => mp,
+            None => {
+                return vec![ModuleError {
+                    module_path: abs_path.to_string_lossy().to_string(),
+                    message: format!(
+                        "Path '{}' is not within workspace root '{}'",
+                        abs_path.display(),
+                        self.root.display()
+                    ),
+                    location: None,
+                    phase: ErrorPhase::Module,
+                }]
+            }
+        };
+
+        let canonical = match abs_path.canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                return vec![ModuleError {
+                    module_path,
+                    message: format!("Cannot canonicalize '{}': {}", abs_path.display(), e),
+                    location: None,
+                    phase: ErrorPhase::Module,
+                }]
+            }
+        };
+
+        // Hash-based change detection — skip if unchanged
+        let hash = calculate_hash(&source);
+        {
+            let cache = self.module_cache.read().unwrap();
+            if let Some(existing) = cache.get(&module_path) {
+                if *existing.borrow_hash() == hash {
+                    return self.get_all_errors_for(&module_path);
+                }
+            }
+        }
+
+        self._load_module_inner(module_path, canonical, source, hash)
+    }
+
+    /// Recursively loads a .xen file from disk and all its imports.
     pub fn load_module(
         &self,
         import_segments: &[&str],
         force: bool,
         import_str: Option<&str>,
     ) -> Vec<ModuleError> {
-        println!("Load module: {:?}", import_segments);
-
-        // Resolve the import segment array to an absolute
-        // file path and a canonical module path
         let (module_path, abs_path) = match self.resolve_import(import_segments, import_str) {
             Err(e) => return vec![e],
             Ok(fp) => fp,
         };
 
         // Skip if already loaded unless forced
-        if !force {
-            if self.module_cache.read().unwrap().contains_key(&module_path) {
-                return vec![];
-            }
+        if !force && self.module_cache.read().unwrap().contains_key(&module_path) {
+            return vec![];
         }
 
-        // Read the source text
         let source = match fs::read_to_string(&abs_path) {
             Ok(s) => s,
             Err(e) => {
@@ -196,11 +246,12 @@ impl XenoRegistry {
                     module_path,
                     message: format!("Failed to read file '{}': {}", abs_path.display(), e),
                     location: None,
+                    phase: ErrorPhase::Module,
                 }];
             }
         };
 
-        // Calculate hash and check if we can skip reloading
+        // Hash-based skip when forced
         let hash = calculate_hash(&source);
         if force {
             let r = self.module_cache.read().unwrap();
@@ -211,16 +262,20 @@ impl XenoRegistry {
             }
         }
 
-        // Insert this module into the registry and extract imports so we can recursively load them.
+        self._load_module_inner(module_path, abs_path, source, hash)
+    }
+
+    /// Shared implementation for loading a module from source text.
+    fn _load_module_inner(
+        &self,
+        module_path: ModulePath,
+        abs_path: PathBuf,
+        source: String,
+        hash: u64,
+    ) -> Vec<ModuleError> {
         let mut errors: Vec<ModuleError> = Vec::new();
         let imports: Vec<(Vec<String>, String)> = {
-            let module_data_res = XenoRegistry::_create_module_data(
-                &module_path,
-                abs_path,
-                source,
-                hash,
-                &mut errors,
-            );
+            let module_data_res = Self::_create_module_data(&module_path, abs_path, source, hash);
 
             let mut md = match module_data_res {
                 Ok(r) => r,
@@ -230,23 +285,89 @@ impl XenoRegistry {
                 }
             };
 
-            md.with_analysis_errors_mut(|ae| ae.extend(errors.iter().cloned()));
+            // Build known-name sets for validation
+            let mut known_types: HashSet<&str> = HashSet::new();
+            let mut known_annotations: HashSet<&str> = HashSet::new();
 
-            // Collect imports from this file before inserting into registry.
-            // We need to lex and parse to find import declarations.
-            let import_paths = md
+            // Builtins
+            for t in &crate::semantic::BUILTIN_TYPES {
+                known_types.insert(t.name);
+            }
+            for a in &crate::semantic::BUILTIN_ANNOTATIONS {
+                known_annotations.insert(a.name);
+            }
+
+            // Plugin-provided names
+            for plugin in self.plugins {
+                if let Some(provide) = plugin.provide_types {
+                    for pc in provide() {
+                        known_types.insert(pc.label);
+                    }
+                }
+                if let Some(provide) = plugin.provide_annotations {
+                    for pc in provide() {
+                        known_annotations.insert(pc.label);
+                    }
+                }
+            }
+
+            // This module's own declarations
+            for name in md.borrow_declarations().keys() {
+                known_types.insert(name);
+            }
+
+            // Declarations from already-loaded imported modules
+            let imported_names: Vec<String> = {
+                let cache = self.module_cache.read().unwrap();
+                md.borrow_imports()
+                    .iter()
+                    .flat_map(|import| {
+                        cache
+                            .get(import)
+                            .into_iter()
+                            .flat_map(|m| m.borrow_declarations().keys().map(|k| k.to_string()))
+                    })
+                    .collect()
+            };
+            for name in &imported_names {
+                known_types.insert(name);
+            }
+
+            // Run semantic analyzer
+            let analyzer_errors: Vec<ModuleError> =
+                analyze(md.borrow_ast(), &known_types, &known_annotations)
+                    .iter()
+                    .map(|e| ModuleError {
+                        module_path: module_path.clone(),
+                        message: e.message.clone(),
+                        location: Some((e.location.l, e.location.c, e.location.v.len() as u32)),
+                        phase: ErrorPhase::Analyzer,
+                    })
+                    .collect();
+            md.with_analyzer_errors_mut(|errs| *errs = analyzer_errors);
+
+            // Validate imports
+            let import_errors = self.validate_imports(&md, &module_path);
+            md.with_module_errors_mut(|errs| *errs = import_errors);
+
+            let import_paths: Vec<(Vec<String>, String)> = md
                 .borrow_ast()
                 .iter()
                 .filter_map(|d| match d {
                     Declaration::Import { path, .. } => {
-                        let owned_path =
-                            path.iter().map(|s| s.to_string()).collect::<Vec<String>>();
-                        let joined = owned_path.join("/");
-                        Some((owned_path, joined))
+                        let owned = path.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+                        let joined = owned.join("/");
+                        Some((owned, joined))
                     }
                     _ => None,
                 })
                 .collect();
+
+            // Collect all errors for return
+            errors.extend(md.borrow_lexer_errors().iter().cloned());
+            errors.extend(md.borrow_parser_errors().iter().cloned());
+            errors.extend(md.borrow_analyzer_errors().iter().cloned());
+            errors.extend(md.borrow_module_errors().iter().cloned());
 
             self.module_cache
                 .write()
@@ -256,7 +377,7 @@ impl XenoRegistry {
             import_paths
         };
 
-        // Recursively load imports
+        // Recursively load imports from disk
         for (segments, joined) in imports {
             errors.extend(self.load_module(
                 &segments.iter().map(|s| s.as_str()).collect::<Vec<&str>>(),
@@ -268,18 +389,18 @@ impl XenoRegistry {
         errors
     }
 
-    /// Resolves an import path (e.g. `["a", "b"]`) relative to the entry file.
-    /// - `import_array`: the parsed path segments, e.g. `["a", "b"]` for `import a/b;`
+    // ── Import resolution & validation ──────────────────────────────
+
+    /// Resolves an import path (e.g. `["a", "b"]`) relative to the workspace root.
     pub fn resolve_import(
         &self,
         import_array: &[&str],
         import_str: Option<&str>,
     ) -> Result<(ModulePath, PathBuf), ModuleError> {
-        let root = self.root.as_path();
         let import_str = import_str
             .map(|s| s.to_string())
             .unwrap_or_else(|| import_array.join("/"));
-        let mut pathbuf = root.join(&import_str);
+        let mut pathbuf = self.root.join(&import_str);
         pathbuf.add_extension("xen");
 
         match pathbuf.canonicalize() {
@@ -288,38 +409,72 @@ impl XenoRegistry {
                 module_path: import_str.clone(),
                 message: format!("Cannot resolve import '{}': {}", import_str, e),
                 location: None,
+                phase: ErrorPhase::Module,
             }),
         }
     }
 
-    /// Suggest available module paths that start with the given `path_so_far`.
-    /// - `path_so_far`: the partial import path typed by the user, e.g. `api/u` for `import api/u...`
-    pub fn suggest_import(&self, path_so_far: &str) -> Vec<(String, PathBuf)> {
-        let root = self.root.as_path();
-        let split = path_so_far.split('/');
-        let prefix = split
-            .clone()
-            .take(split.clone().count() - 1)
-            .collect::<Vec<&str>>()
-            .join("/");
-        let last_segment = split.last().unwrap_or(&"");
-        let dir_to_search = root.join(&prefix);
+    /// Validates all import declarations in a module.
+    fn validate_imports(&self, module: &ModuleData, module_path: &str) -> Vec<ModuleError> {
+        let mut errors = Vec::new();
+        for decl in module.borrow_ast().iter() {
+            if let Declaration::Import { path, location } = decl {
+                let segments: Vec<&str> = path.iter().copied().collect();
+                match self.resolve_import(&segments, None) {
+                    Ok((_, abs_path)) => {
+                        if !abs_path.exists() {
+                            errors.push(ModuleError {
+                                module_path: module_path.to_string(),
+                                message: format!(
+                                    "Module '{}' not found (expected at '{}')",
+                                    path.join("/"),
+                                    abs_path.display()
+                                ),
+                                location: Some((location.l, location.c, location.v.len() as u32)),
+                                phase: ErrorPhase::Analyzer,
+                            });
+                        }
+                    }
+                    Err(_) => {
+                        errors.push(ModuleError {
+                            module_path: module_path.to_string(),
+                            message: format!("Cannot resolve module '{}'", path.join("/")),
+                            location: Some((location.l, location.c, location.v.len() as u32)),
+                            phase: ErrorPhase::Analyzer,
+                        });
+                    }
+                }
+            }
+        }
+        errors
+    }
+
+    /// Suggest available module paths starting with the given partial path.
+    /// Returns `(segment_name, abs_path, is_directory)` tuples.
+    pub fn suggest_import(&self, path_so_far: &str) -> Vec<(String, PathBuf, bool)> {
+        let segments: Vec<&str> = path_so_far.split('/').collect();
+        let prefix = segments[..segments.len().saturating_sub(1)].join("/");
+        let last_segment = *segments.last().unwrap_or(&"");
+        let dir_to_search = if prefix.is_empty() {
+            self.root.clone()
+        } else {
+            self.root.join(&prefix)
+        };
 
         if let Ok(entries) = fs::read_dir(dir_to_search) {
             entries
                 .filter_map(|e| e.ok())
                 .filter_map(|e| {
                     let path = e.path();
-                    if path.is_file() {
-                        if let Some(stem) = path.file_stem() {
-                            if let Some(stem_str) = stem.to_str() {
-                                if stem_str.ends_with(".xen") {
-                                    let candidate = stem_str.trim_end_matches(".xen");
-                                    if candidate.starts_with(last_segment) {
-                                        return Some((candidate.to_string(), path));
-                                    }
-                                }
-                            }
+                    if path.is_dir() {
+                        let name = path.file_name()?.to_str()?;
+                        if name.starts_with(last_segment) {
+                            return Some((name.to_string(), path, true));
+                        }
+                    } else if path.extension().and_then(|e| e.to_str()) == Some("xen") {
+                        let stem = path.file_stem()?.to_str()?;
+                        if stem.starts_with(last_segment) {
+                            return Some((stem.to_string(), path, false));
                         }
                     }
                     None
@@ -330,6 +485,50 @@ impl XenoRegistry {
         }
     }
 
+    // ── Cached data access ──────────────────────────────────────────
+
+    /// Runs a closure with read access to a module's cached tokens and AST.
+    pub fn with_module<T, F>(&self, module_path: &str, f: F) -> Option<T>
+    where
+        F: for<'a> FnOnce(&'a [Token<'a>], &'a [Declaration<'a>], &'a ModuleData) -> T,
+    {
+        let cache = self.module_cache.read().unwrap();
+        let module = cache.get(module_path)?;
+        Some(f(module.borrow_tokens(), module.borrow_ast(), module))
+    }
+
+    /// Gets all errors for a specific module.
+    pub fn get_all_errors_for(&self, module_path: &str) -> Vec<ModuleError> {
+        let cache = self.module_cache.read().unwrap();
+        if let Some(module) = cache.get(module_path) {
+            let mut all = Vec::new();
+            all.extend(module.borrow_lexer_errors().iter().cloned());
+            all.extend(module.borrow_parser_errors().iter().cloned());
+            all.extend(module.borrow_analyzer_errors().iter().cloned());
+            all.extend(module.borrow_module_errors().iter().cloned());
+            all
+        } else {
+            vec![]
+        }
+    }
+
+    /// Gets errors of a specific phase for a module.
+    pub fn get_errors_by_phase(&self, module_path: &str, phase: ErrorPhase) -> Vec<ModuleError> {
+        let cache = self.module_cache.read().unwrap();
+        if let Some(module) = cache.get(module_path) {
+            match phase {
+                ErrorPhase::Lexer => module.borrow_lexer_errors().clone(),
+                ErrorPhase::Parser => module.borrow_parser_errors().clone(),
+                ErrorPhase::Analyzer => module.borrow_analyzer_errors().clone(),
+                ErrorPhase::Module => module.borrow_module_errors().clone(),
+            }
+        } else {
+            vec![]
+        }
+    }
+
+    // ── Declaration lookup ──────────────────────────────────────────
+
     pub fn find_declaration(&self, current_module: &str, name: &str) -> Option<DeclarationInfo> {
         self._find_declaration(
             current_module,
@@ -338,6 +537,7 @@ impl XenoRegistry {
             &mut HashSet::new(),
         )
     }
+
     fn _find_declaration<'s, 'c: 's>(
         &self,
         current_module: &'c str,
@@ -348,17 +548,14 @@ impl XenoRegistry {
         tried.insert(current_module);
 
         let module = cache.get(current_module)?;
-        let d_opt = module.borrow_declarations().get(&name);
-        match d_opt {
-            Some(d) => return Some(d.clone()),
-            _ => {}
+        if let Some(d) = module.borrow_declarations().get(&name) {
+            return Some(d.clone());
         }
 
         for import in module.borrow_imports() {
             if tried.contains(import.as_str()) {
-                return None;
+                continue;
             }
-
             tried.insert(import);
             if let Some(m) = cache.get(import) {
                 if let Some(d) = m.borrow_declarations().get(name) {
@@ -372,16 +569,15 @@ impl XenoRegistry {
 
     pub fn get_all_declarations_in_scope(&self, current_module: &str) -> Vec<DeclarationInfo> {
         let mut decls = Vec::new();
-
         self._get_all_declarations_in_scope(
             current_module,
             &mut decls,
             &self.module_cache.read().unwrap(),
             &mut HashSet::new(),
         );
-
         decls
     }
+
     fn _get_all_declarations_in_scope<'s, 'c: 's>(
         &self,
         current_module: &'c str,
@@ -391,55 +587,65 @@ impl XenoRegistry {
     ) {
         tried.insert(current_module);
 
-        let module = cache.get(current_module);
-        if let Some(m) = module {
+        if let Some(m) = cache.get(current_module) {
             decls.extend(m.borrow_declarations().values().cloned());
 
             for import in m.borrow_imports() {
                 if tried.contains(import.as_str()) {
                     continue;
                 }
-
-                let imported_module = cache.get(import);
-                if let Some(im) = imported_module {
+                if let Some(im) = cache.get(import) {
                     decls.extend(im.borrow_declarations().values().cloned());
                 }
             }
         }
     }
 
+    // ── Internal ────────────────────────────────────────────────────
+
     fn _create_module_data(
         module_path: &ModulePath,
         abs_path: PathBuf,
         source: String,
         hash: u64,
-        errors: &mut Vec<ModuleError>,
     ) -> Result<ModuleData, Vec<ModuleError>> {
-        ModuleDataTryBuilder {
+        // Collect parser errors via shared mutability since ouroboros closures
+        // can't write to head fields during construction.
+        let parser_errors_cell: std::cell::RefCell<Vec<ModuleError>> =
+            std::cell::RefCell::new(Vec::new());
+
+        let mut md = ModuleDataTryBuilder {
             abs_path,
             module_path: module_path.clone(),
             source,
             hash,
             changed: true,
-            analysis_errors: Vec::new(),
+            lexer_errors: Vec::new(),
+            parser_errors: Vec::new(),
+            analyzer_errors: Vec::new(),
+            module_errors: Vec::new(),
             imports: Vec::new(),
             tokens_builder: |source| {
                 Lexer::tokenize(source).map_err(|e| {
                     vec![ModuleError {
                         module_path: module_path.clone(),
-                        message: format!("Lexer error: {} at {}", e.message, e.location),
+                        message: format!("{}", e.message),
                         location: Some((e.location.l, e.location.c, e.location.v.len() as u32)),
+                        phase: ErrorPhase::Lexer,
                     }]
                 })
             },
             ast_builder: |tokens| {
                 let (ast, parse_errors) = Parser::parse(tokens);
 
-                errors.extend(parse_errors.iter().map(|e| ModuleError {
-                    module_path: module_path.clone(),
-                    message: format!("Parse error: {} at {}", e.message, e.location),
-                    location: Some((e.location.l, e.location.c, e.location.v.len() as u32)),
-                }));
+                parser_errors_cell
+                    .borrow_mut()
+                    .extend(parse_errors.iter().map(|e| ModuleError {
+                        module_path: module_path.clone(),
+                        message: format!("{}", e.message),
+                        location: Some((e.location.l, e.location.c, e.location.v.len() as u32)),
+                        phase: ErrorPhase::Parser,
+                    }));
 
                 Ok(ast)
             },
@@ -476,7 +682,6 @@ impl XenoRegistry {
                                             _ => None,
                                         })
                                         .flatten()
-                                        // TODO guarantee 0th expr is type
                                         .collect::<Vec<(String, String)>>();
                                     (!v.is_empty()).then_some(v)
                                 },
@@ -487,6 +692,23 @@ impl XenoRegistry {
                     .collect())
             },
         }
-        .try_build()
+        .try_build()?;
+
+        // Populate parser_errors field from what was collected during build
+        let collected_parser_errors = parser_errors_cell.into_inner();
+        md.with_parser_errors_mut(|errs| *errs = collected_parser_errors);
+
+        // Populate imports list
+        let import_list: Vec<ModulePath> = md
+            .borrow_ast()
+            .iter()
+            .filter_map(|d| match d {
+                Declaration::Import { path, .. } => Some(path.join("/")),
+                _ => None,
+            })
+            .collect();
+        md.with_imports_mut(|imports| *imports = import_list);
+
+        Ok(md)
     }
 }

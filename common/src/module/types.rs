@@ -1,11 +1,21 @@
 use std::{fmt, path::PathBuf};
 
+/// Error severity level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorPhase {
+    Lexer,
+    Parser,
+    Analyzer,
+    Module,
+}
+
 /// Errors that can occur during module loading.
 #[derive(Debug, Clone)]
 pub struct ModuleError {
     pub module_path: ModulePath,
     pub message: String,
     pub location: Option<(u32, u32, u32)>, // line, column, length
+    pub phase: ErrorPhase,
 }
 
 impl fmt::Display for ModuleError {

@@ -1,6 +1,9 @@
 use crate::{config::Config, parser::XenoAst};
 use libloading::{Library, Symbol};
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::OnceLock,
+};
 
 #[derive(Debug, Clone)]
 pub struct PluginCompletion {
@@ -43,53 +46,60 @@ macro_rules! lib_filename {
     }};
 }
 
-fn plugins_directory() -> PathBuf {
-    let config = Config::get();
-    config.workdir.join(&config.plugins.path)
-}
+pub static PLUGINS: OnceLock<Vec<&'static XenoPlugin<'static>>> = OnceLock::new();
+impl<'a> XenoPlugin<'a> {
+    pub fn get_plugins() -> &'static Vec<&'static XenoPlugin<'static>> {
+        PLUGINS.get_or_init(|| Self::load_plugins())
+    }
 
-fn load_plugin_library(path: &Path) -> Result<Library, String> {
-    unsafe { Library::new(path) }
-        .map_err(|e| format!("Library load error\n{}:\n{}", path.display(), e))
-}
+    fn plugins_directory() -> PathBuf {
+        let config = Config::get();
+        config.workdir.join(&config.plugins.path)
+    }
 
-fn load_plugin(lib: Library) -> Result<&'static XenoPlugin<'static>, libloading::Error> {
-    let lib_ref = Box::leak(Box::new(lib));
-    let load: Symbol<fn() -> &'static XenoPlugin<'static>> = unsafe { lib_ref.get(b"load")? };
-    Ok(load())
-}
+    fn load_plugin_library(path: &Path) -> Result<Library, String> {
+        unsafe { Library::new(path) }
+            .map_err(|e| format!("Library load error\n{}:\n{}", path.display(), e))
+    }
 
-fn create_plugin_instance(
-    lib: Library,
-    name: &String,
-) -> Result<&'static XenoPlugin<'static>, String> {
-    load_plugin(lib).map_err(|e| {
-        format!(
-            "Symbol resolution error in plugin '{}'. Make sure it's compatible with the current version!\n{}",
-            name,
-            e
-        )
-    })
-}
+    fn load_plugin(lib: Library) -> Result<&'static XenoPlugin<'static>, libloading::Error> {
+        let lib_ref = Box::leak(Box::new(lib));
+        let load: Symbol<fn() -> &'static XenoPlugin<'static>> = unsafe { lib_ref.get(b"load")? };
+        Ok(load())
+    }
 
-fn log_loading_error(plugin_name: &String, e: &String) {
-    eprintln!("Failed to load plugin '{}':\n{}", plugin_name, e);
-}
-
-pub fn load_plugins() -> Vec<&'static XenoPlugin<'static>> {
-    let plugin_config = &Config::get().plugins;
-    let plugins_dir = plugins_directory();
-
-    plugin_config
-        .plugins
-        .iter()
-        .filter_map(|plugin_name| {
-            let lib_path = plugins_dir.join(lib_filename!(&plugin_name));
-
-            load_plugin_library(&lib_path)
-                .and_then(|lib| create_plugin_instance(lib, &plugin_name))
-                .map_err(|e| log_loading_error(plugin_name, &e))
-                .ok()
+    fn create_plugin_instance(
+        lib: Library,
+        name: &String,
+    ) -> Result<&'static XenoPlugin<'static>, String> {
+        Self::load_plugin(lib).map_err(|e| {
+            format!(
+                "Symbol resolution error in plugin '{}'. Make sure it's compatible with the current version!\n{}",
+                name,
+                e
+            )
         })
-        .collect()
+    }
+
+    fn log_loading_error(plugin_name: &String, e: &String) {
+        eprintln!("Failed to load plugin '{}':\n{}", plugin_name, e);
+    }
+
+    fn load_plugins() -> Vec<&'static XenoPlugin<'static>> {
+        let plugin_config = &Config::get().plugins;
+        let plugins_dir = Self::plugins_directory();
+
+        plugin_config
+            .plugins
+            .iter()
+            .filter_map(|plugin_name| {
+                let lib_path = plugins_dir.join(lib_filename!(&plugin_name));
+
+                Self::load_plugin_library(&lib_path)
+                    .and_then(|lib| Self::create_plugin_instance(lib, &plugin_name))
+                    .map_err(|e| Self::log_loading_error(plugin_name, &e))
+                    .ok()
+            })
+            .collect()
+    }
 }

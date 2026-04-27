@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::{
     parser::{Declaration, Expr},
@@ -20,7 +20,11 @@ pub struct Analyzer {
     //       on_before_annotation, on_after_annotation
 }
 
-pub fn analyze<'src>(ast: &Vec<Declaration<'src>>) -> Vec<XenoError<'src>> {
+pub fn analyze<'src>(
+    ast: &Vec<Declaration<'src>>,
+    known_types: &HashSet<&str>,
+    known_annotations: &HashSet<&str>,
+) -> Vec<XenoError<'src>> {
     let mut errors = Vec::new();
 
     for declaration in ast {
@@ -28,6 +32,7 @@ pub fn analyze<'src>(ast: &Vec<Declaration<'src>>) -> Vec<XenoError<'src>> {
             Declaration::Import { .. } => { /* imports handled by module loader */ }
             Declaration::TypeDecl { t, .. } => {
                 validate_annotations(t, &mut errors);
+                validate_names(t, known_types, known_annotations, &mut errors);
             }
         }
     }
@@ -95,6 +100,70 @@ enum IfChainState {
     AfterIf,
     /// Just saw @else — chain is closed, nothing else may follow.
     AfterElse,
+}
+
+fn validate_names<'src>(
+    exprs: &Vec<Expr<'src>>,
+    known_types: &HashSet<&str>,
+    known_annotations: &HashSet<&str>,
+    errors: &mut Vec<XenoError<'src>>,
+) {
+    for expr in exprs {
+        match expr {
+            Expr::Identifier(id) => {
+                if !known_types.contains(id.v) {
+                    errors.push(XenoError {
+                        location: (*id).clone(),
+                        message: format!("Unknown type '{}'", id.v),
+                    });
+                }
+            }
+            Expr::Annotation(id, args) => {
+                if !known_annotations.contains(id.v) {
+                    errors.push(XenoError {
+                        location: (*id).clone(),
+                        message: format!("Unknown annotation '@{}'", id.v),
+                    });
+                }
+                for anon_type in args {
+                    validate_names(anon_type, known_types, known_annotations, errors);
+                }
+            }
+            Expr::Struct(fields) | Expr::Enum(fields) => {
+                for (_, field_exprs) in fields {
+                    validate_names(field_exprs, known_types, known_annotations, errors);
+                }
+            }
+            Expr::List(inner) | Expr::Set(inner) => {
+                for anon_type in inner {
+                    validate_names(anon_type, known_types, known_annotations, errors);
+                }
+            }
+            Expr::Not(inner) => {
+                validate_names(
+                    &vec![*inner.clone()],
+                    known_types,
+                    known_annotations,
+                    errors,
+                );
+            }
+            Expr::BinaryExpr(_, pair) => {
+                validate_names(
+                    &vec![pair.0.clone()],
+                    known_types,
+                    known_annotations,
+                    errors,
+                );
+                validate_names(
+                    &vec![pair.1.clone()],
+                    known_types,
+                    known_annotations,
+                    errors,
+                );
+            }
+            Expr::Literal(_) | Expr::Regex(_) | Expr::FieldAccess(_) => {}
+        }
+    }
 }
 
 fn validate_annotations<'src>(exprs: &Vec<Expr<'src>>, errors: &mut Vec<XenoError<'src>>) {
