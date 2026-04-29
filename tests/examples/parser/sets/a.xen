@@ -1,14 +1,11 @@
 import alma/korte;
 import b;
 
-// type Nat = Zero | @succ(Nat);
-// type List = Nil | @cons(Nat, List);
-
 /** asd */
-type FavouriteColors = set ["red", "green", "blue"];
-type MyDogsFavouriteColors = set ["red"];
-type BothOurFavouriteColors = FavouriteColors * MyDogsFavouriteColors;
-type MyFavouriteColorsFromBoth = BothOurFavouriteColors \ MyDogsFavouriteColors;
+type MyColors = set ["red", "green", "blue"] @len(2);
+type DoggieColors = set ["red"];
+type BothOurFavouriteColors = MyColors + DoggieColors;
+type ColorsOnlyILike = BothOurFavouriteColors \ DoggieColors;
 
 type C = B @max(5);
 type Z = Korte;
