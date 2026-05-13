@@ -1,4 +1,10 @@
 .vscode/**
 .vscode-test/**
 .gitignore
+pnpm-lock.yaml
+**/.gitkeep
 vsc-extension-quickstart.md
+src/**
+scripts/**
+client/**
+!client/out/**
