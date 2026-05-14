@@ -306,19 +306,24 @@ impl XenoRegistry {
             let cache = self.module_cache.read().unwrap();
             let md = cache.get(&module_path).unwrap();
 
-            let xeno_errors =
-                self.analyzer
-                    .run(md.borrow_ast(), md, &imports, &cache, self.plugins, &Config::get().plugins.config);
+            let xeno_errors = self.analyzer.run(
+                md.borrow_ast(),
+                md,
+                &imports,
+                &cache,
+                self.plugins,
+                &Config::get().plugins.config,
+            );
 
             let analyzer_errors: Vec<ModuleError> = xeno_errors
-                    .iter()
-                    .map(|e| ModuleError {
-                        module_path: module_path.clone(),
-                        message: e.message.clone(),
-                        location: Some((e.location.l, e.location.c, e.location.v.len() as u32)),
-                        phase: ErrorPhase::Analyzer,
-                    })
-                    .collect();
+                .iter()
+                .map(|e| ModuleError {
+                    module_path: module_path.clone(),
+                    message: e.message.clone(),
+                    location: Some((e.location.l, e.location.c, e.location.v.len() as u32)),
+                    phase: ErrorPhase::Analyzer,
+                })
+                .collect();
 
             let import_errors = self.validate_imports(md, &module_path);
             let lexer_errs = md.borrow_lexer_errors().clone();
@@ -331,7 +336,9 @@ impl XenoRegistry {
         {
             let mut cache = self.module_cache.write().unwrap();
             let md = cache.get_mut(&module_path).unwrap();
-            md.with_analyzer_errors_mut(|errs: &mut Vec<ModuleError>| *errs = analyzer_errors.clone());
+            md.with_analyzer_errors_mut(|errs: &mut Vec<ModuleError>| {
+                *errs = analyzer_errors.clone()
+            });
             md.with_module_errors_mut(|errs: &mut Vec<ModuleError>| *errs = import_errors.clone());
         }
 

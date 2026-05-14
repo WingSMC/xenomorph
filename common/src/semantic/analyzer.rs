@@ -8,8 +8,8 @@ use crate::{
     parser::{AnonymType, Declaration, Expr, KeyValExpr, TypeList},
     plugins::XenoPlugin,
     semantic::{
-        if_validator::IfChainValidator, name_validator::NameValidator, BUILTIN_ANNOTATIONS,
-        BUILTIN_TYPES,
+        annotation_validator::AnnotationValidator, if_validator::IfChainValidator,
+        name_validator::NameValidator, BUILTIN_ANNOTATIONS, BUILTIN_TYPES,
     },
     TokenData, XenoError,
 };
@@ -157,9 +157,6 @@ impl Analyzer {
     pub fn new(generation_mode: bool, plugins: &[&'static XenoPlugin<'static>]) -> Self {
         let mut factories: Vec<ListenerFactory> = Vec::new();
 
-        // Register builtin listeners
-        factories.push(|| Box::new(IfChainValidator::new()));
-
         // Register plugin listeners
         for plugin in plugins {
             let register_fn = if generation_mode {
@@ -258,6 +255,8 @@ impl Analyzer {
 
         // Add the name validator (always present)
         listeners.push(Box::new(NameValidator::new(&scope)));
+        listeners.push(Box::new(AnnotationValidator::new(&scope)));
+        listeners.push(Box::new(IfChainValidator::new()));
 
         // Pass plugin configs to all listeners
         for l in listeners.iter_mut() {

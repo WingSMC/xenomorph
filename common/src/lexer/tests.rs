@@ -123,12 +123,12 @@ mod tests {
             "a1",
             "hello_world",
             "CamelCase123",
-            "type_extended",   // starts with keyword prefix but not exact
-            "important",       // starts with "import" prefix
-            "setting",         // starts with "set" prefix
-            "enumerate",       // starts with "enum" prefix
-            "trueish",         // starts with "true" prefix
-            "falsehood",       // starts with "false" prefix
+            "type_extended", // starts with keyword prefix but not exact
+            "important",     // starts with "import" prefix
+            "setting",       // starts with "set" prefix
+            "enumerate",     // starts with "enum" prefix
+            "trueish",       // starts with "true" prefix
+            "falsehood",     // starts with "false" prefix
         ];
         for src in cases {
             let tokens = tok(src);
@@ -151,7 +151,12 @@ mod tests {
         for src in cases {
             let tokens = tok(src);
             assert_eq!(tokens.len(), 1, "Expected 1 token for '{}'", src);
-            assert_eq!(tokens[0].0, TokenVariant::Number, "Wrong variant for '{}'", src);
+            assert_eq!(
+                tokens[0].0,
+                TokenVariant::Number,
+                "Wrong variant for '{}'",
+                src
+            );
             assert_eq!(tokens[0].1, src);
         }
     }
@@ -162,7 +167,12 @@ mod tests {
         for src in cases {
             let tokens = tok(src);
             assert_eq!(tokens.len(), 1, "Expected 1 token for '{}'", src);
-            assert_eq!(tokens[0].0, TokenVariant::Number, "Wrong variant for '{}'", src);
+            assert_eq!(
+                tokens[0].0,
+                TokenVariant::Number,
+                "Wrong variant for '{}'",
+                src
+            );
             assert_eq!(tokens[0].1, src);
         }
     }
@@ -192,15 +202,20 @@ mod tests {
     #[test]
     fn valid_strings() {
         let matrix: &[(&str, &str)] = &[
-            (r#""""#, r#""""#),              // empty string
+            (r#""""#, r#""""#), // empty string
             (r#""hello""#, r#""hello""#),
             (r#""with spaces""#, r#""with spaces""#),
-            (r#""line\nbreak""#, r#""line\nbreak""#),  // backslash-n in string (raw)
+            (r#""line\nbreak""#, r#""line\nbreak""#), // backslash-n in string (raw)
         ];
         for &(src, expected_value) in matrix {
             let tokens = tok(src);
             assert_eq!(tokens.len(), 1, "Expected 1 token for {}", src);
-            assert_eq!(tokens[0].0, TokenVariant::String, "Wrong variant for {}", src);
+            assert_eq!(
+                tokens[0].0,
+                TokenVariant::String,
+                "Wrong variant for {}",
+                src
+            );
             assert_eq!(tokens[0].1, expected_value);
         }
     }
@@ -222,13 +237,18 @@ mod tests {
         let matrix: &[(&str, &str)] = &[
             ("/abc/", "/abc/"),
             ("/[0-9]+/", "/[0-9]+/"),
-            (r"/escaped\//", r"/escaped\//"),           // escaped slash inside
-            (r"/double\\\//", r"/double\\\//"),         // double backslash then escaped slash
+            (r"/escaped\//", r"/escaped\//"), // escaped slash inside
+            (r"/double\\\//", r"/double\\\//"), // double backslash then escaped slash
         ];
         for &(src, expected_value) in matrix {
             let tokens = tok(src);
             assert_eq!(tokens.len(), 1, "Expected 1 token for {}", src);
-            assert_eq!(tokens[0].0, TokenVariant::Regex, "Wrong variant for {}", src);
+            assert_eq!(
+                tokens[0].0,
+                TokenVariant::Regex,
+                "Wrong variant for {}",
+                src
+            );
             assert_eq!(tokens[0].1, expected_value);
         }
     }
@@ -296,11 +316,14 @@ mod tests {
     fn line_comment_skipped() {
         let cases = [
             ("// this is a comment\n", vec![]),
-            ("// comment", vec![]),  // EOF terminates comment too
-            ("foo // inline\nbar", vec![
-                (TokenVariant::Identifier, "foo"),
-                (TokenVariant::Identifier, "bar"),
-            ]),
+            ("// comment", vec![]), // EOF terminates comment too
+            (
+                "foo // inline\nbar",
+                vec![
+                    (TokenVariant::Identifier, "foo"),
+                    (TokenVariant::Identifier, "bar"),
+                ],
+            ),
         ];
         for (src, expected) in cases {
             let tokens = tok(src);
@@ -313,10 +336,13 @@ mod tests {
         let cases = [
             ("/* block */", vec![]),
             ("/* multi\nline */", vec![]),
-            ("foo /* comment */ bar", vec![
-                (TokenVariant::Identifier, "foo"),
-                (TokenVariant::Identifier, "bar"),
-            ]),
+            (
+                "foo /* comment */ bar",
+                vec![
+                    (TokenVariant::Identifier, "foo"),
+                    (TokenVariant::Identifier, "bar"),
+                ],
+            ),
         ];
         for (src, expected) in cases {
             let tokens = tok(src);
@@ -670,10 +696,7 @@ mod tests {
         let tokens = tok("true false");
         assert_eq!(
             tokens,
-            vec![
-                (TokenVariant::True, "true"),
-                (TokenVariant::False, "false"),
-            ]
+            vec![(TokenVariant::True, "true"), (TokenVariant::False, "false"),]
         );
     }
 
@@ -682,10 +705,7 @@ mod tests {
         let tokens = tok("^ *");
         assert_eq!(
             tokens,
-            vec![
-                (TokenVariant::Caret, "^"),
-                (TokenVariant::Asterix, "*"),
-            ]
+            vec![(TokenVariant::Caret, "^"), (TokenVariant::Asterix, "*"),]
         );
     }
 
@@ -694,10 +714,7 @@ mod tests {
         let tokens = tok("> <");
         assert_eq!(
             tokens,
-            vec![
-                (TokenVariant::Gt, ">"),
-                (TokenVariant::Lt, "<"),
-            ]
+            vec![(TokenVariant::Gt, ">"), (TokenVariant::Lt, "<"),]
         );
     }
 
@@ -797,21 +814,30 @@ mod tests {
     #[test]
     fn all_range_variants() {
         let matrix: &[(&str, Vec<(TokenVariant, &str)>)] = &[
-            ("1..10", vec![
-                (TokenVariant::Number, "1"),
-                (TokenVariant::Range, ".."),
-                (TokenVariant::Number, "10"),
-            ]),
-            ("1.<10", vec![
-                (TokenVariant::Number, "1"),
-                (TokenVariant::Range, ".<"),
-                (TokenVariant::Number, "10"),
-            ]),
-            ("1<.10", vec![
-                (TokenVariant::Number, "1"),
-                (TokenVariant::Range, "<."),
-                (TokenVariant::Number, "10"),
-            ]),
+            (
+                "1..10",
+                vec![
+                    (TokenVariant::Number, "1"),
+                    (TokenVariant::Range, ".."),
+                    (TokenVariant::Number, "10"),
+                ],
+            ),
+            (
+                "1.<10",
+                vec![
+                    (TokenVariant::Number, "1"),
+                    (TokenVariant::Range, ".<"),
+                    (TokenVariant::Number, "10"),
+                ],
+            ),
+            (
+                "1<.10",
+                vec![
+                    (TokenVariant::Number, "1"),
+                    (TokenVariant::Range, "<."),
+                    (TokenVariant::Number, "10"),
+                ],
+            ),
         ];
         for (src, expected) in matrix {
             let tokens = tok(src);
@@ -969,7 +995,11 @@ type User = {
 "#;
         let tokens = tok(src);
         // Just check it tokenizes without error and has reasonable count
-        assert!(tokens.len() > 20, "Expected >20 tokens, got {}", tokens.len());
+        assert!(
+            tokens.len() > 20,
+            "Expected >20 tokens, got {}",
+            tokens.len()
+        );
         // Verify first few tokens
         assert_eq!(tokens[0].0, TokenVariant::Documentation);
         assert_eq!(tokens[1].0, TokenVariant::Import);
@@ -1019,10 +1049,7 @@ type User = {
         let tokens = tok("42 99");
         assert_eq!(
             tokens,
-            vec![
-                (TokenVariant::Number, "42"),
-                (TokenVariant::Number, "99"),
-            ]
+            vec![(TokenVariant::Number, "42"), (TokenVariant::Number, "99"),]
         );
     }
 
