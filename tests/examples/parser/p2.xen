@@ -1,14 +1,12 @@
 import p1;
 
-type UserName = string @len(3..50) @regex(/^[A-Z][a-z]+$/);
-type Email = string @regex(/^[\w.-]+@[\w.-]+\.\w+$/);
+type UserName = string /^[A-Z][a-z]+$/ @minlen(3) @maxlen(50);
 type UserAge = u8 @min(0) @max(150);
-
-type User = {
+type UserType = {
     name: UserName,
     age: UserAge,
-    email: Email,
-    isActive: bool @if() @else(),
+    email: email,
+    isActive: bool,
 };
 
 type UserList = User[] @len(1<.<1000);

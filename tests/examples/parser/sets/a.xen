@@ -1,11 +1,11 @@
 import alma/korte;
-import b;
 
 /** asd */
-type MyColors = set ["red", "green", "blue"] @len(2);
+type MyColors = set ["red", "green", "blue"];
 type DoggieColors = set ["red"];
 type BothOurFavouriteColors = MyColors + DoggieColors;
 type ColorsOnlyILike = BothOurFavouriteColors \ DoggieColors;
 
+type B = string;
 type C = B @max(5);
 type Z = Korte;

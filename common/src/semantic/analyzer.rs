@@ -192,10 +192,10 @@ impl Analyzer {
         let mut known_annotations: HashSet<String> = HashSet::new();
 
         // Builtins
-        for t in &BUILTIN_TYPES {
+        for t in BUILTIN_TYPES {
             builtin_types.insert(t.name.to_string());
         }
-        for a in &BUILTIN_ANNOTATIONS {
+        for a in BUILTIN_ANNOTATIONS {
             known_annotations.insert(a.name.to_string());
         }
 

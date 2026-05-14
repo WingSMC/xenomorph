@@ -4,7 +4,7 @@
     "description": "Xenomorph language support",
     "version": "0.1.0",
     "engines": {
-        "vscode": "^1.54.0"
+        "vscode": "^1.75.0"
     },
     "author": {
         "name": "WingSMC",
@@ -31,7 +31,6 @@
     },
     "main": "./client/out/extension",
     "activationEvents": [
-        "onLanguage:xenomorph",
         "onLanguage:xenomorph-toml"
     ],
     "contributes": {

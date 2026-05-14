@@ -421,10 +421,16 @@ impl Backend {
             });
 
         if let Some(i) = builtin_info {
+            let value = match i.documentation {
+                Some(Documentation::MarkupContent(content)) => content.value,
+                Some(Documentation::String(value)) => value,
+                None => format!("**{}**\n\n{}", i.label, i.detail.unwrap_or_default()),
+            };
+
             return Some(Hover {
                 contents: HoverContents::Markup(MarkupContent {
                     kind: MarkupKind::Markdown,
-                    value: format!("**{}**\n\n{}", i.label, i.detail.unwrap_or_default()),
+                    value,
                 }),
                 range: Some(token.1.to_editor_range()),
             });

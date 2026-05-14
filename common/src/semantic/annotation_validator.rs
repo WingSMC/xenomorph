@@ -1,7 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::{
-    parser::{AnonymType, BinaryExpr, Expr, Literal, NumberType, TypeList},
+    parser::{AnonymType, BinaryExpr, Declaration, Expr, Literal, NumberType, TypeList},
     semantic::{
         is_type_compatible, AnalyzerListener, ScopeInfo, XenoAnnotation, XenoParameterType,
         XenoType, BUILTIN_ANNOTATIONS, BUILTIN_TYPES,
@@ -9,8 +9,15 @@ use crate::{
     TokenData, XenoError,
 };
 
+#[derive(Clone)]
+enum TypeHint {
+    Builtin(&'static XenoType),
+    Alias(String),
+}
+
 pub struct AnnotationValidator {
     scope: ScopeInfo,
+    type_aliases: HashMap<String, Vec<TypeHint>>,
     type_stack: Vec<Vec<&'static XenoType>>,
     annotation_depth: usize,
 }
@@ -19,6 +26,7 @@ impl AnnotationValidator {
     pub fn new(scope: &ScopeInfo) -> Self {
         Self {
             scope: scope.clone(),
+            type_aliases: HashMap::new(),
             type_stack: Vec::new(),
             annotation_depth: 0,
         }
@@ -44,37 +52,126 @@ impl AnnotationValidator {
 
     fn resolve_types(&self, exprs: &AnonymType<'_>) -> Vec<&'static XenoType> {
         let mut types = Vec::new();
+        let mut visited_aliases = HashSet::new();
         for expr in exprs {
-            self.collect_types(expr, &mut types);
+            self.collect_types(expr, &mut types, &mut visited_aliases);
         }
         types
     }
 
-    fn collect_types(&self, expr: &Expr<'_>, types: &mut Vec<&'static XenoType>) {
+    fn collect_types(
+        &self,
+        expr: &Expr<'_>,
+        types: &mut Vec<&'static XenoType>,
+        visited_aliases: &mut HashSet<String>,
+    ) {
         match expr {
             Expr::Identifier(identifier) => {
                 if let Some(builtin_type) = self.find_builtin_type(identifier.v) {
                     types.push(builtin_type);
+                } else {
+                    self.collect_alias_types(identifier.v, types, visited_aliases);
                 }
             }
             Expr::BinaryExpr(_, pair) => {
-                self.collect_binary_types(pair, types);
+                self.collect_binary_types(pair, types, visited_aliases);
             }
-            Expr::Not(inner) => self.collect_types(inner, types),
-            Expr::Literal(_)
-            | Expr::Regex(_)
-            | Expr::Annotation(_, _)
-            | Expr::FieldAccess(_)
-            | Expr::List(_)
-            | Expr::Set(_)
-            | Expr::Struct(_)
-            | Expr::Enum(_) => {}
+            Expr::Not(inner) => self.collect_types(inner, types, visited_aliases),
+            Expr::Literal(literal) => self.collect_literal_type(literal, types),
+            Expr::Regex(_) => self.collect_builtin_type("regex", types),
+            Expr::List(_) => self.collect_builtin_type("any", types),
+            Expr::Set(_) => self.collect_builtin_type("any", types),
+            Expr::Struct(_) => self.collect_builtin_type("dict", types),
+            Expr::Annotation(_, _) | Expr::FieldAccess(_) | Expr::Enum(_) => {}
         }
     }
 
-    fn collect_binary_types(&self, pair: &BinaryExpr<'_>, types: &mut Vec<&'static XenoType>) {
-        self.collect_types(&pair.0, types);
-        self.collect_types(&pair.1, types);
+    fn collect_binary_types(
+        &self,
+        pair: &BinaryExpr<'_>,
+        types: &mut Vec<&'static XenoType>,
+        visited_aliases: &mut HashSet<String>,
+    ) {
+        self.collect_types(&pair.0, types, visited_aliases);
+        self.collect_types(&pair.1, types, visited_aliases);
+    }
+
+    fn collect_alias_types(
+        &self,
+        alias: &str,
+        types: &mut Vec<&'static XenoType>,
+        visited_aliases: &mut HashSet<String>,
+    ) {
+        if !visited_aliases.insert(alias.to_string()) {
+            return;
+        }
+
+        if let Some(hints) = self.type_aliases.get(alias) {
+            for hint in hints {
+                match hint {
+                    TypeHint::Builtin(builtin_type) => types.push(builtin_type),
+                    TypeHint::Alias(next_alias) => {
+                        self.collect_alias_types(next_alias, types, visited_aliases)
+                    }
+                }
+            }
+        }
+
+        visited_aliases.remove(alias);
+    }
+
+    fn collect_literal_type(&self, literal: &Literal<'_>, types: &mut Vec<&'static XenoType>) {
+        match literal {
+            Literal::Number(_) => self.collect_builtin_type("number", types),
+            Literal::String(_, _) => self.collect_builtin_type("string", types),
+            Literal::Boolean(_, _) => self.collect_builtin_type("bool", types),
+        }
+    }
+
+    fn collect_builtin_type(&self, name: &str, types: &mut Vec<&'static XenoType>) {
+        if let Some(builtin_type) = self.find_builtin_type(name) {
+            types.push(builtin_type);
+        }
+    }
+
+    fn collect_type_hints(&self, exprs: &AnonymType<'_>) -> Vec<TypeHint> {
+        let mut hints = Vec::new();
+        for expr in exprs {
+            self.collect_type_hint(expr, &mut hints);
+        }
+        hints
+    }
+
+    fn collect_type_hint(&self, expr: &Expr<'_>, hints: &mut Vec<TypeHint>) {
+        match expr {
+            Expr::Identifier(identifier) => {
+                if let Some(builtin_type) = self.find_builtin_type(identifier.v) {
+                    hints.push(TypeHint::Builtin(builtin_type));
+                } else {
+                    hints.push(TypeHint::Alias(identifier.v.to_string()));
+                }
+            }
+            Expr::Literal(literal) => match literal {
+                Literal::Number(_) => self.push_builtin_hint("number", hints),
+                Literal::String(_, _) => self.push_builtin_hint("string", hints),
+                Literal::Boolean(_, _) => self.push_builtin_hint("bool", hints),
+            },
+            Expr::Regex(_) => self.push_builtin_hint("regex", hints),
+            Expr::BinaryExpr(_, pair) => {
+                self.collect_type_hint(&pair.0, hints);
+                self.collect_type_hint(&pair.1, hints);
+            }
+            Expr::Not(inner) => self.collect_type_hint(inner, hints),
+            Expr::List(_) | Expr::Set(_) => self.push_builtin_hint("any", hints),
+            Expr::Struct(_) => self.push_builtin_hint("dict", hints),
+            Expr::Annotation(_, _) | Expr::FieldAccess(_) | Expr::Enum(_) => {}
+        }
+    }
+
+    fn push_builtin_hint(&self, name: &str, hints: &mut Vec<TypeHint>) {
+        if let Some(builtin_type) = self.find_builtin_type(name) {
+            hints.push(TypeHint::Builtin(builtin_type));
+        }
     }
 
     fn validate_applicability<'src>(
@@ -274,6 +371,17 @@ impl AnnotationValidator {
 }
 
 impl<'src> AnalyzerListener<'src> for AnnotationValidator {
+    fn on_before_ast(&mut self, ast: &[Declaration<'src>], _errors: &mut Vec<XenoError<'src>>) {
+        self.type_aliases.clear();
+
+        for declaration in ast {
+            if let Declaration::TypeDecl { name, t, .. } = declaration {
+                let hints = self.collect_type_hints(t);
+                self.type_aliases.insert(name.v.to_string(), hints);
+            }
+        }
+    }
+
     fn on_before_type(&mut self, exprs: &AnonymType<'src>, _errors: &mut Vec<XenoError<'src>>) {
         self.type_stack.push(self.resolve_types(exprs));
     }
@@ -302,5 +410,134 @@ impl<'src> AnalyzerListener<'src> for AnnotationValidator {
         _errors: &mut Vec<XenoError<'src>>,
     ) {
         self.annotation_depth = self.annotation_depth.saturating_sub(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, path::PathBuf};
+
+    use super::*;
+    use crate::parser::NumberType;
+
+    fn scope() -> ScopeInfo {
+        ScopeInfo {
+            module_path: "test".to_string(),
+            abs_path: PathBuf::new(),
+            own_types: vec!["A".to_string(), "B".to_string()],
+            imported_types: HashMap::new(),
+            builtin_types: BUILTIN_TYPES
+                .iter()
+                .map(|builtin_type| builtin_type.name.to_string())
+                .collect(),
+            known_annotations: BUILTIN_ANNOTATIONS
+                .iter()
+                .map(|annotation| annotation.name.to_string())
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn annotation_applicability_resolves_custom_literal_aliases() {
+        let a_name = TokenData { v: "A", l: 0, c: 5 };
+        let b_name = TokenData { v: "B", l: 1, c: 5 };
+        let string_literal = TokenData {
+            v: "\"literal\"",
+            l: 0,
+            c: 9,
+        };
+        let a_reference = TokenData { v: "A", l: 1, c: 9 };
+        let max = TokenData {
+            v: "max",
+            l: 1,
+            c: 12,
+        };
+        let value = TokenData {
+            v: "5",
+            l: 1,
+            c: 16,
+        };
+        let max_args = vec![vec![Expr::Literal(Literal::Number(NumberType::Int(
+            5, &value,
+        )))]];
+        let b_type = vec![
+            Expr::Identifier(&a_reference),
+            Expr::Annotation(&max, max_args.clone()),
+        ];
+        let ast = vec![
+            Declaration::TypeDecl {
+                docs: None,
+                name: &a_name,
+                t: vec![Expr::Literal(Literal::String(
+                    "literal".to_string(),
+                    &string_literal,
+                ))],
+            },
+            Declaration::TypeDecl {
+                docs: None,
+                name: &b_name,
+                t: b_type.clone(),
+            },
+        ];
+        let mut validator = AnnotationValidator::new(&scope());
+        let mut errors = Vec::new();
+
+        validator.on_before_ast(&ast, &mut errors);
+        validator.on_before_type(&b_type, &mut errors);
+        validator.on_before_annotation(&max, &max_args, &mut errors);
+
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0]
+            .message
+            .contains("Annotation '@max' is not applicable to type 'string'"));
+    }
+
+    #[test]
+    fn annotation_applicability_accepts_custom_numeric_aliases() {
+        let a_name = TokenData { v: "A", l: 0, c: 5 };
+        let b_name = TokenData { v: "B", l: 1, c: 5 };
+        let u8_type = TokenData {
+            v: "u8",
+            l: 0,
+            c: 9,
+        };
+        let a_reference = TokenData { v: "A", l: 1, c: 9 };
+        let max = TokenData {
+            v: "max",
+            l: 1,
+            c: 12,
+        };
+        let value = TokenData {
+            v: "5",
+            l: 1,
+            c: 16,
+        };
+        let max_args = vec![vec![Expr::Literal(Literal::Number(NumberType::Int(
+            5, &value,
+        )))]];
+        let b_type = vec![
+            Expr::Identifier(&a_reference),
+            Expr::Annotation(&max, max_args.clone()),
+        ];
+        let ast = vec![
+            Declaration::TypeDecl {
+                docs: None,
+                name: &a_name,
+                t: vec![Expr::Identifier(&u8_type)],
+            },
+            Declaration::TypeDecl {
+                docs: None,
+                name: &b_name,
+                t: b_type.clone(),
+            },
+        ];
+        let mut validator = AnnotationValidator::new(&scope());
+        let mut errors = Vec::new();
+
+        validator.on_before_ast(&ast, &mut errors);
+        validator.on_before_type(&b_type, &mut errors);
+        validator.on_before_annotation(&max, &max_args, &mut errors);
+
+        assert!(errors.is_empty());
     }
 }

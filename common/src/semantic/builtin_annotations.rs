@@ -1,4 +1,4 @@
-use crate::semantic::{XenoType, BINARY, DICT, NUMBER, STRING};
+use crate::semantic::{XenoType, LENGTH_TYPES, NUMBER_TYPES};
 
 pub enum XenoAnnotationKind {
     Transformation,
@@ -32,41 +32,39 @@ pub struct XenoAnnotation {
     pub name: &'static str,
     pub documentation: Option<&'static str>,
     pub kind: XenoAnnotationKind,
-    pub params: Option<&'static [XenoParam]>,
+    pub params: Option<&'static [&'static XenoParam]>,
     pub applicable_to: Option<&'static [&'static XenoType]>,
 }
 
-pub static NUMBER_VALUE_PARAM: [XenoParam; 1] = [XenoParam {
+pub static NUMBER_VALUE_PARAM: &[&XenoParam] = &[&XenoParam {
     name: "value",
     param_type: XenoParameterType::NumberLiteral,
 }];
-pub static INTEGER_VALUE_PARAM: [XenoParam; 1] = [XenoParam {
+pub static INTEGER_VALUE_PARAM: &[&XenoParam] = &[&XenoParam {
     name: "value",
     param_type: XenoParameterType::IntegerLiteral,
 }];
-pub static EXPRESSION_VALUE_PARAM: [XenoParam; 1] = [XenoParam {
+pub static EXPRESSION_VALUE_PARAM: &[&XenoParam] = &[&XenoParam {
     name: "value",
     param_type: XenoParameterType::Expression,
 }];
-pub static CONDITION_PARAM: [XenoParam; 2] = [
-    XenoParam {
+pub static CONDITION_PARAM: &[&XenoParam] = &[
+    &XenoParam {
         name: "condition",
         param_type: XenoParameterType::Expression,
     },
-    XenoParam {
+    &XenoParam {
         name: "value",
         param_type: XenoParameterType::Expression,
     },
 ];
-pub static NUMBER_TYPES: [&XenoType; 1] = [&NUMBER];
-pub static LENGTH_TYPES: [&XenoType; 3] = [&STRING, &BINARY, &DICT];
 
 pub static MIN: XenoAnnotation = XenoAnnotation {
     name: "min",
     documentation: Some("Specifies the minimum value for a numeric type."),
     kind: XenoAnnotationKind::Validation,
     params: Some(&NUMBER_VALUE_PARAM),
-    applicable_to: Some(&NUMBER_TYPES),
+    applicable_to: Some(NUMBER_TYPES),
 };
 
 pub static MAX: XenoAnnotation = XenoAnnotation {
@@ -74,7 +72,7 @@ pub static MAX: XenoAnnotation = XenoAnnotation {
     documentation: Some("Specifies the maximum value for a numeric type."),
     kind: XenoAnnotationKind::Validation,
     params: Some(&NUMBER_VALUE_PARAM),
-    applicable_to: Some(&NUMBER_TYPES),
+    applicable_to: Some(NUMBER_TYPES),
 };
 
 pub static GT: XenoAnnotation = XenoAnnotation {
@@ -82,7 +80,7 @@ pub static GT: XenoAnnotation = XenoAnnotation {
     documentation: Some("Specifies that some numeric value must be greater than the parameter."),
     kind: XenoAnnotationKind::Validation,
     params: Some(&NUMBER_VALUE_PARAM),
-    applicable_to: Some(&NUMBER_TYPES),
+    applicable_to: Some(NUMBER_TYPES),
 };
 
 pub static LT: XenoAnnotation = XenoAnnotation {
@@ -98,7 +96,7 @@ pub static LEN: XenoAnnotation = XenoAnnotation {
     documentation: Some("Specifies the exact length for a string or list type."),
     kind: XenoAnnotationKind::Validation,
     params: Some(&INTEGER_VALUE_PARAM),
-    applicable_to: Some(&LENGTH_TYPES),
+    applicable_to: Some(LENGTH_TYPES),
 };
 
 pub static MINLEN: XenoAnnotation = XenoAnnotation {
@@ -106,7 +104,7 @@ pub static MINLEN: XenoAnnotation = XenoAnnotation {
     documentation: Some("Specifies the minimum length for a string or list type."),
     kind: XenoAnnotationKind::Validation,
     params: Some(&INTEGER_VALUE_PARAM),
-    applicable_to: Some(&LENGTH_TYPES),
+    applicable_to: Some(LENGTH_TYPES),
 };
 
 pub static MAXLEN: XenoAnnotation = XenoAnnotation {
@@ -114,7 +112,7 @@ pub static MAXLEN: XenoAnnotation = XenoAnnotation {
     documentation: Some("Specifies the maximum length for a string or list type."),
     kind: XenoAnnotationKind::Validation,
     params: Some(&INTEGER_VALUE_PARAM),
-    applicable_to: Some(&LENGTH_TYPES),
+    applicable_to: Some(LENGTH_TYPES),
 };
 
 pub static IF: XenoAnnotation = XenoAnnotation {
@@ -143,6 +141,6 @@ pub static ELSE: XenoAnnotation = XenoAnnotation {
     applicable_to: None,
 };
 
-pub static BUILTIN_ANNOTATIONS: [&'static XenoAnnotation; 10] = [
+pub static BUILTIN_ANNOTATIONS: &[&'static XenoAnnotation] = &[
     &MIN, &MAX, &GT, &LT, &LEN, &MINLEN, &MAXLEN, &IF, &ELSEIF, &ELSE,
 ];

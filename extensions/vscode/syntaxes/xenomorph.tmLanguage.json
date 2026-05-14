@@ -228,7 +228,7 @@
                     "name": "support.type.xenomorph"
                 },
                 {
-                    "match": "\\b(string|u8|u64|bool|float|Date)\\b",
+                    "match": "\\b(TYPE|any|bool|number|integer|i4|i8|i16|i32|i64|i128|u4|u8|u16|u32|u64|u128|f32|f64|bigint|decimal|date|datetime|duration|string|char|uuid|regex|ip|ipv4|ipv6|hostname|email|url|binary|json|xml|yaml|toml|csv|tsv|semver|dict)\\b",
                     "name": "support.type.primitive.xenomorph"
                 }
             ]
