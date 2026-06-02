@@ -12,9 +12,10 @@ function createServerOptions(context: ExtensionContext): {
 } {
     const command = context.asAbsolutePath(join('server', 'xenomorph_lsp'));
     const options: Executable['options'] = {};
+    const run = { command, options };
     return {
-        run: { command, options },
-        debug: { command, options },
+        run,
+        debug: run,
     };
 }
 

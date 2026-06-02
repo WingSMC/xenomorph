@@ -1,33 +1,35 @@
+import { builtinModules } from 'node:module';
 import { resolve } from 'node:path';
 import { defineConfig } from 'vite';
 
+const external = [
+    'vscode',
+    ...builtinModules,
+    ...builtinModules.map((m) => `node:${m}`),
+];
+
 export default defineConfig({
+    resolve: {
+        extensions: ['.ts', '.js'],
+        conditions: ['node'],
+        mainFields: ['module', 'main'],
+    },
     build: {
+        outDir: 'out',
+        sourcemap: true,
+        minify: true,
+        emptyOutDir: true,
+        target: 'node18',
         lib: {
             entry: resolve(__dirname, 'src/extension.ts'),
             formats: ['cjs'],
             fileName: () => 'extension.js',
         },
-        outDir: 'out',
-        sourcemap: true,
-        minify: false,
         rollupOptions: {
-            external: [
-                'vscode',
-                /^vscode-languageclient/,
-                /^vscode-languageserver/,
-                /^vscode-jsonrpc/,
-                /^node:/,
-            ],
+            external,
             output: {
-                manualChunks: undefined,
+                codeSplitting: false,
             },
         },
-        target: 'node18',
-        emptyOutDir: true,
-    },
-    resolve: {
-        extensions: ['.ts', '.js'],
-        conditions: ['node'],
     },
 });

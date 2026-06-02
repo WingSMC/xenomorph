@@ -1,4 +1,4 @@
-import alma/korte;
+import sets/alma/korte;
 
 /** asd */
 type MyColors = set ["red", "green", "blue"];

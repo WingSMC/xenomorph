@@ -1,12 +1,12 @@
 [parser]
-entry = "tests/examples/parser/p1"
+entry = "test"
 
 [plugins]
-path = "./target/release/"
+path = "../../target/release/"
 plugins = ["test", "xenomorph_typescript"]
 
 [plugins.typescript]
-output = "./tests/out/typescript/"
+output = "../out/typescript/"
 
 [debug]
 plugins = true
