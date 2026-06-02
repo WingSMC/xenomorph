@@ -197,7 +197,7 @@ fn generate_type_decl(out: &mut String, docs: &Option<&str>, name: &str, t: &[Ex
     } else {
         type_exprs
             .iter()
-            .map(|e| expr_to_ts(e))
+            .filter_map(|e| expr_to_ts(e))
             .collect::<Vec<_>>()
             .join(" | ")
     };
@@ -275,11 +275,11 @@ fn generate_enum(out: &mut String, name: &str, variants: &[KeyValExpr]) {
 
 // ── Expression → TypeScript string ──────────────────────────────────
 
-fn expr_to_ts(expr: &Expr) -> String {
-    match expr {
+fn expr_to_ts(expr: &Expr) -> Option<String> {
+    Some(match expr {
         Expr::Identifier(id) => builtin_to_ts(id.v).to_string(),
         Expr::Literal(lit) => literal_to_ts(lit),
-        Expr::Regex(_) => "RegExp".to_string(),
+        Expr::Regex(_) => return None,
         Expr::FieldAccess(fa) => {
             let parts: Vec<&str> = fa.v.split('.').collect();
             if parts.len() == 2 {
@@ -288,23 +288,42 @@ fn expr_to_ts(expr: &Expr) -> String {
                 fa.v.to_string()
             }
         }
-        Expr::Not(inner) => format!("Exclude<unknown, {}>", expr_to_ts(inner)),
+        Expr::Not(inner) => format!("Exclude<unknown, {}>", expr_to_ts(inner)?),
         Expr::BinaryExpr(op, pair) => {
-            let left = expr_to_ts(&pair.0);
-            let right = expr_to_ts(&pair.1);
+            let left_opt = expr_to_ts(&pair.0);
+            let right_opt = expr_to_ts(&pair.1);
+            let left = if let Some(left) = left_opt {
+                left
+            } else {
+                return right_opt;
+            };
+
+            let right = if let Some(right) = right_opt {
+                right
+            } else {
+                return Some(left);
+            };
+
             match op {
-                BinaryExprType::Union | BinaryExprType::Or | BinaryExprType::Add => {
+                BinaryExprType::Or => {
                     format!("{left} | {right}")
                 }
-                BinaryExprType::Intersection => format!("{left} & {right}"),
-                BinaryExprType::Difference | BinaryExprType::Remove => {
+                BinaryExprType::Union => {
+                    format!("{left} & {right}")
+                }
+                BinaryExprType::Difference => {
                     format!("Exclude<{left}, {right}>")
                 }
-                BinaryExprType::SymmetricDifference => {
-                    format!("Exclude<{left}, {right}> | Exclude<{right}, {left}>")
+                BinaryExprType::Intersection => {
+                    format!("Pick<{left} & {right}, keyof {right} & keyof {left}>")
                 }
-                BinaryExprType::Xor => format!("{left} | {right}"),
-                BinaryExprType::Range => format!("number /* {left}..{right} */"),
+                BinaryExprType::Xor => {
+                    format!("Omit<{left} & {right}>, keyof {right} & keyof {left}>")
+                }
+                BinaryExprType::Range
+                | BinaryExprType::Add
+                | BinaryExprType::Remove
+                | BinaryExprType::SymmetricDifference => return None,
             }
         }
         Expr::List(inner) => {
@@ -353,7 +372,7 @@ fn expr_to_ts(expr: &Expr) -> String {
             strs.join(" | ")
         }
         Expr::Annotation(_, _) => String::new(),
-    }
+    })
 }
 
 // ── AnonymType helpers ──────────────────────────────────────────────
@@ -362,7 +381,7 @@ fn anonym_type_to_ts(exprs: &AnonymType) -> String {
     let parts: Vec<String> = exprs
         .iter()
         .filter(|e| !matches!(e, Expr::Annotation(..)))
-        .map(|e| expr_to_ts(e))
+        .filter_map(|e| expr_to_ts(e))
         .filter(|s| !s.is_empty())
         .collect();
 
@@ -386,8 +405,10 @@ fn anonym_type_to_ts_with_annotations(exprs: &AnonymType) -> (String, Vec<String
             }
             other => {
                 let ts = expr_to_ts(other);
-                if !ts.is_empty() {
-                    type_parts.push(ts);
+                if let Some(t) = ts {
+                    if !t.is_empty() {
+                        type_parts.push(t);
+                    }
                 }
             }
         }

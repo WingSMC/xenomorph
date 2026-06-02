@@ -117,7 +117,7 @@ impl<'src> fmt::Display for Literal<'src> {
 impl<'src> fmt::Display for BinaryExprType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            BinaryExprType::Union => write!(f, "+"),
+            BinaryExprType::Union => write!(f, "&"),
             BinaryExprType::Intersection => write!(f, "*"),
             BinaryExprType::Difference => write!(f, "-"),
             BinaryExprType::SymmetricDifference => write!(f, "<>"),
