@@ -692,29 +692,92 @@ impl LanguageServer for Backend {
         let uri = params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
         let module_path = self.uri_to_module_path(&uri);
+        let current_module = module_path.as_deref().unwrap_or("");
+        let include_declaration = params.context.include_declaration;
 
-        let result =
-            self.registry
-                .with_module(module_path.as_deref().unwrap_or(""), |tokens, _, _| {
-                    let token = Self::find_token_at_position(tokens, position)?;
+        let searched_name = self
+            .registry
+            .with_module(current_module, |tokens, _, _| {
+                let token = Self::find_token_at_position(tokens, position)?;
+                (token.0 == TokenVariant::Identifier).then(|| token.1.v.to_string())
+            })
+            .flatten();
+
+        let Some(searched_name) = searched_name else {
+            return Ok(None);
+        };
+
+        let Some(target) = self
+            .registry
+            .find_declaration(current_module, &searched_name)
+        else {
+            return Ok(None);
+        };
+
+        let module_paths: Vec<String> = self
+            .registry
+            .module_cache
+            .read()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+
+        let mut locations = Vec::new();
+        for module_path in module_paths {
+            let Some(visible_decl) = self.registry.find_declaration(&module_path, &searched_name)
+            else {
+                continue;
+            };
+
+            if visible_decl.name != target.name || visible_decl.module_path != target.module_path {
+                continue;
+            }
+
+            if let Some(mut module_locations) = self
+                .registry
+                .with_module(&module_path, |tokens, _, module| {
+                    let uri = Url::from_file_path(module.borrow_abs_path()).ok()?;
                     Some(
                         tokens
                             .iter()
-                            .filter_map(|t| {
-                                if t.0 == TokenVariant::Identifier && t.1.v == token.1.v {
-                                    Some(Location {
-                                        uri: uri.clone(),
-                                        range: t.1.to_editor_range(),
-                                    })
-                                } else {
-                                    None
+                            .filter_map(|token| {
+                                if token.0 != TokenVariant::Identifier || token.1.v != searched_name
+                                {
+                                    return None;
                                 }
+
+                                if !include_declaration
+                                    && module_path == target.module_path
+                                    && token.1.l == target.line
+                                    && token.1.c == target.column
+                                {
+                                    return None;
+                                }
+
+                                Some(Location {
+                                    uri: uri.clone(),
+                                    range: token.1.to_editor_range(),
+                                })
                             })
                             .collect::<Vec<Location>>(),
                     )
-                });
+                })
+                .flatten()
+            {
+                locations.append(&mut module_locations);
+            }
+        }
 
-        Ok(result.flatten())
+        locations.sort_by(|left, right| {
+            left.uri
+                .as_str()
+                .cmp(right.uri.as_str())
+                .then_with(|| left.range.start.line.cmp(&right.range.start.line))
+                .then_with(|| left.range.start.character.cmp(&right.range.start.character))
+        });
+
+        Ok(Some(locations))
     }
 
     async fn document_symbol(

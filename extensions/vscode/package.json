@@ -31,6 +31,7 @@
         "package:linux-x64": "vsce package --target linux-x64"
     },
     "main": "./client/out/extension",
+    "icon": "./icons/logo-white.png",
     "contributes": {
         "languages": [
             {

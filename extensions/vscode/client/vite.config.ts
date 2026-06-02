@@ -16,7 +16,7 @@ export default defineConfig({
     },
     build: {
         outDir: 'out',
-        sourcemap: true,
+        sourcemap: false,
         minify: true,
         emptyOutDir: true,
         target: 'node18',
