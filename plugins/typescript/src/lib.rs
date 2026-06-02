@@ -318,7 +318,7 @@ fn expr_to_ts(expr: &Expr) -> Option<String> {
                     format!("Pick<{left} & {right}, keyof {right} & keyof {left}>")
                 }
                 BinaryExprType::Xor => {
-                    format!("Omit<{left} & {right}>, keyof {right} & keyof {left}>")
+                    format!("Omit<{left} & {right}, keyof {right} & keyof {left}>")
                 }
                 BinaryExprType::Range
                 | BinaryExprType::Add
