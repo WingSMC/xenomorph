@@ -2,7 +2,7 @@ use ouroboros::self_referencing;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use tokio::sync::RwLock;
 
 pub mod types;
 
@@ -214,7 +214,7 @@ impl XenoRegistry {
         // Hash-based change detection — skip if unchanged
         let hash = calculate_hash(&source);
         {
-            let cache = self.module_cache.read().unwrap();
+            let cache = self.module_cache.blocking_read();
             if let Some(existing) = cache.get(&module_path) {
                 if *existing.borrow_hash() == hash {
                     return self.get_all_errors_for(&module_path);
@@ -238,7 +238,7 @@ impl XenoRegistry {
         };
 
         // Skip if already loaded unless forced
-        if !force && self.module_cache.read().unwrap().contains_key(&module_path) {
+        if !force && self.module_cache.blocking_read().contains_key(&module_path) {
             return vec![];
         }
 
@@ -257,7 +257,7 @@ impl XenoRegistry {
         // Hash-based skip when forced
         let hash = calculate_hash(&source);
         if force {
-            let r = self.module_cache.read().unwrap();
+            let r = self.module_cache.blocking_read();
             if let Some(existing) = r.get(&module_path) {
                 if *existing.borrow_hash() == hash {
                     return vec![];
@@ -290,8 +290,7 @@ impl XenoRegistry {
         let imports = md.borrow_imports().to_vec();
         {
             self.module_cache
-                .write()
-                .unwrap()
+                .blocking_write()
                 .insert(module_path.clone(), md);
         }
 
@@ -303,7 +302,7 @@ impl XenoRegistry {
 
         // ── Step 3: Analyze with full scope (read lock only) ──
         let (analyzer_errors, import_errors, lexer_errs, parser_errs) = {
-            let cache = self.module_cache.read().unwrap();
+            let cache = self.module_cache.blocking_read();
             let md = cache.get(&module_path).unwrap();
 
             let xeno_errors = self.analyzer.run(
@@ -334,7 +333,7 @@ impl XenoRegistry {
 
         // ── Step 4: Write error fields back into the cached module ──
         {
-            let mut cache = self.module_cache.write().unwrap();
+            let mut cache = self.module_cache.blocking_write();
             let md = cache.get_mut(&module_path).unwrap();
             md.with_analyzer_errors_mut(|errs: &mut Vec<ModuleError>| {
                 *errs = analyzer_errors.clone()
@@ -449,18 +448,28 @@ impl XenoRegistry {
     // ── Cached data access ──────────────────────────────────────────
 
     /// Runs a closure with read access to a module's cached tokens and AST.
+    // allow async closures
     pub fn with_module<T, F>(&self, module_path: &str, f: F) -> Option<T>
     where
         F: for<'a> FnOnce(&'a [Token<'a>], &'a [Declaration<'a>], &'a ModuleData) -> T,
     {
-        let cache = self.module_cache.read().unwrap();
+        let cache = self.module_cache.blocking_read();
         let module = cache.get(module_path)?;
         Some(f(module.borrow_tokens(), module.borrow_ast(), module))
     }
 
+    pub async fn with_module_async<T, F>(&self, module_path: &str, f: F) -> Option<T>
+    where
+        F: for<'a> AsyncFnOnce(&'a [Token<'a>], &'a [Declaration<'a>], &'a ModuleData) -> T, // F: for<'a> FnOnce(&'a [Token<'a>], &'a [Declaration<'a>], &'a ModuleData) -> T,
+    {
+        let cache = self.module_cache.read().await;
+        let module = cache.get(module_path)?;
+        Some(f(module.borrow_tokens(), module.borrow_ast(), module).await)
+    }
+
     /// Gets all errors for a specific module.
     pub fn get_all_errors_for(&self, module_path: &str) -> Vec<ModuleError> {
-        let cache = self.module_cache.read().unwrap();
+        let cache = self.module_cache.blocking_read();
         if let Some(module) = cache.get(module_path) {
             let mut all = Vec::new();
             all.extend(module.borrow_lexer_errors().iter().cloned());
@@ -475,7 +484,7 @@ impl XenoRegistry {
 
     /// Gets errors of a specific phase for a module.
     pub fn get_errors_by_phase(&self, module_path: &str, phase: ErrorPhase) -> Vec<ModuleError> {
-        let cache = self.module_cache.read().unwrap();
+        let cache = self.module_cache.blocking_read();
         if let Some(module) = cache.get(module_path) {
             match phase {
                 ErrorPhase::Lexer => module.borrow_lexer_errors().clone(),
@@ -494,7 +503,7 @@ impl XenoRegistry {
         self._find_declaration(
             current_module,
             name,
-            &self.module_cache.read().unwrap(),
+            &self.module_cache.blocking_read(),
             &mut HashSet::new(),
         )
     }
@@ -533,7 +542,7 @@ impl XenoRegistry {
         self._get_all_declarations_in_scope(
             current_module,
             &mut decls,
-            &self.module_cache.read().unwrap(),
+            &self.module_cache.blocking_read(),
             &mut HashSet::new(),
         );
         decls

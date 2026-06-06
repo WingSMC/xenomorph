@@ -11,7 +11,7 @@ fn main() {
         }
     };
 
-    let cache = reg.module_cache.read().unwrap();
+    let cache = reg.module_cache.blocking_read();
     let module_count = cache.len();
     let total_errors: usize = cache
         .values()

@@ -326,6 +326,10 @@ fn expr_to_ts(expr: &Expr) -> Option<String> {
                 | BinaryExprType::SymmetricDifference => return None,
             }
         }
+        Expr::Array(type_ident) => {
+            let elem_type = builtin_to_ts(type_ident.v);
+            format!("{}[]", elem_type)
+        }
         Expr::List(inner) => {
             if inner.len() == 1 {
                 let elem = anonym_type_to_ts(&inner[0]);

@@ -9,3 +9,4 @@ toml = { version = "1.1.2" }
 serde = { version = "1.0", features = ["derive"] }
 tower-lsp = { version = "0.20.0" }
 ouroboros = { version = "0.18.5" }
+tokio = { version = "1.28", features = ["sync"] }

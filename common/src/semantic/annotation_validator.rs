@@ -83,6 +83,7 @@ impl AnnotationValidator {
             Expr::Set(_) => self.collect_builtin_type("any", types),
             Expr::Struct(_) => self.collect_builtin_type("dict", types),
             Expr::Annotation(_, _) | Expr::FieldAccess(_) | Expr::Enum(_) => {}
+            Expr::Array(_) => {} // TODO handle array types when they are supported in type hints
         }
     }
 
@@ -165,6 +166,8 @@ impl AnnotationValidator {
             Expr::List(_) | Expr::Set(_) => self.push_builtin_hint("any", hints),
             Expr::Struct(_) => self.push_builtin_hint("dict", hints),
             Expr::Annotation(_, _) | Expr::FieldAccess(_) | Expr::Enum(_) => {}
+
+            Expr::Array(_) => {} // TODO handle array types when they are supported in type hints
         }
     }
 
@@ -303,16 +306,19 @@ impl AnnotationValidator {
     fn expr_location<'src>(expr: &Expr<'src>) -> TokenData<'src> {
         match expr {
             Expr::Identifier(token)
+            | Expr::Literal(
+                Literal::String(_, token)
+                | Literal::Boolean(_, token)
+                | Literal::Number(NumberType::Int(_, token) | NumberType::Float(_, token)),
+            )
             | Expr::Regex(token)
             | Expr::Annotation(token, _)
+            | Expr::Array(token)
             | Expr::FieldAccess(token) => (*token).clone(),
-            Expr::Literal(Literal::Number(
-                NumberType::Int(_, token) | NumberType::Float(_, token),
-            ))
-            | Expr::Literal(Literal::String(_, token))
-            | Expr::Literal(Literal::Boolean(_, token)) => (*token).clone(),
+
             Expr::Not(inner) => Self::expr_location(inner),
             Expr::BinaryExpr(_, pair) => Self::expr_location(&pair.0),
+
             Expr::List(items) | Expr::Set(items) => items
                 .first()
                 .and_then(Self::arg_location)

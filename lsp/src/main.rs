@@ -240,10 +240,10 @@ impl Backend {
 
     // ── Completions ─────────────────────────────────────────────────
 
-    fn get_context_completions(
+    fn get_context_completions<'a>(
         &self,
-        tokens: &[Token],
-        _ast: &[Declaration],
+        tokens: &[Token<'a>],
+        _ast: &[Declaration<'a>],
         position: Position,
         module_path: Option<&str>,
     ) -> Vec<CompletionItem> {
@@ -279,6 +279,15 @@ impl Backend {
         };
 
         if let Some(current_token) = Self::find_token_before_or_at_position(tokens, position) {
+            let client = self.client.clone();
+            let msg = format!(
+                "Current token: {:?} at line {}, col {}, value '{}'",
+                current_token.0, current_token.1.l, current_token.1.c, current_token.1.v
+            );
+            tokio::spawn(async move {
+                let _ = client.log_message(MessageType::INFO, msg).await;
+            });
+
             match current_token.0 {
                 TokenVariant::At => {
                     items.extend(self.get_builtin_annotations());
@@ -561,11 +570,12 @@ impl LanguageServer for Backend {
         let position = params.text_document_position.position;
         let module_path = self.uri_to_module_path(&uri);
 
-        let completions =
-            self.registry
-                .with_module(module_path.as_deref().unwrap_or(""), |tokens, ast, _| {
-                    self.get_context_completions(tokens, ast, position, module_path.as_deref())
-                });
+        let completions = self.registry.with_module(
+            module_path.as_deref().unwrap_or(""),
+            |tokens, ast, _| {
+                self.get_context_completions(tokens, ast, position, module_path.as_deref())
+            },
+        );
 
         Ok(Some(CompletionResponse::Array(
             completions.unwrap_or_default(),
@@ -717,8 +727,7 @@ impl LanguageServer for Backend {
         let module_paths: Vec<String> = self
             .registry
             .module_cache
-            .read()
-            .unwrap()
+            .blocking_read()
             .keys()
             .cloned()
             .collect();

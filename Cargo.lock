@@ -910,6 +910,7 @@ dependencies = [
  "libloading",
  "ouroboros",
  "serde",
+ "tokio",
  "toml",
  "tower-lsp",
 ]

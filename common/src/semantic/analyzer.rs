@@ -119,6 +119,9 @@ pub trait AnalyzerListener<'src> {
     }
     fn on_after_enum(&mut self, variants: &[KeyValExpr<'src>], errors: &mut Vec<XenoError<'src>>) {}
 
+    fn on_array(&mut self, inner: &TokenData<'src>, errors: &mut Vec<XenoError<'src>>) {}
+    fn on_after_array(&mut self, inner: &TokenData<'src>, errors: &mut Vec<XenoError<'src>>) {}
+
     fn on_before_list(&mut self, inner: &TypeList<'src>, errors: &mut Vec<XenoError<'src>>) {}
     fn on_after_list(&mut self, inner: &TypeList<'src>, errors: &mut Vec<XenoError<'src>>) {}
 
@@ -410,6 +413,11 @@ fn walk_expr<'src>(ls: &mut Listeners<'src>, expr: &Expr<'src>, errors: &mut Vec
             }
             for l in ls.iter_mut() {
                 l.on_after_enum(variants, errors);
+            }
+        }
+        Expr::Array(ident) => {
+            for l in ls.iter_mut() {
+                l.on_array(ident, errors);
             }
         }
         Expr::List(inner) => {

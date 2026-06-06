@@ -207,7 +207,7 @@ impl<'src> Parser<'src> {
         let (variant, loc) = self.next().map_err(Parser::map_err_vec)?;
 
         let res = match variant {
-            TokenVariant::Identifier => Expr::Identifier(loc), // just type reuse
+            TokenVariant::Identifier => self.parse_identifier_or_array(loc)?,
             TokenVariant::Dollar => Expr::FieldAccess(self.expect(TokenVariant::Identifier)?),
             TokenVariant::Number => self.parse_number(loc).map_err(Parser::map_err_vec)?,
             TokenVariant::True | TokenVariant::False => {
@@ -233,7 +233,6 @@ impl<'src> Parser<'src> {
             TokenVariant::Enum => {
                 self.expect(TokenVariant::LCurly)?;
                 let res = self.parse_struct()?;
-                self.expect(TokenVariant::RCurly)?;
                 Expr::Enum(res)
             }
 
@@ -308,6 +307,20 @@ impl<'src> Parser<'src> {
             Box::new((prev.unwrap(), list.pop().unwrap())),
         ));
     }
+
+    fn parse_identifier_or_array(
+        &mut self,
+        d: &'src TokenData<'src>,
+    ) -> Result<Expr<'src>, Vec<XenoError<'src>>> {
+        if self.peek().map(|t| t.0) == Some(TokenVariant::LBracket) {
+            self.next().map_err(Parser::map_err_vec)?; // consume '['
+            self.expect(TokenVariant::RBracket)?; // consume ']'
+            Ok(Expr::Array(d))
+        } else {
+            Ok(Expr::Identifier(d))
+        }
+    }
+
     fn parse_list(&mut self) -> Result<TypeList<'src>, Vec<XenoError<'src>>> {
         let mut list = Vec::new();
 

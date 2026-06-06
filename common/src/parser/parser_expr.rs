@@ -54,19 +54,23 @@ pub enum BinaryExprType {
     Add,
     Remove,
 }
+
+type TokenRef<'src> = &'src TokenData<'src>;
+
 #[repr(u8)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr<'src> {
-    Identifier(&'src TokenData<'src>),
+    Identifier(TokenRef<'src>),
     Literal(Literal<'src>),
-    Regex(&'src TokenData<'src>),
-    Annotation(&'src TokenData<'src>, TypeList<'src>),
+    Regex(TokenRef<'src>),
+    Annotation(TokenRef<'src>, TypeList<'src>),
     Not(Box<Expr<'src>>),
-    FieldAccess(&'src TokenData<'src>),
+    FieldAccess(TokenRef<'src>),
     BinaryExpr(BinaryExprType, BinaryExpr<'src>),
 
     List(TypeList<'src>),
     Set(TypeList<'src>),
+    Array(TokenRef<'src>),
     Struct(Vec<KeyValExpr<'src>>),
     Enum(Vec<KeyValExpr<'src>>),
 }
@@ -135,6 +139,8 @@ impl<'src> fmt::Display for Expr<'src> {
         match self {
             Expr::Identifier(token) => write!(f, "{}", token.v),
             Expr::Literal(lit) => write!(f, "{}", lit),
+
+            Expr::Array(tok) => write!(f, "{}[]", tok.v),
 
             Expr::List(items) => {
                 write!(f, "[")?;
