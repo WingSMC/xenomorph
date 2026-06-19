@@ -1,9 +1,13 @@
 # Change Log
 
-All notable changes to the "xenomorph" extension will be documented in this file.
+## [0.1.0]
 
-Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
+- Basic syntax highlighting
+- LSP+Client
+- Snippets
+- File icons
 
-## [Unreleased]
+## [0.1.1]
 
-- Initial release
+- Renamed `.xenomorphrc` config file to xenomorph.toml and added schema support
+    - The schema can be generated via the `xeno --schema` command (only needs to be run when you add/remove a plugin)

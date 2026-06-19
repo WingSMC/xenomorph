@@ -1,7 +1,7 @@
 #:schema ./.xenomorph/xenomorph.schema.json
 
 [parser]
-entry = "test"
+entry = "./tests/examples/test"
 
 [plugins]
 path = "../../target/release/"

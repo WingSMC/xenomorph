@@ -2,7 +2,7 @@
     "name": "xenomorph",
     "displayName": "Xenomorph",
     "description": "Xenomorph language support",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "publisher": "WingSMC",
     "engines": {
         "vscode": "^1.75.0"
@@ -25,10 +25,11 @@
         "Testing"
     ],
     "scripts": {
+        "all": "nr build && nr package",
         "build": "cd client && nr build && cd .. && nr setup:lsp",
         "setup:lsp": "node ./scripts/copy-lsp.mjs",
-        "package:windows-x64": "vsce package --target win32-x64",
-        "package:linux-x64": "vsce package --target linux-x64"
+        "package": "node ./scripts/package.mjs",
+        "publish": "node ./scripts/package.mjs --publish"
     },
     "main": "./client/out/extension",
     "icon": "./icons/logo-white.png",
