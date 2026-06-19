@@ -916,6 +916,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "xenomorph_json_schema"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "xenomorph_common",
+]
+
+[[package]]
 name = "xenomorph_lsp"
 version = "0.1.0"
 dependencies = [

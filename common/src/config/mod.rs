@@ -59,10 +59,10 @@ pub struct DebugConfig {
 }
 
 fn default_parser_path() -> String {
-    "./tests/examples/parser/p1.xen".to_string()
+    "index.xen".to_string()
 }
 fn default_plugins_path() -> String {
-    "./target/release/".to_string()
+    "".to_string()
 }
 fn default_plugins_list() -> Vec<String> {
     vec![]
