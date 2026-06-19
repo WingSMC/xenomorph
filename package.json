@@ -12,7 +12,8 @@
         "test:coverage": "cargo llvm-cov",
         "test:coverage:html": "cargo llvm-cov --html --output-dir coverage && echo 'Report: coverage/html/index.html'",
         "test:extensions": "cd ./extensions/vscode && nr test && cd ../..",
-        "test:xeno": "cargo test --release"
+        "test:xeno": "cargo test --release",
+        "xeno:schema": "xeno schema"
     },
     "devDependencies": {
         "run-script-os": "^1.1.6"
