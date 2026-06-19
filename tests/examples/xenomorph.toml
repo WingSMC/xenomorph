@@ -1,0 +1,14 @@
+#:schema ./.xenomorph/xenomorph.schema.json
+
+[parser]
+entry = "test"
+
+[plugins]
+path = "../../target/release/"
+plugins = ["xenomorph_typescript", "xenomorph_json_schema"]
+
+[plugins.typescript]
+output = "../out/typescript/"
+
+[plugins.json_schema]
+output = "../out/json_schema/"

@@ -9,7 +9,7 @@ Xenomorph is meant to be a universal schema descriptor. It is a front-end for pl
 - [Examples](docs/EXAMPLES.md)
 - [Grammar](docs/GRAMMAR.md)
 
-## Config (`.xenomorphrc`)
+## Config (`xenomorph.toml`)
 
 ## Parser
 

@@ -19,9 +19,24 @@ static PLUGIN: XenoPlugin = XenoPlugin {
     initialize: None,
     provide_types: None,
     provide_annotations: None,
+    provide_config_schema: Some(provide_config_schema),
     register_generator: Some(create_generator),
     register_analyzer: None,
 };
+
+fn provide_config_schema() -> &'static str {
+    r#"{
+        "type": "object",
+        "description": "TypeScript type declaration generator.",
+        "properties": {
+            "output": {
+                "type": "string",
+                "description": "Output directory for generated .ts files, relative to the workspace root. If omitted, files are written next to their .xen sources."
+            }
+        },
+        "additionalProperties": false
+    }"#
+}
 
 fn create_generator() -> Box<dyn for<'a> AnalyzerListener<'a>> {
     Box::new(TsGenerator::new())

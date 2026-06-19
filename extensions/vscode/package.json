@@ -32,30 +32,20 @@
     },
     "main": "./client/out/extension",
     "icon": "./icons/logo-white.png",
+    "extensionDependencies": [
+        "tamasfe.even-better-toml"
+    ],
     "contributes": {
         "languages": [
             {
                 "id": "xenomorph",
                 "aliases": [
-                    "xeno"
+                    "xenomorph"
                 ],
                 "extensions": [
                     ".xen"
                 ],
                 "configuration": "./language-configuration.json",
-                "icon": {
-                    "light": "./icons/logo-black.png",
-                    "dark": "./icons/logo-white.png"
-                }
-            },
-            {
-                "id": "xenomorph-toml",
-                "aliases": [
-                    "TOML"
-                ],
-                "filenames": [
-                    ".xenomorphrc"
-                ],
                 "icon": {
                     "light": "./icons/logo-black.png",
                     "dark": "./icons/logo-white.png"
@@ -67,11 +57,6 @@
                 "language": "xenomorph",
                 "scopeName": "source.xenomorph",
                 "path": "./syntaxes/xenomorph.tmLanguage.json"
-            },
-            {
-                "language": "xenomorph-toml",
-                "scopeName": "source.xenomorph-toml",
-                "path": "./syntaxes/xenomorphrc.tmLanguage.json"
             }
         ],
         "snippets": [
@@ -79,6 +64,11 @@
                 "language": "xenomorph",
                 "path": "./snippets/snippets.json"
             }
-        ]
+        ],
+        "configurationDefaults": {
+            "evenBetterToml.schema.associations": {
+                ".*xenomorph\\.toml$": "./.xenomorph/xenomorph.schema.json"
+            }
+        }
     }
 }

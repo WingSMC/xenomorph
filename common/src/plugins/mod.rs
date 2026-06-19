@@ -20,6 +20,9 @@ pub struct XenoPlugin<'a> {
     pub initialize: Option<fn() -> ()>,
     pub provide_types: Option<fn() -> &'static [PluginCompletion]>,
     pub provide_annotations: Option<fn() -> &'static [PluginCompletion]>,
+    /// Returns a JSON Schema (as a string) describing this plugin's
+    /// `[plugins.<name>]` configuration section in `xenomorph.toml`.
+    pub provide_config_schema: Option<fn() -> &'static str>,
     pub register_generator: Option<fn() -> Box<dyn for<'b> AnalyzerListener<'b>>>,
     pub register_analyzer: Option<fn() -> Box<dyn for<'b> AnalyzerListener<'b>>>,
     // execute: fn(&[&str]),

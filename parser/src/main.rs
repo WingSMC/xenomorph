@@ -1,6 +1,32 @@
+use xenomorph_common::config::{write_rc_schema, Config, RC_SCHEMA_RELATIVE_PATH};
 use xenomorph_common::module::XenoRegistry;
+use xenomorph_common::plugins::XenoPlugin;
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("schema") {
+        generate_rc_schema();
+        return;
+    }
+
+    run_parser();
+}
+
+/// Generates the `xenomorph.toml` JSON Schema (base + plugin contributions) and
+/// writes it to `.xenomorph/xenomorph.schema.json` in the workspace root.
+fn generate_rc_schema() {
+    let plugins = XenoPlugin::get_plugins();
+    let out_path = Config::get().workdir.join(RC_SCHEMA_RELATIVE_PATH);
+
+    match write_rc_schema(plugins, &out_path) {
+        Ok(()) => println!("✓ Wrote xenomorph.toml schema → {}", out_path.display()),
+        Err(e) => {
+            eprintln!("✗ Failed to write xenomorph.toml schema: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_parser() {
     let reg = match XenoRegistry::load_workspace(true) {
         Ok(r) => r,
         Err(e) => {

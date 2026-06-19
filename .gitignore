@@ -4,6 +4,9 @@
 **/node_modules/
 coverage/
 
+# Generated xenomorph.toml JSON Schema
+**/.xenomorph/
+
 *.swp
 
 *.vsix

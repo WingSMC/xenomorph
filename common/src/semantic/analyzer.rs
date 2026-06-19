@@ -64,7 +64,7 @@ impl ScopeInfo {
 /// care about.
 #[allow(unused_variables)]
 pub trait AnalyzerListener<'src> {
-    /// Called once per analysis run with all plugin configs from `.xenomorphrc`.
+    /// Called once per analysis run with all plugin configs from `xenomorph.toml`.
     fn on_init(&mut self, plugin_configs: &PluginConfigs) {}
 
     /// Called before the AST walk begins, with full scope information.

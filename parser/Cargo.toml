@@ -3,5 +3,9 @@ name = "xenomorph_parser"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "xeno"
+path = "src/main.rs"
+
 [dependencies]
 xenomorph_common = { path = "../common" }

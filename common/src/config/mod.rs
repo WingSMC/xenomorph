@@ -4,6 +4,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+pub mod schema;
+pub use schema::{build_rc_schema, write_rc_schema, RC_SCHEMA_RELATIVE_PATH};
+
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
 #[repr(Rust)]
@@ -59,7 +62,7 @@ pub struct DebugConfig {
 }
 
 fn default_parser_path() -> String {
-    "index.xen".to_string()
+    "index".to_string()
 }
 fn default_plugins_path() -> String {
     "".to_string()
@@ -124,7 +127,7 @@ fn find_workspace_root(wd: &PathBuf) -> Option<PathBuf> {
     let mut current_dir = wd.clone();
 
     loop {
-        let config_path = current_dir.join(".xenomorphrc");
+        let config_path = current_dir.join("xenomorph.toml");
         if config_path.exists() {
             return Some(current_dir);
         }
@@ -147,7 +150,7 @@ fn init_config() -> Config {
     match find_workspace_root(&current_dir) {
         None => Config::default_with_workdir(current_dir),
         Some(workdir) => {
-            let content = match fs::read_to_string(workdir.join(".xenomorphrc")) {
+            let content = match fs::read_to_string(workdir.join("xenomorph.toml")) {
                 Ok(content) => content,
                 Err(_) => {
                     eprintln!("Error: Unable to read config file.");

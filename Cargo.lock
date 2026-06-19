@@ -652,13 +652,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "test"
-version = "0.1.0"
-dependencies = [
- "xenomorph_common",
-]
-
-[[package]]
 name = "tinystr"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -910,6 +903,7 @@ dependencies = [
  "libloading",
  "ouroboros",
  "serde",
+ "serde_json",
  "tokio",
  "toml",
  "tower-lsp",
