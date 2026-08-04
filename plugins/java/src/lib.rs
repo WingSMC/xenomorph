@@ -1,0 +1,611 @@
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::PathBuf;
+
+use xenomorph_common::config::{ConfigValue, PluginConfigs};
+use xenomorph_common::parser::{
+    AnonymType, BinaryExprType, Declaration, Expr, KeyValExpr, Literal, NumberType,
+};
+use xenomorph_common::plugins::{PluginCompletion, XenoPlugin};
+use xenomorph_common::semantic::{AnalyzerListener, ScopeInfo};
+
+// ── Plugin registration ─────────────────────────────────────────────
+
+static NAME: &str = "java";
+static VERSION: &str = "0.1.0";
+static PLUGIN: XenoPlugin = XenoPlugin {
+    name: NAME,
+    version: VERSION,
+    initialize: None,
+    provide_types: None,
+    provide_annotations: Some(provide_annotations),
+    provide_config_schema: Some(provide_config_schema),
+    register_generator: Some(create_generator),
+    register_analyzer: None,
+};
+
+/// The `@Lombok(...)` annotation lets authors attach Lombok decorators to a
+/// type or field, e.g. `@Lombok(Data)` or `@Lombok(ToString, EqualsAndHashCode)`.
+static LOMBOK_COMPLETION: &[PluginCompletion] = &[PluginCompletion {
+    label: "Lombok",
+    detail: Some("Java Lombok decorators"),
+    documentation: Some(
+        "Attaches Lombok class/field decorators to the generated Java DTO, e.g. `@Lombok(Data)`.",
+    ),
+}];
+
+fn provide_annotations() -> &'static [PluginCompletion] {
+    LOMBOK_COMPLETION
+}
+
+fn provide_config_schema() -> &'static str {
+    r#"{
+        "type": "object",
+        "description": "Java + Lombok DTO generator.",
+        "properties": {
+            "output": {
+                "type": "string",
+                "description": "Target directory for generated .java files, relative to the workspace root. Package sub-directories are created inside it. If omitted, files are written next to their .xen sources."
+            },
+            "package": {
+                "type": "string",
+                "description": "Java package the generated DTOs belong to, e.g. `com.xyz.model`."
+            },
+            "value": {
+                "type": "boolean",
+                "description": "Annotate every generated class with Lombok's `@Value` (immutable DTOs)."
+            },
+            "builder": {
+                "type": "boolean",
+                "description": "Annotate every generated class with Lombok's `@Builder`."
+            },
+            "data": {
+                "type": "boolean",
+                "description": "Annotate every generated class with Lombok's `@Data`."
+            }
+        },
+        "additionalProperties": false
+    }"#
+}
+
+fn create_generator() -> Box<dyn for<'a> AnalyzerListener<'a>> {
+    Box::new(JavaGenerator::new())
+}
+
+#[no_mangle]
+fn load() -> &'static XenoPlugin<'static> {
+    &PLUGIN
+}
+
+// ── Generator listener ──────────────────────────────────────────────
+
+struct JavaGenerator {
+    abs_path: PathBuf,
+    module_path: String,
+    /// Output directory override from `[plugins.java].output`.
+    /// If None, writes `.java` files next to the `.xen` source files.
+    output_dir: Option<PathBuf>,
+    /// Target Java package, e.g. `com.xyz.model`.
+    package: String,
+    /// Blanket `@Value` on every class.
+    blanket_value: bool,
+    /// Blanket `@Builder` on every class.
+    blanket_builder: bool,
+    /// Blanket `@Data` on every class.
+    blanket_data: bool,
+    /// Generated files for the current module: (type name, file contents).
+    files: Vec<(String, String)>,
+}
+
+impl JavaGenerator {
+    fn new() -> Self {
+        Self {
+            abs_path: PathBuf::new(),
+            module_path: String::new(),
+            output_dir: None,
+            package: String::new(),
+            blanket_value: false,
+            blanket_builder: false,
+            blanket_data: false,
+            files: Vec::new(),
+        }
+    }
+}
+
+impl<'src> AnalyzerListener<'src> for JavaGenerator {
+    fn on_init(&mut self, plugin_configs: &PluginConfigs) {
+        if let Some(ConfigValue::Table(cfg)) = plugin_configs.get("java") {
+            if let Some(ConfigValue::String(output)) = cfg.get("output") {
+                self.output_dir = Some(PathBuf::from(output));
+            }
+            if let Some(ConfigValue::String(package)) = cfg.get("package") {
+                self.package = package.clone();
+            }
+            if let Some(ConfigValue::Boolean(value)) = cfg.get("value") {
+                self.blanket_value = *value;
+            }
+            if let Some(ConfigValue::Boolean(builder)) = cfg.get("builder") {
+                self.blanket_builder = *builder;
+            }
+            if let Some(ConfigValue::Boolean(data)) = cfg.get("data") {
+                self.blanket_data = *data;
+            }
+        }
+    }
+
+    fn on_before_module(&mut self, scope: &ScopeInfo) {
+        self.abs_path = scope.abs_path.clone();
+        self.module_path = scope.module_path.clone();
+        self.files.clear();
+    }
+
+    fn on_before_ast(
+        &mut self,
+        ast: &[Declaration<'src>],
+        _errors: &mut Vec<xenomorph_common::XenoError<'src>>,
+    ) {
+        for decl in ast {
+            if let Declaration::TypeDecl { docs, name, t } = decl {
+                if let Some(content) = self.generate_type_decl(docs, name.v, t) {
+                    self.files.push((name.v.to_string(), content));
+                }
+            }
+        }
+    }
+
+    fn on_after_module(&mut self, scope: &ScopeInfo) {
+        let base = match &self.output_dir {
+            Some(dir) => dir.clone(),
+            None => self
+                .abs_path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_default(),
+        };
+        let package_dir = base.join(package_to_path(&self.package));
+        if let Err(e) = fs::create_dir_all(&package_dir) {
+            eprintln!("✗ {} — failed to create output dir: {}", scope.module_path, e);
+            return;
+        }
+
+        for (name, content) in &self.files {
+            let path = package_dir.join(format!("{name}.java"));
+            match fs::write(&path, content) {
+                Ok(_) => println!("✓ {} → {}", scope.module_path, path.display()),
+                Err(e) => eprintln!("✗ {} — failed to write: {}", scope.module_path, e),
+            }
+        }
+    }
+}
+
+// ── Type declaration generation ─────────────────────────────────────
+
+impl JavaGenerator {
+    fn generate_type_decl(&self, docs: &Option<&str>, name: &str, t: &[Expr]) -> Option<String> {
+        let lombok_decorators = collect_lombok_decorators(t);
+
+        let type_exprs: Vec<&Expr> = t
+            .iter()
+            .filter(|e| !matches!(e, Expr::Annotation(..)))
+            .collect();
+
+        if let Some(Expr::Struct(fields)) = type_exprs.first() {
+            if type_exprs.len() == 1 {
+                return Some(self.generate_class(docs, name, fields, &lombok_decorators));
+            }
+        }
+
+        if let Some(Expr::Enum(variants)) = type_exprs.first() {
+            if type_exprs.len() == 1 {
+                return Some(self.generate_enum(docs, name, variants));
+            }
+        }
+
+        // Type aliases and other expressions have no direct Java DTO
+        // representation, so they are skipped.
+        None
+    }
+
+    // ── Class (struct) generation ───────────────────────────────────
+
+    fn generate_class(
+        &self,
+        docs: &Option<&str>,
+        name: &str,
+        fields: &[KeyValExpr],
+        type_lombok_decorators: &[String],
+    ) -> String {
+        let mut imports: BTreeSet<String> = BTreeSet::new();
+        let class_annotations = self.class_annotations(type_lombok_decorators);
+
+        // Render fields first so their imports are collected before the header.
+        let mut field_block = String::new();
+        for (key, value) in fields {
+            let java_type = self.type_to_java(value, &mut imports);
+            let nullable = is_nullable(value);
+            let field_decorators = collect_lombok_decorators(value);
+
+            if !nullable {
+                field_block.push_str("    @NonNull\n");
+                register_lombok_import(&mut imports, "NonNull");
+            }
+            for decorator in &field_decorators {
+                field_block.push_str(&format!("    @{decorator}\n"));
+                register_lombok_import(&mut imports, decorator);
+            }
+            field_block.push_str(&format!("    private {java_type} {};\n", key.v));
+        }
+
+        for annotation in &class_annotations {
+            register_lombok_import(&mut imports, annotation);
+        }
+
+        let mut out = String::new();
+        out.push_str("// Auto-generated by xenomorph-java — do not edit.\n");
+        if !self.package.is_empty() {
+            out.push_str(&format!("package {};\n", self.package));
+        }
+        out.push('\n');
+
+        if !imports.is_empty() {
+            for import in &imports {
+                out.push_str(&format!("import {import};\n"));
+            }
+            out.push('\n');
+        }
+
+        push_javadoc(&mut out, docs);
+        for annotation in &class_annotations {
+            out.push_str(&format!("@{annotation}\n"));
+        }
+        out.push_str(&format!("public class {name} {{\n"));
+        out.push_str(&field_block);
+        out.push_str("}\n");
+        out
+    }
+
+    /// Determines the Lombok class-level annotations for a generated class,
+    /// combining blanket settings and per-type `@Lombok(...)` decorators.
+    fn class_annotations(&self, type_lombok_decorators: &[String]) -> Vec<String> {
+        let mut annotations: Vec<String> = Vec::new();
+
+        if self.blanket_data {
+            push_unique(&mut annotations, "Data");
+        }
+        if self.blanket_value {
+            push_unique(&mut annotations, "Value");
+        }
+        if self.blanket_builder {
+            push_unique(&mut annotations, "Builder");
+        }
+        for decorator in type_lombok_decorators {
+            push_unique(&mut annotations, decorator);
+        }
+
+        // `@Data` and `@Value` already bundle getters (and setters for
+        // `@Data`), so only add explicit accessors when neither is present.
+        let has_accessor_bundle = annotations
+            .iter()
+            .any(|a| a == "Data" || a == "Value" || a == "Getter" || a == "Setter");
+        if !has_accessor_bundle {
+            push_unique(&mut annotations, "Getter");
+            push_unique(&mut annotations, "Setter");
+        }
+
+        annotations
+    }
+
+    // ── Enum generation ─────────────────────────────────────────────
+
+    fn generate_enum(&self, docs: &Option<&str>, name: &str, variants: &[KeyValExpr]) -> String {
+        let all_int = !variants.is_empty()
+            && variants.iter().all(|(_, value)| {
+                matches!(
+                    non_annotation_exprs(value).as_slice(),
+                    [Expr::Literal(Literal::Number(NumberType::Int(_, _)))]
+                )
+            });
+
+        let mut out = String::new();
+        out.push_str("// Auto-generated by xenomorph-java — do not edit.\n");
+        if !self.package.is_empty() {
+            out.push_str(&format!("package {};\n", self.package));
+        }
+        out.push('\n');
+
+        push_javadoc(&mut out, docs);
+        out.push_str(&format!("public enum {name} {{\n"));
+
+        if all_int {
+            for (i, (key, value)) in variants.iter().enumerate() {
+                let sep = if i + 1 == variants.len() { ";" } else { "," };
+                let n = match non_annotation_exprs(value).as_slice() {
+                    [Expr::Literal(Literal::Number(NumberType::Int(n, _)))] => *n,
+                    _ => 0,
+                };
+                out.push_str(&format!("    {}({n}){sep}\n", key.v));
+            }
+            out.push('\n');
+            out.push_str("    private final int value;\n\n");
+            out.push_str(&format!("    {name}(int value) {{\n"));
+            out.push_str("        this.value = value;\n");
+            out.push_str("    }\n\n");
+            out.push_str("    public int getValue() {\n");
+            out.push_str("        return value;\n");
+            out.push_str("    }\n");
+        } else {
+            let members: Vec<String> = variants.iter().map(|(k, _)| k.v.to_string()).collect();
+            out.push_str(&format!("    {}\n", members.join(",\n    ")));
+        }
+
+        out.push_str("}\n");
+        out
+    }
+
+    // ── Type mapping ────────────────────────────────────────────────
+
+    /// Resolves an anonymous type (one field's value) to a Java type,
+    /// registering any required imports.
+    fn type_to_java(&self, exprs: &AnonymType, imports: &mut BTreeSet<String>) -> String {
+        for expr in exprs {
+            match expr {
+                Expr::Annotation(..) => continue,
+                Expr::Identifier(id) if id.v == "null" => continue,
+                other => {
+                    if let Some(java) = self.expr_to_java(other, imports) {
+                        return java;
+                    }
+                }
+            }
+        }
+        "Object".to_string()
+    }
+
+    fn expr_to_java(&self, expr: &Expr, imports: &mut BTreeSet<String>) -> Option<String> {
+        match expr {
+            Expr::Identifier(id) if id.v == "null" => None,
+            Expr::Identifier(id) => Some(builtin_to_java(id.v, imports)),
+            Expr::Array(id) => {
+                imports.insert("java.util.List".to_string());
+                Some(format!("List<{}>", builtin_to_java(id.v, imports)))
+            }
+            Expr::List(inner) => {
+                imports.insert("java.util.List".to_string());
+                if inner.len() == 1 {
+                    Some(format!("List<{}>", self.type_to_java(&inner[0], imports)))
+                } else {
+                    Some("List<Object>".to_string())
+                }
+            }
+            Expr::Set(inner) => {
+                imports.insert("java.util.Set".to_string());
+                if inner.len() == 1 {
+                    Some(format!("Set<{}>", self.type_to_java(&inner[0], imports)))
+                } else {
+                    Some("Set<Object>".to_string())
+                }
+            }
+            Expr::BinaryExpr(_, pair) => self
+                .expr_to_java(&pair.0, imports)
+                .or_else(|| self.expr_to_java(&pair.1, imports)),
+            Expr::Literal(Literal::String(_, _)) => Some("String".to_string()),
+            Expr::Literal(Literal::Boolean(_, _)) => Some("Boolean".to_string()),
+            Expr::Literal(Literal::Number(NumberType::Int(_, _))) => Some("Integer".to_string()),
+            Expr::Literal(Literal::Number(NumberType::Float(_, _))) => Some("Double".to_string()),
+            _ => None,
+        }
+    }
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────
+
+/// Maps a Xenomorph builtin type name to a Java type, registering the import
+/// for types that live outside `java.lang`. Unknown names are assumed to be
+/// user-defined types in the same package and are returned unchanged.
+fn builtin_to_java(name: &str, imports: &mut BTreeSet<String>) -> String {
+    match name {
+        "string" | "char" | "email" | "url" | "hostname" | "ip" | "ipv4" | "ipv6" | "semver"
+        | "strong_password" | "json" | "xml" | "yaml" | "toml" | "csv" | "tsv" => {
+            "String".to_string()
+        }
+        "bool" => "Boolean".to_string(),
+        "i4" | "i8" | "i16" | "i32" | "u4" | "u8" | "u16" => "Integer".to_string(),
+        "i64" | "u32" => "Long".to_string(),
+        "u64" | "u128" | "i128" | "bigint" | "integer" => {
+            imports.insert("java.math.BigInteger".to_string());
+            "BigInteger".to_string()
+        }
+        "f32" => "Float".to_string(),
+        "f64" | "number" => "Double".to_string(),
+        "decimal" => {
+            imports.insert("java.math.BigDecimal".to_string());
+            "BigDecimal".to_string()
+        }
+        "uuid" => {
+            imports.insert("java.util.UUID".to_string());
+            "UUID".to_string()
+        }
+        "date" => {
+            imports.insert("java.time.LocalDate".to_string());
+            "LocalDate".to_string()
+        }
+        "datetime" => {
+            imports.insert("java.time.OffsetDateTime".to_string());
+            "OffsetDateTime".to_string()
+        }
+        "duration" => {
+            imports.insert("java.time.Duration".to_string());
+            "Duration".to_string()
+        }
+        "regex" => {
+            imports.insert("java.util.regex.Pattern".to_string());
+            "Pattern".to_string()
+        }
+        "binary" => "byte[]".to_string(),
+        "dict" => {
+            imports.insert("java.util.Map".to_string());
+            "Map<String, Object>".to_string()
+        }
+        "any" | "null" => "Object".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Collects the decorator names from all `@Lombok(...)` annotations attached to
+/// a type or field, e.g. `@Lombok(ToString, EqualsAndHashCode)` → `["ToString",
+/// "EqualsAndHashCode"]`.
+fn collect_lombok_decorators(exprs: &[Expr]) -> Vec<String> {
+    let mut decorators = Vec::new();
+    for expr in exprs {
+        if let Expr::Annotation(name, args) = expr {
+            if name.v != "Lombok" {
+                continue;
+            }
+            for arg in args {
+                if let Some(decorator) = decorator_name(arg) {
+                    push_unique(&mut decorators, &decorator);
+                }
+            }
+        }
+    }
+    decorators
+}
+
+/// Renders a single `@Lombok(...)` argument as a Java decorator name.
+/// Supports plain identifiers (`Data`) and field-access forms (`$Exclude`).
+fn decorator_name(arg: &AnonymType) -> Option<String> {
+    match non_annotation_exprs(arg).as_slice() {
+        [Expr::Identifier(id)] => Some(id.v.to_string()),
+        [Expr::FieldAccess(id)] => Some(id.v.to_string()),
+        _ => None,
+    }
+}
+
+/// Registers the `lombok.*` import for a decorator, using its top-level name so
+/// nested decorators like `ToString.Exclude` import `lombok.ToString`.
+fn register_lombok_import(imports: &mut BTreeSet<String>, decorator: &str) {
+    let top = decorator.split('.').next().unwrap_or(decorator);
+    if !top.is_empty() {
+        imports.insert(format!("lombok.{top}"));
+    }
+}
+
+fn non_annotation_exprs<'a, 'src>(exprs: &'a [Expr<'src>]) -> Vec<&'a Expr<'src>> {
+    exprs
+        .iter()
+        .filter(|e| !matches!(e, Expr::Annotation(..)))
+        .collect()
+}
+
+/// Returns true when a field's type includes `null`, making it optional.
+fn is_nullable(exprs: &AnonymType) -> bool {
+    exprs.iter().any(is_null_expr)
+}
+
+fn is_null_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Identifier(id) => id.v == "null",
+        Expr::BinaryExpr(BinaryExprType::Union | BinaryExprType::Or, pair) => {
+            is_null_expr(&pair.0) || is_null_expr(&pair.1)
+        }
+        _ => false,
+    }
+}
+
+fn push_javadoc(out: &mut String, docs: &Option<&str>) {
+    if let Some(doc) = docs {
+        out.push_str("/**\n");
+        for line in doc.lines() {
+            out.push_str(&format!(" * {line}\n"));
+        }
+        out.push_str(" */\n");
+    }
+}
+
+fn push_unique(list: &mut Vec<String>, value: &str) {
+    if !list.iter().any(|v| v == value) {
+        list.push(value.to_string());
+    }
+}
+
+fn package_to_path(package: &str) -> PathBuf {
+    package
+        .split('.')
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn imports() -> BTreeSet<String> {
+        BTreeSet::new()
+    }
+
+    #[test]
+    fn test_builtin_mappings() {
+        let mut i = imports();
+        assert_eq!(builtin_to_java("string", &mut i), "String");
+        assert_eq!(builtin_to_java("bool", &mut i), "Boolean");
+        assert_eq!(builtin_to_java("u8", &mut i), "Integer");
+        assert_eq!(builtin_to_java("i64", &mut i), "Long");
+        assert_eq!(builtin_to_java("u64", &mut i), "BigInteger");
+        assert_eq!(builtin_to_java("f32", &mut i), "Float");
+        assert_eq!(builtin_to_java("f64", &mut i), "Double");
+        assert_eq!(builtin_to_java("decimal", &mut i), "BigDecimal");
+        assert_eq!(builtin_to_java("uuid", &mut i), "UUID");
+        assert_eq!(builtin_to_java("binary", &mut i), "byte[]");
+        assert_eq!(builtin_to_java("MyType", &mut i), "MyType");
+        assert!(i.contains("java.math.BigInteger"));
+        assert!(i.contains("java.util.UUID"));
+    }
+
+    #[test]
+    fn test_package_to_path() {
+        assert_eq!(
+            package_to_path("com.xyz.model"),
+            PathBuf::from("com").join("xyz").join("model")
+        );
+        assert_eq!(package_to_path(""), PathBuf::new());
+    }
+
+    #[test]
+    fn test_default_accessors_when_no_blanket_settings() {
+        let generator = JavaGenerator::new();
+        assert_eq!(
+            generator.class_annotations(&[]),
+            vec!["Getter".to_string(), "Setter".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_blanket_data_skips_explicit_accessors() {
+        let mut generator = JavaGenerator::new();
+        generator.blanket_data = true;
+        generator.blanket_builder = true;
+        assert_eq!(
+            generator.class_annotations(&[]),
+            vec!["Data".to_string(), "Builder".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_type_level_lombok_decorators_are_used() {
+        let generator = JavaGenerator::new();
+        let decorators = vec!["Value".to_string()];
+        assert_eq!(
+            generator.class_annotations(&decorators),
+            vec!["Value".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_register_lombok_import_uses_top_level() {
+        let mut i = imports();
+        register_lombok_import(&mut i, "ToString.Exclude");
+        register_lombok_import(&mut i, "NonNull");
+        assert!(i.contains("lombok.ToString"));
+        assert!(i.contains("lombok.NonNull"));
+    }
+}

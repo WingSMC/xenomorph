@@ -5,10 +5,16 @@ entry = "./tests/examples/test"
 
 [plugins]
 path = "./target/release/"
-plugins = ["xenomorph_typescript", "xenomorph_json_schema"]
+plugins = ["xenomorph_typescript", "xenomorph_json_schema", "xenomorph_java"]
 
 [plugins.typescript]
 output = "./tests/out/typescript/"
 
 [plugins.json_schema]
 output = "./tests/out/json_schema/"
+
+[plugins.java]
+output = "./tests/out/java/"
+package = "com.xyz.model"
+data = true
+builder = true
