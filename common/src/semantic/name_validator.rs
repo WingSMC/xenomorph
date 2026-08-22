@@ -1,7 +1,7 @@
 use crate::{
     parser::{Expr, TypeList},
     semantic::{AnalyzerListener, ScopeInfo},
-    TokenData, XenoError,
+    TokenData, XenoDiagnostic,
 };
 
 /// Reports unknown type identifiers and unknown annotation names.
@@ -18,12 +18,13 @@ impl NameValidator {
 }
 
 impl<'src> AnalyzerListener<'src> for NameValidator {
-    fn on_before_expr(&mut self, expr: &Expr<'src>, errors: &mut Vec<XenoError<'src>>) {
+    fn on_before_expr(&mut self, expr: &Expr<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {
         if let Expr::Identifier(id) = expr {
             if !self.scope.has_type(id.v) {
-                errors.push(XenoError {
+                errors.push(XenoDiagnostic {
                     location: (*id).clone(),
                     message: format!("Unknown type '{}'", id.v),
+                    severity: crate::XenoDiagSeverity::Err,
                 });
             }
         }
@@ -33,12 +34,13 @@ impl<'src> AnalyzerListener<'src> for NameValidator {
         &mut self,
         name: &TokenData<'src>,
         _args: &TypeList<'src>,
-        errors: &mut Vec<XenoError<'src>>,
+        errors: &mut Vec<XenoDiagnostic<'src>>,
     ) {
         if !self.scope.has_annotation(name.v) {
-            errors.push(XenoError {
+            errors.push(XenoDiagnostic {
                 location: (*name).clone(),
                 message: format!("Unknown annotation '@{}'", name.v),
+                severity: crate::XenoDiagSeverity::Warn,
             });
         }
     }

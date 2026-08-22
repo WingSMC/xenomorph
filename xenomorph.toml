@@ -1,11 +1,11 @@
-#:schema .xenomorph/xenomorph.schema.json
+#:schema ./xenomorph.schema.json
 
 [parser]
 entry = "./tests/examples/test"
 
 [plugins]
 path = "./target/release/"
-plugins = ["xenomorph_typescript", "xenomorph_json_schema", "xenomorph_java"]
+plugins = ["xenomorph_json_schema", "xenomorph_java"]
 
 [plugins.typescript]
 output = "./tests/out/typescript/"

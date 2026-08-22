@@ -1,4 +1,4 @@
-import sets/alma/korte;
+import parser/sets/alma/korte;
 
 /** asd */
 type MyColors = set ["red", "green", "blue"];
@@ -7,5 +7,5 @@ type BothOurFavouriteColors = MyColors + DoggieColors;
 type ColorsOnlyILike = BothOurFavouriteColors \ DoggieColors;
 
 type B = string;
-type C = B @max(5);
+type C = B @maxlen(5);
 type Z = Korte;

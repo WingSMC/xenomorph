@@ -904,7 +904,6 @@ dependencies = [
  "ouroboros",
  "serde",
  "serde_json",
- "tokio",
  "toml",
  "tower-lsp",
 ]

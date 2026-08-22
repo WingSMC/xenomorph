@@ -11,42 +11,36 @@ use crate::{
 pub struct Parser<'src> {
     pub tokens: &'src XenoTokens<'src>,
     pub current: usize,
+    pub diagnostics: Vec<XenoDiagnostic<'src>>,
 }
 
 pub type XenoAst<'src> = Vec<Declaration<'src>>;
 pub type XenoParseResult<'src> = (XenoAst<'src>, Vec<XenoError<'src>>);
 
+// --- Basic parser utilities / entry ---
 impl<'src> Parser<'src> {
-    fn new(tokens: &'src XenoTokens<'src>) -> Self {
-        Self { tokens, current: 0 }
-    }
-
     pub fn parse(tokens: &'src XenoTokens<'src>) -> XenoParseResult<'src> {
         Self::new(tokens)._parse()
     }
+    pub fn new(tokens: &'src XenoTokens<'src>) -> Self {
+        Self {
+            tokens,
+            current: 0,
+            diagnostics: Vec::new(),
+        }
+    }
     fn _parse(mut self) -> XenoParseResult<'src> {
         let mut ast = Vec::new();
-        let mut errs = Vec::new();
 
         while self.is_not_eof() {
-            match self.parse_declaration() {
-                Err(e) => {
-                    errs.extend(e);
-                    self.recover_to(TokenVariant::Semicolon);
-                }
-                Ok(d) => ast.push(d),
+            let res = self.parse_declaration();
+            match res {
+                Some(d) => ast.push(d),
+                None => self.recover_to(TokenVariant::Semicolon),
             }
         }
 
-        (ast, errs)
-    }
-
-    pub fn parse_range(
-        _tokens: &'src XenoTokens<'src>,
-        _old_ast: Vec<Declaration<'src>>,
-        _range: (usize, usize),
-    ) -> XenoParseResult<'src> {
-        panic!("Not implemented yet")
+        (ast, self.diagnostics)
     }
 
     fn recover_to(&mut self, variant: TokenVariant) {
@@ -56,7 +50,7 @@ impl<'src> Parser<'src> {
             }
         }
 
-        while let Ok(t) = self.next() {
+        while let Some(t) = self.next() {
             if t.0 == variant {
                 break;
             }

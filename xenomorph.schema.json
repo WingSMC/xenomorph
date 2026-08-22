@@ -1,0 +1,116 @@
+{
+  "$id": "https://wingsmc.github.io/xenomorph/xenomorph.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Configuration file for the Xenomorph toolchain.",
+  "properties": {
+    "debug": {
+      "additionalProperties": false,
+      "description": "Debug output toggles.",
+      "properties": {
+        "ast": {
+          "default": false,
+          "description": "Print the parsed AST for each module.",
+          "type": "boolean"
+        },
+        "plugins": {
+          "default": false,
+          "description": "Print plugin loading diagnostics.",
+          "type": "boolean"
+        },
+        "tokens": {
+          "default": false,
+          "description": "Print the token stream for each module.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "parser": {
+      "additionalProperties": false,
+      "description": "Parser and entry-point configuration.",
+      "properties": {
+        "entry": {
+          "default": "index.xen",
+          "description": "Entry module path relative to the workspace root, without the `.xen` extension.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "plugins": {
+      "additionalProperties": true,
+      "description": "Plugin loading and per-plugin configuration.",
+      "properties": {
+        "java": {
+          "additionalProperties": false,
+          "description": "Java + Lombok DTO generator.",
+          "properties": {
+            "builder": {
+              "description": "Annotate every generated class with Lombok's `@Builder`.",
+              "type": "boolean"
+            },
+            "data": {
+              "description": "Annotate every generated class with Lombok's `@Data`.",
+              "type": "boolean"
+            },
+            "output": {
+              "description": "Target directory for generated .java files, relative to the workspace root. Package sub-directories are created inside it. If omitted, files are written next to their .xen sources.",
+              "type": "string"
+            },
+            "package": {
+              "description": "Java package the generated DTOs belong to, e.g. `com.xyz.model`.",
+              "type": "string"
+            },
+            "value": {
+              "description": "Annotate every generated class with Lombok's `@Value` (immutable DTOs).",
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "json_schema": {
+          "additionalProperties": false,
+          "description": "JSON Schema generator.",
+          "properties": {
+            "output": {
+              "description": "Output directory for generated .schema.json files, relative to the workspace root. If omitted, files are written next to their .xen sources.",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "path": {
+          "description": "Directory containing the compiled plugin libraries, relative to the workspace root.",
+          "type": "string"
+        },
+        "plugins": {
+          "description": "Plugin library names to load (without the platform-specific `lib` prefix or file extension).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "typescript": {
+          "additionalProperties": false,
+          "description": "TypeScript type declaration generator.",
+          "properties": {
+            "output": {
+              "description": "Output directory for generated .ts files, relative to the workspace root. If omitted, files are written next to their .xen sources.",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "workdir": {
+      "description": "Workspace root override. Normally detected automatically from the location of `xenomorph.toml`.",
+      "type": "string"
+    }
+  },
+  "title": "Xenomorph configuration (xenomorph.toml)",
+  "type": "object"
+}

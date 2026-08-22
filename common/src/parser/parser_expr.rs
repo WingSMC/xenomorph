@@ -15,10 +15,10 @@ pub enum Declaration<'src> {
     TypeDecl {
         docs: Option<&'src str>,
         name: &'src TokenData<'src>,
-        t: Vec<Expr<'src>>,
+        from: &'src TokenData<'src>,
         // TODO for boundary: location of the entire declaration, for better error messages and content finding
-        // from: Location
         // to: Location
+        t: Vec<Expr<'src>>,
     },
     // Custom {
     //     plugin_id: &'static str,

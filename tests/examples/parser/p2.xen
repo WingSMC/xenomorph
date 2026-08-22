@@ -1,4 +1,4 @@
-import p1;
+import parser/p1;
 
 type UserName = string /^[A-Z][a-z]+$/ @minlen(3) @maxlen(50);
 type UserAge = u8 @min(0) @max(150);
@@ -9,4 +9,4 @@ type UserType = {
     isActive: bool,
 };
 
-type UserList = User[] @len(1<.<1000);
+type UserList = User[] @minlen(1) @maxlen(1000);

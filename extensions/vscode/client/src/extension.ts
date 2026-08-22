@@ -38,6 +38,16 @@ export function activate(context: ExtensionContext) {
     client.start();
 }
 
-export function deactivate() {
-    return client?.stop();
+export async function deactivate(): Promise<void> {
+    if (!client) {
+        return;
+    }
+
+    try {
+        await client.stop();
+    } catch {
+        await client.dispose().catch(() => undefined);
+    } finally {
+        client = undefined;
+    }
 }

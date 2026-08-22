@@ -2,17 +2,18 @@ use ouroboros::self_referencing;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use tokio::sync::RwLock;
+use std::sync::RwLock;
 
 pub mod types;
 
 use crate::config::Config;
 use crate::lexer::{Lexer, Token, XenoTokens};
-use crate::module::types::{DeclarationInfo, ErrorPhase, ModuleError, ModulePath};
+use crate::module::types::{DeclarationInfo, ErrorPhase, ModuleDiagnostic, ModulePath};
 use crate::parser::{Declaration, Expr, Parser, XenoAst};
 use crate::plugins::XenoPlugin;
 use crate::semantic::Analyzer;
 use crate::utils::calculate_hash;
+use crate::XenoDiagSeverity;
 
 /// Information about a single module (one .xen file).
 /// Owns the source text so that all borrows from tokens/ast remain valid.
@@ -27,13 +28,13 @@ pub struct ModuleData {
     /// Hash of the source text, used for change detection.
     pub hash: u64,
     /// Lexer errors.
-    pub lexer_errors: Vec<ModuleError>,
+    pub lexer_errors: Vec<ModuleDiagnostic>,
     /// Parser errors.
-    pub parser_errors: Vec<ModuleError>,
+    pub parser_errors: Vec<ModuleDiagnostic>,
     /// Semantic analyzer errors.
-    pub analyzer_errors: Vec<ModuleError>,
+    pub analyzer_errors: Vec<ModuleDiagnostic>,
     /// Module-level errors (file not found, import resolution, etc.)
-    pub module_errors: Vec<ModuleError>,
+    pub module_errors: Vec<ModuleDiagnostic>,
     /// Modules that this module imports
     pub imports: Vec<ModulePath>,
     /// Changed flag
@@ -52,18 +53,19 @@ pub struct ModuleData {
 }
 
 /// Determines the workspace root and entry module path from the config.
-fn get_root() -> Result<(PathBuf, String), ModuleError> {
+fn get_root() -> Result<(PathBuf, String), ModuleDiagnostic> {
     let config = Config::get();
     let mut joined = config.workdir.join(Path::new(&config.parser.entry));
     joined.add_extension("xen");
-    let entry_file = joined.canonicalize().map_err(|e| ModuleError {
+    let entry_file = joined.canonicalize().map_err(|e| ModuleDiagnostic {
         module_path: config.parser.entry.clone(),
         message: format!("Cannot resolve entry file '{:?}': {}", joined, e),
         location: None,
         phase: ErrorPhase::Module,
+        severity: XenoDiagSeverity::Err,
     })?;
 
-    let root_err = || ModuleError {
+    let root_err = || ModuleDiagnostic {
         module_path: config.parser.entry.clone(),
         message: format!(
             "Cannot determine workspace root from entry file '{}'",
@@ -71,6 +73,7 @@ fn get_root() -> Result<(PathBuf, String), ModuleError> {
         ),
         location: None,
         phase: ErrorPhase::Module,
+        severity: XenoDiagSeverity::Err,
     };
 
     let root = entry_file
@@ -85,7 +88,7 @@ fn get_root() -> Result<(PathBuf, String), ModuleError> {
             .file_stem()
             .and_then(|s| s.to_str())
             .map(|s| s.to_string())
-            .ok_or_else(|| ModuleError {
+            .ok_or_else(|| ModuleDiagnostic {
                 module_path: config.parser.entry.clone(),
                 message: format!(
                     "Entry file '{}' does not have a valid stem",
@@ -93,6 +96,7 @@ fn get_root() -> Result<(PathBuf, String), ModuleError> {
                 ),
                 location: None,
                 phase: ErrorPhase::Module,
+                severity: XenoDiagSeverity::Err,
             })?,
     ))
 }
@@ -107,7 +111,7 @@ pub struct XenoRegistry {
 }
 
 impl XenoRegistry {
-    pub fn new(generation_mode: bool) -> Result<XenoRegistry, ModuleError> {
+    pub fn new(generation_mode: bool) -> Result<XenoRegistry, ModuleDiagnostic> {
         let (root, entry) = get_root()?;
         let plugins = XenoPlugin::get_plugins();
         Ok(XenoRegistry {
@@ -120,7 +124,7 @@ impl XenoRegistry {
     }
 
     /// Initializes a new `XenoRegistry` and loads the entire workspace starting from the entry module.
-    pub fn load_workspace(generation_mode: bool) -> Result<XenoRegistry, Vec<ModuleError>> {
+    pub fn load_workspace(generation_mode: bool) -> Result<XenoRegistry, Vec<ModuleDiagnostic>> {
         let reg = XenoRegistry::new(generation_mode).map_err(|e| vec![e])?;
         let errs = reg.load_module(&[&reg.entry], true, None);
         if !errs.is_empty() {
@@ -142,13 +146,16 @@ impl XenoRegistry {
     // ── Module loading ──────────────────────────────────────────────
 
     /// Loads a module from a given absolute file path string.
-    pub fn load_module_from_uri(&self, uri: &str) -> Vec<ModuleError> {
-        let path_res = PathBuf::from(uri).canonicalize().map_err(|e| ModuleError {
-            module_path: uri.to_string(),
-            message: format!("Cannot resolve URI '{}': {}", uri, e),
-            location: None,
-            phase: ErrorPhase::Module,
-        });
+    pub fn load_module_from_uri(&self, uri: &str) -> Vec<ModuleDiagnostic> {
+        let path_res = PathBuf::from(uri)
+            .canonicalize()
+            .map_err(|e| ModuleDiagnostic {
+                module_path: uri.to_string(),
+                message: format!("Cannot resolve URI '{}': {}", uri, e),
+                location: None,
+                phase: ErrorPhase::Module,
+                severity: XenoDiagSeverity::Err,
+            });
         let path = match path_res {
             Ok(p) => p,
             Err(e) => return vec![e],
@@ -157,7 +164,7 @@ impl XenoRegistry {
         let relative = match path.strip_prefix(&self.root) {
             Ok(r) => r,
             Err(e) => {
-                return vec![ModuleError {
+                return vec![ModuleDiagnostic {
                     module_path: uri.to_string(),
                     message: format!(
                         "URI '{}' is not within workspace root '{}': {}",
@@ -167,6 +174,7 @@ impl XenoRegistry {
                     ),
                     location: None,
                     phase: ErrorPhase::Module,
+                    severity: XenoDiagSeverity::Err,
                 }]
             }
         };
@@ -182,11 +190,15 @@ impl XenoRegistry {
 
     /// Loads a module from in-memory source text (e.g. unsaved editor buffer).
     /// Returns all errors for this module (lexer + parser + analyzer + module).
-    pub fn load_module_from_source(&self, abs_path: &Path, source: String) -> Vec<ModuleError> {
+    pub fn load_module_from_source(
+        &self,
+        abs_path: &Path,
+        source: String,
+    ) -> Vec<ModuleDiagnostic> {
         let module_path = match self.abs_path_to_module_path(abs_path) {
             Some(mp) => mp,
             None => {
-                return vec![ModuleError {
+                return vec![ModuleDiagnostic {
                     module_path: abs_path.to_string_lossy().to_string(),
                     message: format!(
                         "Path '{}' is not within workspace root '{}'",
@@ -195,6 +207,7 @@ impl XenoRegistry {
                     ),
                     location: None,
                     phase: ErrorPhase::Module,
+                    severity: XenoDiagSeverity::Err,
                 }]
             }
         };
@@ -202,11 +215,12 @@ impl XenoRegistry {
         let canonical = match abs_path.canonicalize() {
             Ok(p) => p,
             Err(e) => {
-                return vec![ModuleError {
+                return vec![ModuleDiagnostic {
                     module_path,
                     message: format!("Cannot canonicalize '{}': {}", abs_path.display(), e),
                     location: None,
                     phase: ErrorPhase::Module,
+                    severity: XenoDiagSeverity::Err,
                 }]
             }
         };
@@ -214,7 +228,7 @@ impl XenoRegistry {
         // Hash-based change detection — skip if unchanged
         let hash = calculate_hash(&source);
         {
-            let cache = self.module_cache.blocking_read();
+            let cache = self.module_cache.read().unwrap();
             if let Some(existing) = cache.get(&module_path) {
                 if *existing.borrow_hash() == hash {
                     return self.get_all_errors_for(&module_path);
@@ -231,25 +245,26 @@ impl XenoRegistry {
         import_segments: &[&str],
         force: bool,
         import_str: Option<&str>,
-    ) -> Vec<ModuleError> {
+    ) -> Vec<ModuleDiagnostic> {
         let (module_path, abs_path) = match self.resolve_import(import_segments, import_str) {
             Err(e) => return vec![e],
             Ok(fp) => fp,
         };
 
         // Skip if already loaded unless forced
-        if !force && self.module_cache.blocking_read().contains_key(&module_path) {
+        if !force && self.module_cache.read().unwrap().contains_key(&module_path) {
             return vec![];
         }
 
         let source = match fs::read_to_string(&abs_path) {
             Ok(s) => s,
             Err(e) => {
-                return vec![ModuleError {
+                return vec![ModuleDiagnostic {
                     module_path,
                     message: format!("Failed to read file '{}': {}", abs_path.display(), e),
                     location: None,
                     phase: ErrorPhase::Module,
+                    severity: XenoDiagSeverity::Err,
                 }];
             }
         };
@@ -257,7 +272,7 @@ impl XenoRegistry {
         // Hash-based skip when forced
         let hash = calculate_hash(&source);
         if force {
-            let r = self.module_cache.blocking_read();
+            let r = self.module_cache.read().unwrap();
             if let Some(existing) = r.get(&module_path) {
                 if *existing.borrow_hash() == hash {
                     return vec![];
@@ -274,8 +289,8 @@ impl XenoRegistry {
         abs_path: PathBuf,
         source: String,
         hash: u64,
-    ) -> Vec<ModuleError> {
-        let mut errors: Vec<ModuleError> = Vec::new();
+    ) -> Vec<ModuleDiagnostic> {
+        let mut errors: Vec<ModuleDiagnostic> = Vec::new();
 
         let md = match Self::_create_module_data(&module_path, abs_path, source, hash) {
             Ok(r) => r,
@@ -290,7 +305,8 @@ impl XenoRegistry {
         let imports = md.borrow_imports().to_vec();
         {
             self.module_cache
-                .blocking_write()
+                .write()
+                .unwrap()
                 .insert(module_path.clone(), md);
         }
 
@@ -302,7 +318,7 @@ impl XenoRegistry {
 
         // ── Step 3: Analyze with full scope (read lock only) ──
         let (analyzer_errors, import_errors, lexer_errs, parser_errs) = {
-            let cache = self.module_cache.blocking_read();
+            let cache = self.module_cache.read().unwrap();
             let md = cache.get(&module_path).unwrap();
 
             let xeno_errors = self.analyzer.run(
@@ -314,13 +330,14 @@ impl XenoRegistry {
                 &Config::get().plugins.config,
             );
 
-            let analyzer_errors: Vec<ModuleError> = xeno_errors
+            let analyzer_errors: Vec<ModuleDiagnostic> = xeno_errors
                 .iter()
-                .map(|e| ModuleError {
+                .map(|e| ModuleDiagnostic {
                     module_path: module_path.clone(),
                     message: e.message.clone(),
                     location: Some((e.location.l, e.location.c, e.location.v.len() as u32)),
                     phase: ErrorPhase::Analyzer,
+                    severity: e.severity,
                 })
                 .collect();
 
@@ -333,12 +350,14 @@ impl XenoRegistry {
 
         // ── Step 4: Write error fields back into the cached module ──
         {
-            let mut cache = self.module_cache.blocking_write();
+            let mut cache = self.module_cache.write().unwrap();
             let md = cache.get_mut(&module_path).unwrap();
-            md.with_analyzer_errors_mut(|errs: &mut Vec<ModuleError>| {
+            md.with_analyzer_errors_mut(|errs: &mut Vec<ModuleDiagnostic>| {
                 *errs = analyzer_errors.clone()
             });
-            md.with_module_errors_mut(|errs: &mut Vec<ModuleError>| *errs = import_errors.clone());
+            md.with_module_errors_mut(|errs: &mut Vec<ModuleDiagnostic>| {
+                *errs = import_errors.clone()
+            });
         }
 
         errors.extend(lexer_errs);
@@ -356,7 +375,7 @@ impl XenoRegistry {
         &self,
         import_array: &[&str],
         import_str: Option<&str>,
-    ) -> Result<(ModulePath, PathBuf), ModuleError> {
+    ) -> Result<(ModulePath, PathBuf), ModuleDiagnostic> {
         let import_str = import_str
             .map(|s| s.to_string())
             .unwrap_or_else(|| import_array.join("/"));
@@ -365,17 +384,18 @@ impl XenoRegistry {
 
         match pathbuf.canonicalize() {
             Ok(p) => Ok((import_str, p)),
-            Err(e) => Err(ModuleError {
+            Err(e) => Err(ModuleDiagnostic {
                 module_path: import_str.clone(),
                 message: format!("Cannot resolve import '{}': {}", import_str, e),
                 location: None,
                 phase: ErrorPhase::Module,
+                severity: XenoDiagSeverity::Err,
             }),
         }
     }
 
     /// Validates all import declarations in a module.
-    fn validate_imports(&self, module: &ModuleData, module_path: &str) -> Vec<ModuleError> {
+    fn validate_imports(&self, module: &ModuleData, module_path: &str) -> Vec<ModuleDiagnostic> {
         let mut errors = Vec::new();
         for decl in module.borrow_ast().iter() {
             if let Declaration::Import { path, location } = decl {
@@ -383,7 +403,7 @@ impl XenoRegistry {
                 match self.resolve_import(&segments, None) {
                     Ok((_, abs_path)) => {
                         if !abs_path.exists() {
-                            errors.push(ModuleError {
+                            errors.push(ModuleDiagnostic {
                                 module_path: module_path.to_string(),
                                 message: format!(
                                     "Module '{}' not found (expected at '{}')",
@@ -392,15 +412,17 @@ impl XenoRegistry {
                                 ),
                                 location: Some((location.l, location.c, location.v.len() as u32)),
                                 phase: ErrorPhase::Analyzer,
+                                severity: XenoDiagSeverity::Err,
                             });
                         }
                     }
                     Err(_) => {
-                        errors.push(ModuleError {
+                        errors.push(ModuleDiagnostic {
                             module_path: module_path.to_string(),
                             message: format!("Cannot resolve module '{}'", path.join("/")),
                             location: Some((location.l, location.c, location.v.len() as u32)),
                             phase: ErrorPhase::Analyzer,
+                            severity: XenoDiagSeverity::Err,
                         });
                     }
                 }
@@ -453,23 +475,14 @@ impl XenoRegistry {
     where
         F: for<'a> FnOnce(&'a [Token<'a>], &'a [Declaration<'a>], &'a ModuleData) -> T,
     {
-        let cache = self.module_cache.blocking_read();
+        let cache = self.module_cache.read().unwrap();
         let module = cache.get(module_path)?;
         Some(f(module.borrow_tokens(), module.borrow_ast(), module))
     }
 
-    pub async fn with_module_async<T, F>(&self, module_path: &str, f: F) -> Option<T>
-    where
-        F: for<'a> AsyncFnOnce(&'a [Token<'a>], &'a [Declaration<'a>], &'a ModuleData) -> T, // F: for<'a> FnOnce(&'a [Token<'a>], &'a [Declaration<'a>], &'a ModuleData) -> T,
-    {
-        let cache = self.module_cache.read().await;
-        let module = cache.get(module_path)?;
-        Some(f(module.borrow_tokens(), module.borrow_ast(), module).await)
-    }
-
     /// Gets all errors for a specific module.
-    pub fn get_all_errors_for(&self, module_path: &str) -> Vec<ModuleError> {
-        let cache = self.module_cache.blocking_read();
+    pub fn get_all_errors_for(&self, module_path: &str) -> Vec<ModuleDiagnostic> {
+        let cache = self.module_cache.read().unwrap();
         if let Some(module) = cache.get(module_path) {
             let mut all = Vec::new();
             all.extend(module.borrow_lexer_errors().iter().cloned());
@@ -483,8 +496,12 @@ impl XenoRegistry {
     }
 
     /// Gets errors of a specific phase for a module.
-    pub fn get_errors_by_phase(&self, module_path: &str, phase: ErrorPhase) -> Vec<ModuleError> {
-        let cache = self.module_cache.blocking_read();
+    pub fn get_errors_by_phase(
+        &self,
+        module_path: &str,
+        phase: ErrorPhase,
+    ) -> Vec<ModuleDiagnostic> {
+        let cache = self.module_cache.read().unwrap();
         if let Some(module) = cache.get(module_path) {
             match phase {
                 ErrorPhase::Lexer => module.borrow_lexer_errors().clone(),
@@ -503,7 +520,7 @@ impl XenoRegistry {
         self._find_declaration(
             current_module,
             name,
-            &self.module_cache.blocking_read(),
+            &self.module_cache.read().unwrap(),
             &mut HashSet::new(),
         )
     }
@@ -542,7 +559,7 @@ impl XenoRegistry {
         self._get_all_declarations_in_scope(
             current_module,
             &mut decls,
-            &self.module_cache.blocking_read(),
+            &self.module_cache.read().unwrap(),
             &mut HashSet::new(),
         );
         decls
@@ -578,10 +595,10 @@ impl XenoRegistry {
         abs_path: PathBuf,
         source: String,
         hash: u64,
-    ) -> Result<ModuleData, Vec<ModuleError>> {
+    ) -> Result<ModuleData, Vec<ModuleDiagnostic>> {
         // Collect parser errors via shared mutability since ouroboros closures
         // can't write to head fields during construction.
-        let parser_errors_cell: std::cell::RefCell<Vec<ModuleError>> =
+        let parser_errors_cell: std::cell::RefCell<Vec<ModuleDiagnostic>> =
             std::cell::RefCell::new(Vec::new());
 
         let mut md = ModuleDataTryBuilder {
@@ -597,24 +614,26 @@ impl XenoRegistry {
             imports: Vec::new(),
             tokens_builder: |source| {
                 Lexer::tokenize(source).map_err(|e| {
-                    vec![ModuleError {
+                    vec![ModuleDiagnostic {
                         module_path: module_path.clone(),
                         message: format!("{}", e.message),
                         location: Some((e.location.l, e.location.c, e.location.v.len() as u32)),
                         phase: ErrorPhase::Lexer,
+                        severity: e.severity,
                     }]
                 })
             },
             ast_builder: |tokens| {
-                let (ast, parse_errors) = Parser::parse(tokens);
+                let (ast, diagnostics) = Parser::parse(tokens);
 
                 parser_errors_cell
                     .borrow_mut()
-                    .extend(parse_errors.iter().map(|e| ModuleError {
+                    .extend(diagnostics.iter().map(|e| ModuleDiagnostic {
                         module_path: module_path.clone(),
                         message: format!("{}", e.message),
                         location: Some((e.location.l, e.location.c, e.location.v.len() as u32)),
                         phase: ErrorPhase::Parser,
+                        severity: e.severity,
                     }));
 
                 Ok(ast)
@@ -623,7 +642,7 @@ impl XenoRegistry {
                 Ok(ast
                     .iter()
                     .filter_map(|d| match d {
-                        Declaration::TypeDecl { docs, name, t } => Some((
+                        Declaration::TypeDecl { docs, name, t, .. } => Some((
                             name.v,
                             DeclarationInfo {
                                 name: name.v.to_string(),

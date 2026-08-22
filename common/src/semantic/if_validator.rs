@@ -1,7 +1,7 @@
 use crate::{
     parser::{AnonymType, Expr, TypeList},
     semantic::AnalyzerListener,
-    TokenData, XenoError,
+    TokenData, XenoDiagnostic,
 };
 
 #[derive(Clone, Copy, PartialEq)]
@@ -34,15 +34,23 @@ impl IfChainValidator {
 // ── Built-in listeners ──────────────────────────────────────────────
 
 impl<'src> AnalyzerListener<'src> for IfChainValidator {
-    fn on_before_type(&mut self, _exprs: &AnonymType<'src>, _errors: &mut Vec<XenoError<'src>>) {
+    fn on_before_type(
+        &mut self,
+        _exprs: &AnonymType<'src>,
+        _errors: &mut Vec<XenoDiagnostic<'src>>,
+    ) {
         self.stack.push(IfChainState::None);
     }
 
-    fn on_after_type(&mut self, _exprs: &AnonymType<'src>, _errors: &mut Vec<XenoError<'src>>) {
+    fn on_after_type(
+        &mut self,
+        _exprs: &AnonymType<'src>,
+        _errors: &mut Vec<XenoDiagnostic<'src>>,
+    ) {
         self.stack.pop();
     }
 
-    fn on_before_expr(&mut self, expr: &Expr<'src>, _errors: &mut Vec<XenoError<'src>>) {
+    fn on_before_expr(&mut self, expr: &Expr<'src>, _errors: &mut Vec<XenoDiagnostic<'src>>) {
         if !matches!(expr, Expr::Annotation(_, _)) {
             self.set(IfChainState::None);
         }
@@ -52,16 +60,17 @@ impl<'src> AnalyzerListener<'src> for IfChainValidator {
         &mut self,
         name: &TokenData<'src>,
         _args: &TypeList<'src>,
-        errors: &mut Vec<XenoError<'src>>,
+        errors: &mut Vec<XenoDiagnostic<'src>>,
     ) {
         match name.v {
             "if" => self.set(IfChainState::AfterIf),
             "elseif" => match self.current() {
                 IfChainState::AfterIf => {}
                 _ => {
-                    errors.push(XenoError {
+                    errors.push(XenoDiagnostic {
                         location: (*name).clone(),
                         message: "'@elseif' must follow an '@if' or another '@elseif'.".to_string(),
+                        severity: crate::XenoDiagSeverity::Err,
                     });
                     self.set(IfChainState::None);
                 }
@@ -69,9 +78,10 @@ impl<'src> AnalyzerListener<'src> for IfChainValidator {
             "else" => match self.current() {
                 IfChainState::AfterIf => self.set(IfChainState::AfterElse),
                 _ => {
-                    errors.push(XenoError {
+                    errors.push(XenoDiagnostic {
                         location: (*name).clone(),
                         message: "'@else' must follow an '@if' or '@elseif'.".to_string(),
+                        severity: crate::XenoDiagSeverity::Err,
                     });
                     self.set(IfChainState::None);
                 }

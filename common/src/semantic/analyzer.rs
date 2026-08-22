@@ -2,6 +2,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+use crate::plugins::ListenerFactory;
 use crate::{
     config::PluginConfigs,
     module::ModuleData,
@@ -11,7 +12,7 @@ use crate::{
         annotation_validator::AnnotationValidator, if_validator::IfChainValidator,
         name_validator::NameValidator, BUILTIN_ANNOTATIONS, BUILTIN_TYPES,
     },
-    TokenData, XenoError,
+    TokenData, XenoDiagnostic,
 };
 
 /// Scope information built by the analyzer and passed to listeners.
@@ -64,19 +65,18 @@ impl ScopeInfo {
 /// care about.
 #[allow(unused_variables)]
 pub trait AnalyzerListener<'src> {
-    /// Called once per analysis run with all plugin configs from `xenomorph.toml`.
-    fn on_init(&mut self, plugin_configs: &PluginConfigs) {}
-
     /// Called before the AST walk begins, with full scope information.
     fn on_before_module(&mut self, scope: &ScopeInfo) {}
     /// Called after the full AST walk completes, with scope information.
     fn on_after_module(&mut self, scope: &ScopeInfo) {}
 
-    fn on_before_ast(&mut self, ast: &[Declaration<'src>], errors: &mut Vec<XenoError<'src>>) {}
-    fn on_after_ast(&mut self, ast: &[Declaration<'src>], errors: &mut Vec<XenoError<'src>>) {}
+    fn on_before_ast(&mut self, ast: &[Declaration<'src>], errors: &mut Vec<XenoDiagnostic<'src>>) {
+    }
+    fn on_after_ast(&mut self, ast: &[Declaration<'src>], errors: &mut Vec<XenoDiagnostic<'src>>) {}
 
-    fn on_before_decl(&mut self, decl: &Declaration<'src>, errors: &mut Vec<XenoError<'src>>) {}
-    fn on_after_decl(&mut self, decl: &Declaration<'src>, errors: &mut Vec<XenoError<'src>>) {}
+    fn on_before_decl(&mut self, decl: &Declaration<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {
+    }
+    fn on_after_decl(&mut self, decl: &Declaration<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {}
 
     // fn on_before_custom(
     //     &mut self,
@@ -90,62 +90,78 @@ pub trait AnalyzerListener<'src> {
     // }
     // fn on_after_custom(&mut self, errors: &mut Vec<XenoError<'src>>) {}
 
-    fn on_before_type(&mut self, exprs: &AnonymType<'src>, errors: &mut Vec<XenoError<'src>>) {}
-    fn on_after_type(&mut self, exprs: &AnonymType<'src>, errors: &mut Vec<XenoError<'src>>) {}
-
-    fn on_before_expr(&mut self, expr: &Expr<'src>, errors: &mut Vec<XenoError<'src>>) {}
-    fn on_after_expr(&mut self, expr: &Expr<'src>, errors: &mut Vec<XenoError<'src>>) {}
-
-    fn on_before_struct(&mut self, fields: &[KeyValExpr<'src>], errors: &mut Vec<XenoError<'src>>) {
+    fn on_before_type(&mut self, exprs: &AnonymType<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {
     }
-    fn on_after_struct(&mut self, fields: &[KeyValExpr<'src>], errors: &mut Vec<XenoError<'src>>) {}
+    fn on_after_type(&mut self, exprs: &AnonymType<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {}
+
+    fn on_before_expr(&mut self, expr: &Expr<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {}
+    fn on_after_expr(&mut self, expr: &Expr<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {}
+
+    fn on_before_struct(
+        &mut self,
+        fields: &[KeyValExpr<'src>],
+        errors: &mut Vec<XenoDiagnostic<'src>>,
+    ) {
+    }
+    fn on_after_struct(
+        &mut self,
+        fields: &[KeyValExpr<'src>],
+        errors: &mut Vec<XenoDiagnostic<'src>>,
+    ) {
+    }
 
     fn on_before_field(
         &mut self,
         key: &TokenData<'src>,
         value: &AnonymType<'src>,
-        errors: &mut Vec<XenoError<'src>>,
+        errors: &mut Vec<XenoDiagnostic<'src>>,
     ) {
     }
     fn on_after_field(
         &mut self,
         key: &TokenData<'src>,
         value: &AnonymType<'src>,
-        errors: &mut Vec<XenoError<'src>>,
+        errors: &mut Vec<XenoDiagnostic<'src>>,
     ) {
     }
 
-    fn on_before_enum(&mut self, variants: &[KeyValExpr<'src>], errors: &mut Vec<XenoError<'src>>) {
+    fn on_before_enum(
+        &mut self,
+        variants: &[KeyValExpr<'src>],
+        errors: &mut Vec<XenoDiagnostic<'src>>,
+    ) {
     }
-    fn on_after_enum(&mut self, variants: &[KeyValExpr<'src>], errors: &mut Vec<XenoError<'src>>) {}
+    fn on_after_enum(
+        &mut self,
+        variants: &[KeyValExpr<'src>],
+        errors: &mut Vec<XenoDiagnostic<'src>>,
+    ) {
+    }
 
-    fn on_array(&mut self, inner: &TokenData<'src>, errors: &mut Vec<XenoError<'src>>) {}
-    fn on_after_array(&mut self, inner: &TokenData<'src>, errors: &mut Vec<XenoError<'src>>) {}
+    fn on_array(&mut self, inner: &TokenData<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {}
+    fn on_after_array(&mut self, inner: &TokenData<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {}
 
-    fn on_before_list(&mut self, inner: &TypeList<'src>, errors: &mut Vec<XenoError<'src>>) {}
-    fn on_after_list(&mut self, inner: &TypeList<'src>, errors: &mut Vec<XenoError<'src>>) {}
+    fn on_before_list(&mut self, inner: &TypeList<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {}
+    fn on_after_list(&mut self, inner: &TypeList<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {}
 
-    fn on_before_set(&mut self, inner: &TypeList<'src>, errors: &mut Vec<XenoError<'src>>) {}
-    fn on_after_set(&mut self, inner: &TypeList<'src>, errors: &mut Vec<XenoError<'src>>) {}
+    fn on_before_set(&mut self, inner: &TypeList<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {}
+    fn on_after_set(&mut self, inner: &TypeList<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {}
 
     fn on_before_annotation(
         &mut self,
         name: &TokenData<'src>,
         args: &TypeList<'src>,
-        errors: &mut Vec<XenoError<'src>>,
+        errors: &mut Vec<XenoDiagnostic<'src>>,
     ) {
     }
     fn on_after_annotation(
         &mut self,
         name: &TokenData<'src>,
         args: &TypeList<'src>,
-        errors: &mut Vec<XenoError<'src>>,
+        errors: &mut Vec<XenoDiagnostic<'src>>,
     ) {
     }
 }
-
-/// A factory function that creates a fresh listener instance for each analysis run.
-pub type ListenerFactory = fn() -> Box<dyn for<'a> AnalyzerListener<'a>>;
 
 /// Stateless analyzer that holds registered listener factories.
 /// Created once during registry construction, reused for every module analysis.
@@ -189,7 +205,7 @@ impl Analyzer {
         cache: &HashMap<String, ModuleData>,
         plugins: &[&'static XenoPlugin<'static>],
         plugin_configs: &PluginConfigs,
-    ) -> Vec<XenoError<'src>> {
+    ) -> Vec<XenoDiagnostic<'src>> {
         // ── Build ScopeInfo ──
         let mut builtin_types: HashSet<String> = HashSet::new();
         let mut known_annotations: HashSet<String> = HashSet::new();
@@ -252,7 +268,7 @@ impl Analyzer {
         // ── Create listeners ──
         let mut listeners: Vec<Box<dyn AnalyzerListener<'src>>> = Vec::new();
         for f in &self.listener_factories {
-            let listener: Box<dyn AnalyzerListener<'src>> = f();
+            let listener: Box<dyn AnalyzerListener<'src>> = f(plugin_configs);
             listeners.push(listener);
         }
 
@@ -260,11 +276,6 @@ impl Analyzer {
         listeners.push(Box::new(NameValidator::new(&scope)));
         listeners.push(Box::new(AnnotationValidator::new(&scope)));
         listeners.push(Box::new(IfChainValidator::new()));
-
-        // Pass plugin configs to all listeners
-        for l in listeners.iter_mut() {
-            l.on_init(plugin_configs);
-        }
 
         // Notify listeners of module context + scope
         for l in listeners.iter_mut() {
@@ -279,7 +290,8 @@ impl Analyzer {
             if let Declaration::Import { path, location } = decl {
                 let import_path = path.join("/");
                 if import_path == scope.module_path {
-                    errors.push(XenoError {
+                    errors.push(XenoDiagnostic {
+                        severity: crate::XenoDiagSeverity::Err,
                         location: (*location).clone(),
                         message: format!("Module '{}' cannot import itself", import_path),
                     });
@@ -305,7 +317,7 @@ type Listeners<'src> = [Box<dyn AnalyzerListener<'src>>];
 fn walk_ast<'src>(
     ls: &mut Listeners<'src>,
     ast: &[Declaration<'src>],
-    errors: &mut Vec<XenoError<'src>>,
+    errors: &mut Vec<XenoDiagnostic<'src>>,
 ) {
     for l in ls.iter_mut() {
         l.on_before_ast(ast, errors);
@@ -321,7 +333,7 @@ fn walk_ast<'src>(
 fn walk_decl<'src>(
     ls: &mut Listeners<'src>,
     decl: &Declaration<'src>,
-    errors: &mut Vec<XenoError<'src>>,
+    errors: &mut Vec<XenoDiagnostic<'src>>,
 ) {
     for l in ls.iter_mut() {
         l.on_before_decl(decl, errors);
@@ -346,7 +358,7 @@ fn walk_decl<'src>(
 fn walk_type<'src>(
     ls: &mut Listeners<'src>,
     exprs: &AnonymType<'src>,
-    errors: &mut Vec<XenoError<'src>>,
+    errors: &mut Vec<XenoDiagnostic<'src>>,
 ) {
     for l in ls.iter_mut() {
         l.on_before_type(exprs, errors);
@@ -376,7 +388,11 @@ fn walk_type<'src>(
 //     }
 // }
 
-fn walk_expr<'src>(ls: &mut Listeners<'src>, expr: &Expr<'src>, errors: &mut Vec<XenoError<'src>>) {
+fn walk_expr<'src>(
+    ls: &mut Listeners<'src>,
+    expr: &Expr<'src>,
+    errors: &mut Vec<XenoDiagnostic<'src>>,
+) {
     for l in ls.iter_mut() {
         l.on_before_expr(expr, errors);
     }
@@ -474,6 +490,7 @@ pub struct XenoDefNode<'src> {
     pub name: &'src str,
     pub docs: Option<&'src str>,
     pub fields: Option<XenoDefTree<'src>>,
+    // TODO from-to
     /** Can contain any data, for plugin developers */
     pub meta: Option<Box<dyn std::any::Any>>,
 }
@@ -484,7 +501,7 @@ impl XenoDefNode<'_> {
 
         for declaration in ast {
             match declaration {
-                Declaration::TypeDecl { name, docs, t } => {
+                Declaration::TypeDecl { name, docs, t, .. } => {
                     let node = XenoDefNode {
                         name: name.v,
                         docs: *docs,

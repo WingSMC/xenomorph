@@ -39,10 +39,6 @@ fn provide_config_schema() -> &'static str {
     }"#
 }
 
-fn create_generator() -> Box<dyn for<'a> AnalyzerListener<'a>> {
-    Box::new(JsonSchemaGenerator::new())
-}
-
 #[no_mangle]
 fn load() -> &'static XenoPlugin<'static> {
     &PLUGIN
@@ -62,6 +58,18 @@ struct JsonSchemaGenerator {
     output_dir: Option<PathBuf>,
     /// Imported types keyed by module path, for resolving `$ref` targets.
     imported_types: HashMap<String, Vec<String>>,
+}
+
+fn create_generator(plugin_configs: &PluginConfigs) -> Box<dyn for<'a> AnalyzerListener<'a>> {
+    let mut generator = JsonSchemaGenerator::new();
+
+    if let Some(ConfigValue::Table(cfg)) = plugin_configs.get("json_schema") {
+        if let Some(ConfigValue::String(output)) = cfg.get("output") {
+            generator.output_dir = Some(PathBuf::from(output));
+        }
+    }
+
+    Box::new(generator)
 }
 
 impl JsonSchemaGenerator {
@@ -96,72 +104,7 @@ impl JsonSchemaGenerator {
             None => json!({ "$ref": format!("#/$defs/{name}") }),
         }
     }
-}
 
-impl<'src> AnalyzerListener<'src> for JsonSchemaGenerator {
-    fn on_init(&mut self, plugin_configs: &PluginConfigs) {
-        if let Some(ConfigValue::Table(cfg)) = plugin_configs.get("json_schema") {
-            if let Some(ConfigValue::String(output)) = cfg.get("output") {
-                self.output_dir = Some(PathBuf::from(output));
-            }
-        }
-    }
-
-    fn on_before_module(&mut self, scope: &ScopeInfo) {
-        self.abs_path = scope.abs_path.clone();
-        self.module_path = scope.module_path.clone();
-        self.imported_types = scope.imported_types.clone();
-        self.defs.clear();
-    }
-
-    fn on_before_ast(
-        &mut self,
-        ast: &[Declaration<'src>],
-        _errors: &mut Vec<xenomorph_common::XenoError<'src>>,
-    ) {
-        for decl in ast {
-            if let Declaration::TypeDecl { docs, name, t } = decl {
-                let schema = self.type_decl_to_schema(docs, name.v, t);
-                self.defs.insert(name.v.to_string(), schema);
-            }
-        }
-    }
-
-    fn on_after_module(&mut self, scope: &ScopeInfo) {
-        let document = json!({
-            "$schema": DRAFT,
-            "$id": format!("{}.schema.json", scope.module_path),
-            "$defs": Value::Object(self.defs.clone()),
-        });
-
-        let out_path = match &self.output_dir {
-            Some(dir) => {
-                let filename = format!(
-                    "{}.schema.json",
-                    scope
-                        .module_path
-                        .replace('/', std::path::MAIN_SEPARATOR_STR)
-                );
-                let path = dir.join(filename);
-                if let Some(parent) = path.parent() {
-                    let _ = fs::create_dir_all(parent);
-                }
-                path
-            }
-            None => with_schema_extension(&self.abs_path),
-        };
-
-        let contents = serde_json::to_string_pretty(&document).unwrap_or_else(|_| "{}".to_string());
-        match fs::write(&out_path, contents) {
-            Ok(_) => println!("✓ {} → {}", scope.module_path, out_path.display()),
-            Err(e) => eprintln!("✗ {} — failed to write: {}", scope.module_path, e),
-        }
-    }
-}
-
-// ── Type declaration → schema ───────────────────────────────────────
-
-impl JsonSchemaGenerator {
     fn type_decl_to_schema(&self, docs: &Option<&str>, name: &str, t: &[Expr]) -> Value {
         let mut schema = self.anonym_type_to_schema(t);
 
@@ -356,6 +299,59 @@ impl JsonSchemaGenerator {
                 })
                 .collect();
             json!({ "oneOf": members })
+        }
+    }
+}
+
+impl<'src> AnalyzerListener<'src> for JsonSchemaGenerator {
+    fn on_before_module(&mut self, scope: &ScopeInfo) {
+        self.abs_path = scope.abs_path.clone();
+        self.module_path = scope.module_path.clone();
+        self.imported_types = scope.imported_types.clone();
+        self.defs.clear();
+    }
+
+    fn on_before_ast(
+        &mut self,
+        ast: &[Declaration<'src>],
+        _errors: &mut Vec<xenomorph_common::XenoDiagnostic<'src>>,
+    ) {
+        for decl in ast {
+            if let Declaration::TypeDecl { docs, name, t, .. } = decl {
+                let schema = self.type_decl_to_schema(docs, name.v, t);
+                self.defs.insert(name.v.to_string(), schema);
+            }
+        }
+    }
+
+    fn on_after_module(&mut self, scope: &ScopeInfo) {
+        let document = json!({
+            "$schema": DRAFT,
+            "$id": format!("{}.schema.json", scope.module_path),
+            "$defs": Value::Object(self.defs.clone()),
+        });
+
+        let out_path = match &self.output_dir {
+            Some(dir) => {
+                let filename = format!(
+                    "{}.schema.json",
+                    scope
+                        .module_path
+                        .replace('/', std::path::MAIN_SEPARATOR_STR)
+                );
+                let path = dir.join(filename);
+                if let Some(parent) = path.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                path
+            }
+            None => with_schema_extension(&self.abs_path),
+        };
+
+        let contents = serde_json::to_string_pretty(&document).unwrap_or_else(|_| "{}".to_string());
+        match fs::write(&out_path, contents) {
+            Ok(_) => println!("✓ {} → {}", scope.module_path, out_path.display()),
+            Err(e) => eprintln!("✗ {} — failed to write: {}", scope.module_path, e),
         }
     }
 }

@@ -6,7 +6,7 @@ use crate::{
         is_type_compatible, AnalyzerListener, ScopeInfo, XenoAnnotation, XenoParameterType,
         XenoType, BUILTIN_ANNOTATIONS, BUILTIN_TYPES,
     },
-    TokenData, XenoError,
+    TokenData, XenoDiagnostic,
 };
 
 #[derive(Clone)]
@@ -181,7 +181,7 @@ impl AnnotationValidator {
         &self,
         annotation: &XenoAnnotation,
         name: &TokenData<'src>,
-        errors: &mut Vec<XenoError<'src>>,
+        errors: &mut Vec<XenoDiagnostic<'src>>,
     ) {
         if self.annotation_depth > 0 {
             return;
@@ -198,7 +198,7 @@ impl AnnotationValidator {
             });
 
             if !compatible {
-                errors.push(XenoError {
+                errors.push(XenoDiagnostic {
                     location: (*name).clone(),
                     message: format!(
                         "Annotation '@{}' is not applicable to type '{}'. Expected one of: {}.",
@@ -206,6 +206,7 @@ impl AnnotationValidator {
                         candidate.name,
                         Self::format_types(applicable_to)
                     ),
+                    severity: crate::XenoDiagSeverity::Err,
                 });
             }
         }
@@ -216,11 +217,12 @@ impl AnnotationValidator {
         annotation: &XenoAnnotation,
         name: &TokenData<'src>,
         args: &TypeList<'src>,
-        errors: &mut Vec<XenoError<'src>>,
+        errors: &mut Vec<XenoDiagnostic<'src>>,
     ) {
         let expected_params = annotation.params.unwrap_or(&[]);
         if args.len() != expected_params.len() {
-            errors.push(XenoError {
+            errors.push(XenoDiagnostic {
+                severity: crate::XenoDiagSeverity::Err,
                 location: (*name).clone(),
                 message: format!(
                     "Annotation '@{}' expects {} argument(s), got {}.",
@@ -234,7 +236,8 @@ impl AnnotationValidator {
 
         for (arg, param) in args.iter().zip(expected_params.iter()) {
             if !self.arg_matches(arg, param.param_type) {
-                errors.push(XenoError {
+                errors.push(XenoDiagnostic {
+                    severity: crate::XenoDiagSeverity::Err,
                     location: Self::arg_location(arg).unwrap_or_else(|| (*name).clone()),
                     message: format!(
                         "Annotation '@{}' argument '{}' expects {}, got {}.",
@@ -377,7 +380,11 @@ impl AnnotationValidator {
 }
 
 impl<'src> AnalyzerListener<'src> for AnnotationValidator {
-    fn on_before_ast(&mut self, ast: &[Declaration<'src>], _errors: &mut Vec<XenoError<'src>>) {
+    fn on_before_ast(
+        &mut self,
+        ast: &[Declaration<'src>],
+        _errors: &mut Vec<XenoDiagnostic<'src>>,
+    ) {
         self.type_aliases.clear();
 
         for declaration in ast {
@@ -388,11 +395,19 @@ impl<'src> AnalyzerListener<'src> for AnnotationValidator {
         }
     }
 
-    fn on_before_type(&mut self, exprs: &AnonymType<'src>, _errors: &mut Vec<XenoError<'src>>) {
+    fn on_before_type(
+        &mut self,
+        exprs: &AnonymType<'src>,
+        _errors: &mut Vec<XenoDiagnostic<'src>>,
+    ) {
         self.type_stack.push(self.resolve_types(exprs));
     }
 
-    fn on_after_type(&mut self, _exprs: &AnonymType<'src>, _errors: &mut Vec<XenoError<'src>>) {
+    fn on_after_type(
+        &mut self,
+        _exprs: &AnonymType<'src>,
+        _errors: &mut Vec<XenoDiagnostic<'src>>,
+    ) {
         self.type_stack.pop();
     }
 
@@ -400,7 +415,7 @@ impl<'src> AnalyzerListener<'src> for AnnotationValidator {
         &mut self,
         name: &TokenData<'src>,
         args: &TypeList<'src>,
-        errors: &mut Vec<XenoError<'src>>,
+        errors: &mut Vec<XenoDiagnostic<'src>>,
     ) {
         if let Some(annotation) = self.find_annotation(name.v) {
             self.validate_applicability(annotation, name, errors);
@@ -413,7 +428,7 @@ impl<'src> AnalyzerListener<'src> for AnnotationValidator {
         &mut self,
         _name: &TokenData<'src>,
         _args: &TypeList<'src>,
-        _errors: &mut Vec<XenoError<'src>>,
+        _errors: &mut Vec<XenoDiagnostic<'src>>,
     ) {
         self.annotation_depth = self.annotation_depth.saturating_sub(1);
     }
@@ -470,10 +485,12 @@ mod tests {
             Expr::Identifier(&a_reference),
             Expr::Annotation(&max, max_args.clone()),
         ];
+        let from = TokenData::default();
         let ast = vec![
             Declaration::TypeDecl {
                 docs: None,
                 name: &a_name,
+                from: &from,
                 t: vec![Expr::Literal(Literal::String(
                     "literal".to_string(),
                     &string_literal,
@@ -482,6 +499,7 @@ mod tests {
             Declaration::TypeDecl {
                 docs: None,
                 name: &b_name,
+                from: &from,
                 t: b_type.clone(),
             },
         ];
@@ -525,15 +543,18 @@ mod tests {
             Expr::Identifier(&a_reference),
             Expr::Annotation(&max, max_args.clone()),
         ];
+        let from = TokenData::default();
         let ast = vec![
             Declaration::TypeDecl {
                 docs: None,
                 name: &a_name,
+                from: &from,
                 t: vec![Expr::Identifier(&u8_type)],
             },
             Declaration::TypeDecl {
                 docs: None,
                 name: &b_name,
+                from: &from,
                 t: b_type.clone(),
             },
         ];

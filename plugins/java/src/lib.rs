@@ -68,10 +68,6 @@ fn provide_config_schema() -> &'static str {
     }"#
 }
 
-fn create_generator() -> Box<dyn for<'a> AnalyzerListener<'a>> {
-    Box::new(JavaGenerator::new())
-}
-
 #[no_mangle]
 fn load() -> &'static XenoPlugin<'static> {
     &PLUGIN
@@ -112,27 +108,31 @@ impl JavaGenerator {
     }
 }
 
-impl<'src> AnalyzerListener<'src> for JavaGenerator {
-    fn on_init(&mut self, plugin_configs: &PluginConfigs) {
-        if let Some(ConfigValue::Table(cfg)) = plugin_configs.get("java") {
-            if let Some(ConfigValue::String(output)) = cfg.get("output") {
-                self.output_dir = Some(PathBuf::from(output));
-            }
-            if let Some(ConfigValue::String(package)) = cfg.get("package") {
-                self.package = package.clone();
-            }
-            if let Some(ConfigValue::Boolean(value)) = cfg.get("value") {
-                self.blanket_value = *value;
-            }
-            if let Some(ConfigValue::Boolean(builder)) = cfg.get("builder") {
-                self.blanket_builder = *builder;
-            }
-            if let Some(ConfigValue::Boolean(data)) = cfg.get("data") {
-                self.blanket_data = *data;
-            }
+fn create_generator(plugin_configs: &PluginConfigs) -> Box<dyn for<'a> AnalyzerListener<'a>> {
+    let mut generator = JavaGenerator::new();
+
+    if let Some(ConfigValue::Table(cfg)) = plugin_configs.get("java") {
+        if let Some(ConfigValue::String(output)) = cfg.get("output") {
+            generator.output_dir = Some(PathBuf::from(output));
+        }
+        if let Some(ConfigValue::String(package)) = cfg.get("package") {
+            generator.package = package.clone();
+        }
+        if let Some(ConfigValue::Boolean(value)) = cfg.get("value") {
+            generator.blanket_value = *value;
+        }
+        if let Some(ConfigValue::Boolean(builder)) = cfg.get("builder") {
+            generator.blanket_builder = *builder;
+        }
+        if let Some(ConfigValue::Boolean(data)) = cfg.get("data") {
+            generator.blanket_data = *data;
         }
     }
 
+    Box::new(generator)
+}
+
+impl<'src> AnalyzerListener<'src> for JavaGenerator {
     fn on_before_module(&mut self, scope: &ScopeInfo) {
         self.abs_path = scope.abs_path.clone();
         self.module_path = scope.module_path.clone();
@@ -142,10 +142,10 @@ impl<'src> AnalyzerListener<'src> for JavaGenerator {
     fn on_before_ast(
         &mut self,
         ast: &[Declaration<'src>],
-        _errors: &mut Vec<xenomorph_common::XenoError<'src>>,
+        _errors: &mut Vec<xenomorph_common::XenoDiagnostic<'src>>,
     ) {
         for decl in ast {
-            if let Declaration::TypeDecl { docs, name, t } = decl {
+            if let Declaration::TypeDecl { docs, name, t, .. } = decl {
                 if let Some(content) = self.generate_type_decl(docs, name.v, t) {
                     self.files.push((name.v.to_string(), content));
                 }
@@ -164,7 +164,10 @@ impl<'src> AnalyzerListener<'src> for JavaGenerator {
         };
         let package_dir = base.join(package_to_path(&self.package));
         if let Err(e) = fs::create_dir_all(&package_dir) {
-            eprintln!("✗ {} — failed to create output dir: {}", scope.module_path, e);
+            eprintln!(
+                "✗ {} — failed to create output dir: {}",
+                scope.module_path, e
+            );
             return;
         }
 
@@ -181,6 +184,7 @@ impl<'src> AnalyzerListener<'src> for JavaGenerator {
 // ── Type declaration generation ─────────────────────────────────────
 
 impl JavaGenerator {
+    // TODO include from-to locations
     fn generate_type_decl(&self, docs: &Option<&str>, name: &str, t: &[Expr]) -> Option<String> {
         let lombok_decorators = collect_lombok_decorators(t);
 
@@ -529,10 +533,7 @@ fn push_unique(list: &mut Vec<String>, value: &str) {
 }
 
 fn package_to_path(package: &str) -> PathBuf {
-    package
-        .split('.')
-        .filter(|part| !part.is_empty())
-        .collect()
+    package.split('.').filter(|part| !part.is_empty()).collect()
 }
 
 #[cfg(test)]

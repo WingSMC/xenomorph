@@ -37,7 +37,7 @@ fn run_parser() {
         }
     };
 
-    let cache = reg.module_cache.blocking_read();
+    let cache = reg.module_cache.read().unwrap();
     let module_count = cache.len();
     let total_errors: usize = cache
         .values()

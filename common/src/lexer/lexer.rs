@@ -1,7 +1,7 @@
 use std::{fmt, iter::Peekable, str::Chars};
 
 use crate::lexer::{Token, TokenVariant, XenoTokens};
-use crate::{TokenData, XenoError};
+use crate::{TokenData, XenoDiagnostic};
 
 static NOT_RECOGNIZED: &str = "Token not recognized";
 static MALFORMED_REGEX: &str = "Malformed regex";
@@ -96,10 +96,10 @@ impl<'src> Lexer<'src> {
         }
     }
 
-    pub fn tokenize(src: &'src str) -> Result<XenoTokens<'src>, XenoError<'src>> {
+    pub fn tokenize(src: &'src str) -> Result<XenoTokens<'src>, XenoDiagnostic<'src>> {
         Self::new(src)._tokenize()
     }
-    fn _tokenize(mut self) -> Result<XenoTokens<'src>, XenoError<'src>> {
+    fn _tokenize(mut self) -> Result<XenoTokens<'src>, XenoDiagnostic<'src>> {
         let mut tokens: XenoTokens<'src> = vec![];
         while let Some(c) = self.peek() {
             let token = match c {
@@ -107,6 +107,32 @@ impl<'src> Lexer<'src> {
                     self.next();
                     continue;
                 }
+                'a'..='z' | 'A'..='Z' | '_' => self.consume_word(),
+                '0'..='9' => self.consume_number(),
+                '"' => self.consume_string()?,
+                '!' => self.consume_not_or_neq(),
+                '@' => (TokenVariant::At, self.single_char_token_next()),
+                ':' => (TokenVariant::Colon, self.single_char_token_next()),
+                '$' => (TokenVariant::Dollar, self.single_char_token_next()),
+                '|' => (TokenVariant::Or, self.single_char_token_next()),
+                '&' => (TokenVariant::And, self.single_char_token_next()),
+                '(' => (TokenVariant::LParen, self.single_char_token_next()),
+                ')' => (TokenVariant::RParen, self.single_char_token_next()),
+                ',' => (TokenVariant::Comma, self.single_char_token_next()),
+                '{' => (TokenVariant::LCurly, self.single_char_token_next()),
+                '}' => (TokenVariant::RCurly, self.single_char_token_next()),
+                '[' => (TokenVariant::LBracket, self.single_char_token_next()),
+                ']' => (TokenVariant::RBracket, self.single_char_token_next()),
+                '>' => (TokenVariant::Gt, self.single_char_token_next()),
+                '<' => (TokenVariant::Lt, self.single_char_token_next()),
+                '.' => (TokenVariant::Dot, self.single_char_token_next()),
+                ';' => (TokenVariant::Semicolon, self.single_char_token_next()),
+                '+' => (TokenVariant::Plus, self.single_char_token_next()),
+                '-' => (TokenVariant::Minus, self.single_char_token_next()),
+                '*' => (TokenVariant::Asterix, self.single_char_token_next()),
+                '^' => (TokenVariant::Caret, self.single_char_token_next()),
+                '=' => (TokenVariant::Eq, self.single_char_token_next()),
+                '\\' => (TokenVariant::Backslash, self.single_char_token_next()),
                 '/' => {
                     // '/' is a Slash (path separator) only inside import paths.
                     // An import path looks like: Import Identifier Slash Identifier ...
@@ -129,35 +155,11 @@ impl<'src> Lexer<'src> {
                         Some(t) => t,
                     }
                 }
-                'a'..='z' | 'A'..='Z' | '_' => self.consume_word(),
-                '@' => (TokenVariant::At, self.single_char_token_next()),
-                ':' => (TokenVariant::Colon, self.single_char_token_next()),
-                '$' => (TokenVariant::Dollar, self.single_char_token_next()),
-                '|' => (TokenVariant::Or, self.single_char_token_next()),
-                '&' => (TokenVariant::And, self.single_char_token_next()),
-                '(' => (TokenVariant::LParen, self.single_char_token_next()),
-                ')' => (TokenVariant::RParen, self.single_char_token_next()),
-                ',' => (TokenVariant::Comma, self.single_char_token_next()),
-                '{' => (TokenVariant::LCurly, self.single_char_token_next()),
-                '}' => (TokenVariant::RCurly, self.single_char_token_next()),
-                '[' => (TokenVariant::LBracket, self.single_char_token_next()),
-                ']' => (TokenVariant::RBracket, self.single_char_token_next()),
-                '>' => (TokenVariant::Gt, self.single_char_token_next()),
-                ';' => (TokenVariant::Semicolon, self.single_char_token_next()),
-                '+' => (TokenVariant::Plus, self.single_char_token_next()),
-                '-' => (TokenVariant::Minus, self.single_char_token_next()),
-                '*' => (TokenVariant::Asterix, self.single_char_token_next()),
-                '^' => (TokenVariant::Caret, self.single_char_token_next()),
-                '=' => (TokenVariant::Eq, self.single_char_token_next()),
-                '0'..='9' => self.consume_number(),
-                '"' => self.consume_string()?,
-                '.' | '<' => self.consume_range_lt_dot_symmdiff(),
-                '!' => self.consume_not_or_neq(),
-                '\\' => (TokenVariant::Backslash, self.single_char_token_next()),
                 _ => {
-                    return Err(XenoError {
+                    return Err(XenoDiagnostic {
                         message: NOT_RECOGNIZED.to_string(),
                         location: self.token_single_at_lexer(),
+                        severity: crate::XenoDiagSeverity::Err,
                     });
                 }
             };
@@ -200,7 +202,7 @@ impl<'src> Lexer<'src> {
         }
     }
 
-    fn consume_string(&mut self) -> Result<Token<'src>, XenoError<'src>> {
+    fn consume_string(&mut self) -> Result<Token<'src>, XenoDiagnostic<'src>> {
         let initial_loc = self.location_snapshot();
         self.next();
 
@@ -216,9 +218,10 @@ impl<'src> Lexer<'src> {
             }
         }
 
-        Err(XenoError {
+        Err(XenoDiagnostic {
             message: STRING_TERMINATION_ERROR.to_string(),
             location: self.token_from_but_not_including_lexer(&initial_loc),
+            severity: crate::XenoDiagSeverity::Err,
         })
     }
 
@@ -268,47 +271,47 @@ impl<'src> Lexer<'src> {
             self.token_from_but_not_including_lexer(&initial_loc),
         )
     }
-    fn consume_range_lt_dot_symmdiff(&mut self) -> Token<'src> {
-        let initial_loc = self.location_snapshot();
-        let c = self.next().unwrap();
-        let variant = match c {
-            '.' => match self.peek() {
-                Some('.' | '<') => {
-                    self.next();
-                    TokenVariant::Range
-                }
-                _ => TokenVariant::Dot,
-            },
-            '<' => match self.peek() {
-                Some('.') => {
-                    self.next();
-                    match self.peek() {
-                        Some('<') => {
-                            self.next();
-                            TokenVariant::Range
-                        }
-                        _ => TokenVariant::Range,
-                    }
-                }
-                Some('>') => {
-                    self.next();
-                    TokenVariant::SymmDiff
-                }
-                _ => TokenVariant::Lt,
-            },
-            _ => unreachable!(),
-        };
+    // fn consume_range_lt_dot_symmdiff(&mut self) -> Token<'src> {
+    //     let initial_loc = self.location_snapshot();
+    //     let c = self.next().unwrap();
+    //     let variant = match c {
+    //         '.' => match self.peek() {
+    //             Some('.' | '<') => {
+    //                 self.next();
+    //                 TokenVariant::Range
+    //             }
+    //             _ => TokenVariant::Dot,
+    //         },
+    //         '<' => match self.peek() {
+    //             Some('.') => {
+    //                 self.next();
+    //                 match self.peek() {
+    //                     Some('<') => {
+    //                         self.next();
+    //                         TokenVariant::Range
+    //                     }
+    //                     _ => TokenVariant::Range,
+    //                 }
+    //             }
+    //             Some('>') => {
+    //                 self.next();
+    //                 TokenVariant::SymmDiff
+    //             }
+    //             _ => TokenVariant::Lt,
+    //         },
+    //         _ => unreachable!(),
+    //     };
 
-        (
-            variant,
-            self.token_from_but_not_including_lexer(&initial_loc),
-        )
-    }
+    //     (
+    //         variant,
+    //         self.token_from_but_not_including_lexer(&initial_loc),
+    //     )
+    // }
 
     fn consume_comment_slash_or_regex(
         &mut self,
         slash_context: bool,
-    ) -> Result<Option<Token<'src>>, XenoError<'src>> {
+    ) -> Result<Option<Token<'src>>, XenoDiagnostic<'src>> {
         let initial_loc = self.location_snapshot();
         self.next(); // skip first '/'
 
@@ -323,7 +326,7 @@ impl<'src> Lexer<'src> {
         }
     }
 
-    fn skip_line_comment(&mut self) -> Result<Option<Token<'src>>, XenoError<'src>> {
+    fn skip_line_comment(&mut self) -> Result<Option<Token<'src>>, XenoDiagnostic<'src>> {
         self.next(); // skip second '/'
         while let Some(&c) = self.peek() {
             self.next(); // skip til after comment
@@ -338,7 +341,7 @@ impl<'src> Lexer<'src> {
     fn consume_doc_comment(
         &mut self,
         start: LexerLocation,
-    ) -> Result<Option<Token<'src>>, XenoError<'src>> {
+    ) -> Result<Option<Token<'src>>, XenoDiagnostic<'src>> {
         self.next(); // skip '*'
 
         if let Some('*') = self.next() {
@@ -373,16 +376,17 @@ impl<'src> Lexer<'src> {
             }
         }
 
-        return Err(XenoError {
+        return Err(XenoDiagnostic {
             message: COMMENT_NOT_TERMINATED.to_string(),
             location: self.token_from_but_not_including_lexer(&start),
+            severity: crate::XenoDiagSeverity::Err,
         });
     }
 
     fn consume_regex(
         &mut self,
         start: LexerLocation,
-    ) -> Result<Option<Token<'src>>, XenoError<'src>> {
+    ) -> Result<Option<Token<'src>>, XenoDiagnostic<'src>> {
         let mut has_escape = false;
         while let Some(c) = self.next() {
             match c {
@@ -398,9 +402,10 @@ impl<'src> Lexer<'src> {
             }
         }
 
-        return Err(XenoError {
+        return Err(XenoDiagnostic {
             message: MALFORMED_REGEX.to_string(),
             location: self.token_from_but_not_including_lexer(&start),
+            severity: crate::XenoDiagSeverity::Err,
         });
     }
 }

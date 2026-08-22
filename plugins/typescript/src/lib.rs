@@ -38,8 +38,14 @@ fn provide_config_schema() -> &'static str {
     }"#
 }
 
-fn create_generator() -> Box<dyn for<'a> AnalyzerListener<'a>> {
-    Box::new(TsGenerator::new())
+fn create_generator(plugin_configs: &PluginConfigs) -> Box<dyn for<'a> AnalyzerListener<'a>> {
+    let mut generator = TsGenerator::new();
+    if let Some(ConfigValue::Table(ts_config)) = plugin_configs.get("typescript") {
+        if let Some(ConfigValue::String(output)) = ts_config.get("output") {
+            generator.output_dir = Some(PathBuf::from(output));
+        }
+    }
+    Box::new(generator)
 }
 
 #[no_mangle]
@@ -73,14 +79,6 @@ impl TsGenerator {
 }
 
 impl<'src> AnalyzerListener<'src> for TsGenerator {
-    fn on_init(&mut self, plugin_configs: &PluginConfigs) {
-        if let Some(ConfigValue::Table(ts_config)) = plugin_configs.get("typescript") {
-            if let Some(ConfigValue::String(output)) = ts_config.get("output") {
-                self.output_dir = Some(PathBuf::from(output));
-            }
-        }
-    }
-
     fn on_before_module(&mut self, scope: &ScopeInfo) {
         self.abs_path = scope.abs_path.clone();
         self.module_path = scope.module_path.clone();
@@ -106,12 +104,12 @@ impl<'src> AnalyzerListener<'src> for TsGenerator {
     fn on_before_ast(
         &mut self,
         ast: &[Declaration<'src>],
-        _errors: &mut Vec<xenomorph_common::XenoError<'src>>,
+        _errors: &mut Vec<xenomorph_common::XenoDiagnostic<'src>>,
     ) {
         // Generate type declarations
         for decl in ast {
             match decl {
-                Declaration::TypeDecl { docs, name, t } => {
+                Declaration::TypeDecl { docs, name, t, .. } => {
                     generate_type_decl(&mut self.out, docs, name.v, t);
                 }
                 _ => {}

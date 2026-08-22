@@ -11,14 +11,15 @@ pub enum ErrorPhase {
 
 /// Errors that can occur during module loading.
 #[derive(Debug, Clone)]
-pub struct ModuleError {
+pub struct ModuleDiagnostic {
     pub module_path: ModulePath,
     pub message: String,
     pub location: Option<(u32, u32, u32)>, // line, column, length
     pub phase: ErrorPhase,
+    pub severity: crate::XenoDiagSeverity,
 }
 
-impl fmt::Display for ModuleError {
+impl fmt::Display for ModuleDiagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "[{}] {}", self.module_path, self.message)
     }

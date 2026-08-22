@@ -570,12 +570,11 @@ impl LanguageServer for Backend {
         let position = params.text_document_position.position;
         let module_path = self.uri_to_module_path(&uri);
 
-        let completions = self.registry.with_module(
-            module_path.as_deref().unwrap_or(""),
-            |tokens, ast, _| {
-                self.get_context_completions(tokens, ast, position, module_path.as_deref())
-            },
-        );
+        let completions =
+            self.registry
+                .with_module(module_path.as_deref().unwrap_or(""), |tokens, ast, _| {
+                    self.get_context_completions(tokens, ast, position, module_path.as_deref())
+                });
 
         Ok(Some(CompletionResponse::Array(
             completions.unwrap_or_default(),
@@ -727,7 +726,8 @@ impl LanguageServer for Backend {
         let module_paths: Vec<String> = self
             .registry
             .module_cache
-            .blocking_read()
+            .read()
+            .unwrap()
             .keys()
             .cloned()
             .collect();
