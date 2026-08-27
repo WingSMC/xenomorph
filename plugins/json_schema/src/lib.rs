@@ -5,10 +5,11 @@ use std::path::PathBuf;
 use serde_json::{json, Map, Value};
 use xenomorph_common::config::{ConfigValue, PluginConfigs};
 use xenomorph_common::parser::{
-    BinaryExprType, Declaration, Expr, KeyValExpr, Literal, NumberType, XenoType,
+    Annotation, Declaration, Expr, KeyValExpr, Literal, SimpleType, Type, XenoType,
 };
 use xenomorph_common::plugins::XenoPlugin;
 use xenomorph_common::semantic::{AnalyzerListener, ScopeInfo};
+use xenomorph_common::utils::extract_documentation;
 
 // ── Plugin registration ─────────────────────────────────────────────
 
@@ -105,7 +106,7 @@ impl JsonSchemaGenerator {
         }
     }
 
-    fn type_decl_to_schema(&self, docs: &Option<&str>, name: &str, t: &[Expr]) -> Value {
+    fn type_decl_to_schema(&self, docs: &Option<&str>, name: &str, t: &XenoType) -> Value {
         let mut schema = self.anonym_type_to_schema(t);
 
         if let Value::Object(map) = &mut schema {
@@ -117,48 +118,65 @@ impl JsonSchemaGenerator {
         schema
     }
 
-    /// Converts a list of type expressions (one "side" of a declaration or
-    /// field) into a single schema, applying annotation-derived constraints.
-    fn anonym_type_to_schema(&self, exprs: &[Expr]) -> Value {
-        let type_schemas: Vec<Value> = exprs
-            .iter()
-            .filter(|e| !matches!(e, Expr::Annotation(..)))
-            .filter_map(|e| self.expr_to_schema(e))
-            .collect();
-
-        let annotations: Vec<(&str, &[XenoType])> = exprs
-            .iter()
-            .filter_map(|e| match e {
-                Expr::Annotation(n, args) => Some((n.v, args.as_slice())),
-                _ => None,
-            })
-            .collect();
-
-        let mut base = combine_type_schemas(type_schemas);
-        apply_annotations(&mut base, &annotations);
+    fn anonym_type_to_schema(&self, ty: &XenoType) -> Value {
+        let mut base = self.type_to_schema(&ty.0);
+        apply_annotations(&mut base, &ty.1);
         base
     }
 
-    /// Converts a single expression into a schema, or `None` if it has no
-    /// meaningful JSON Schema representation (e.g. field references).
-    fn expr_to_schema(&self, expr: &Expr) -> Option<Value> {
-        Some(match expr {
-            Expr::Identifier(id) => self.identifier_to_schema(id.v),
-            Expr::Literal(lit) => json!({ "const": literal_to_json(lit) }),
-            Expr::Regex(token) => json!({ "type": "string", "pattern": regex_source(token.v) }),
-            Expr::FieldAccess(_) => return None,
-            Expr::Not(inner) => json!({ "not": self.expr_to_schema(inner)? }),
-            Expr::BinaryExpr(op, pair) => self.binary_to_schema(*op, &pair.0, &pair.1)?,
-            Expr::Array(type_ident) => json!({
-                "type": "array",
-                "items": self.identifier_to_schema(type_ident.v),
+    fn type_to_schema(&self, ty: &Type) -> Value {
+        match ty {
+            Type::Simple(simple) => self.simple_type_to_schema(simple),
+            Type::Tuple(items) => self.list_to_schema(items),
+            Type::Set(items) => self.set_to_schema(items),
+            Type::Struct(fields) => self.struct_to_schema(fields),
+            Type::Enum(variants) => self.enum_to_schema(variants),
+            Type::Sum(items) => json!({
+                "anyOf": items
+                    .iter()
+                    .map(|item| self.simple_type_to_schema(item))
+                    .collect::<Vec<_>>()
             }),
-            Expr::List(inner) => self.list_to_schema(inner),
-            Expr::Set(inner) => self.set_to_schema(inner),
-            Expr::Struct(fields) => self.struct_to_schema(fields),
-            Expr::Enum(variants) => self.enum_to_schema(variants),
-            Expr::Annotation(_, _) => return None,
-        })
+            Type::Intersection(items) => json!({
+                "allOf": items
+                    .iter()
+                    .map(|item| self.simple_type_to_schema(item))
+                    .collect::<Vec<_>>()
+            }),
+        }
+    }
+
+    fn simple_type_to_schema(&self, ty: &SimpleType) -> Value {
+        let (base, optional) = match ty {
+            SimpleType::Literal(literal) => (json!({ "const": literal_to_json(literal) }), false),
+            SimpleType::OptionalLiteral(literal) => {
+                (json!({ "const": literal_to_json(literal) }), true)
+            }
+            SimpleType::Identifier(identifier) => (self.identifier_to_schema(identifier.v), false),
+            SimpleType::OptionalIdentifier(identifier) => {
+                (self.identifier_to_schema(identifier.v), true)
+            }
+            SimpleType::Array(identifier) => (
+                json!({
+                    "type": "array",
+                    "items": self.identifier_to_schema(identifier.v),
+                }),
+                false,
+            ),
+            SimpleType::OptionalArray(identifier) => (
+                json!({
+                    "type": "array",
+                    "items": self.identifier_to_schema(identifier.v),
+                }),
+                true,
+            ),
+        };
+
+        if optional {
+            json!({ "anyOf": [base, { "type": "null" }] })
+        } else {
+            base
+        }
     }
 
     fn identifier_to_schema(&self, name: &str) -> Value {
@@ -168,65 +186,26 @@ impl JsonSchemaGenerator {
         }
     }
 
-    fn binary_to_schema(&self, op: BinaryExprType, left: &Expr, right: &Expr) -> Option<Value> {
-        let left_schema = self.expr_to_schema(left);
-        let right_schema = self.expr_to_schema(right);
-
-        let (left_schema, right_schema) = match (left_schema, right_schema) {
-            (Some(l), Some(r)) => (l, r),
-            (Some(l), None) => return Some(l),
-            (None, Some(r)) => return Some(r),
-            (None, None) => return None,
-        };
-
-        Some(match op {
-            BinaryExprType::Or => json!({ "anyOf": [left_schema, right_schema] }),
-            BinaryExprType::Union => json!({ "allOf": [left_schema, right_schema] }),
-            BinaryExprType::Intersection => json!({ "allOf": [left_schema, right_schema] }),
-            BinaryExprType::Difference => {
-                json!({ "allOf": [left_schema, { "not": right_schema }] })
-            }
-            BinaryExprType::Range
-            | BinaryExprType::Add
-            | BinaryExprType::Remove
-            | BinaryExprType::Xor
-            | BinaryExprType::SymmetricDifference => return None,
+    fn list_to_schema(&self, inner: &[SimpleType]) -> Value {
+        let items: Vec<Value> = inner
+            .iter()
+            .map(|item| self.simple_type_to_schema(item))
+            .collect();
+        let count = items.len();
+        json!({
+            "type": "array",
+            "prefixItems": items,
+            "minItems": count,
+            "maxItems": count,
         })
     }
 
-    fn list_to_schema(&self, inner: &[XenoType]) -> Value {
-        if inner.len() == 1 {
-            json!({
-                "type": "array",
-                "items": self.anonym_type_to_schema(&inner[0]),
-                "minItems": 1,
-                "maxItems": 1,
-            })
-        } else {
-            let items: Vec<Value> = inner
-                .iter()
-                .map(|a| self.anonym_type_to_schema(a))
-                .collect();
-            let count = items.len();
-            json!({
-                "type": "array",
-                "prefixItems": items,
-                "minItems": count,
-                "maxItems": count,
-            })
-        }
-    }
-
-    fn set_to_schema(&self, inner: &[XenoType]) -> Value {
-        let items = if inner.len() == 1 {
-            self.anonym_type_to_schema(&inner[0])
-        } else {
-            let schemas: Vec<Value> = inner
-                .iter()
-                .map(|a| self.anonym_type_to_schema(a))
-                .collect();
-            json!({ "anyOf": schemas })
-        };
+    fn set_to_schema(&self, inner: &[SimpleType]) -> Value {
+        let schemas: Vec<Value> = inner
+            .iter()
+            .map(|item| self.simple_type_to_schema(item))
+            .collect();
+        let items = combine_type_schemas(schemas);
         json!({
             "type": "array",
             "uniqueItems": true,
@@ -238,9 +217,10 @@ impl JsonSchemaGenerator {
         let mut properties = Map::new();
         let mut required: Vec<Value> = Vec::new();
 
-        for (key, value) in fields {
-            properties.insert(key.v.to_string(), self.anonym_type_to_schema(value));
-            if !is_nullable(value) {
+        for (key, value, docs) in fields {
+            let schema = with_description(self.simple_type_to_schema(value), *docs);
+            properties.insert(key.v.to_string(), schema);
+            if !is_optional(value) {
                 required.push(json!(key.v));
             }
         }
@@ -256,46 +236,53 @@ impl JsonSchemaGenerator {
     }
 
     fn enum_to_schema(&self, variants: &[KeyValExpr]) -> Value {
-        let all_simple = variants.iter().all(|(_, v)| v.is_empty());
-        let all_numeric = variants.iter().all(|(_, v)| {
-            v.len() == 1 && matches!(v.first(), Some(Expr::Literal(Literal::Number(_))))
+        let all_numeric = variants.iter().all(|(_, value, _)| {
+            matches!(
+                value,
+                SimpleType::Literal(Literal::Int(_, _) | Literal::Float(_, _))
+            )
         });
 
-        if all_simple {
-            let members: Vec<Value> = variants.iter().map(|(k, _)| json!(k.v)).collect();
-            json!({ "enum": members })
-        } else if all_numeric {
+        let has_docs = variants.iter().any(|(_, _, docs)| docs.is_some());
+
+        if all_numeric && !has_docs {
             let members: Vec<Value> = variants
                 .iter()
-                .filter_map(|(_, v)| match v.first() {
-                    Some(Expr::Literal(lit)) => Some(literal_to_json(lit)),
+                .filter_map(|(_, value, _)| match value {
+                    SimpleType::Literal(literal) => Some(literal_to_json(literal)),
                     _ => None,
                 })
                 .collect();
             json!({ "enum": members })
+        } else if all_numeric {
+            let members: Vec<Value> = variants
+                .iter()
+                .filter_map(|(_, value, docs)| match value {
+                    SimpleType::Literal(literal) => Some(with_description(
+                        json!({ "const": literal_to_json(literal) }),
+                        *docs,
+                    )),
+                    _ => None,
+                })
+                .collect();
+            json!({ "oneOf": members })
         } else {
             // Discriminated union keyed by "kind".
             let members: Vec<Value> = variants
                 .iter()
-                .map(|(key, value)| {
-                    if value.is_empty() {
-                        json!({
-                            "type": "object",
-                            "properties": { "kind": { "const": key.v } },
-                            "required": ["kind"],
-                            "additionalProperties": false,
-                        })
-                    } else {
+                .map(|(key, value, docs)| {
+                    with_description(
                         json!({
                             "type": "object",
                             "properties": {
                                 "kind": { "const": key.v },
-                                "value": self.anonym_type_to_schema(value),
+                                "value": self.simple_type_to_schema(value),
                             },
                             "required": ["kind", "value"],
                             "additionalProperties": false,
-                        })
-                    }
+                        }),
+                        *docs,
+                    )
                 })
                 .collect();
             json!({ "oneOf": members })
@@ -317,7 +304,10 @@ impl<'src> AnalyzerListener<'src> for JsonSchemaGenerator {
         _errors: &mut Vec<xenomorph_common::XenoDiagnostic<'src>>,
     ) {
         for decl in ast {
-            if let Declaration::Type { docs, name, ty: t, .. } = decl {
+            if let Declaration::Type {
+                docs, name, ty: t, ..
+            } = decl
+            {
                 let schema = self.type_decl_to_schema(docs, name.v, t);
                 self.defs.insert(name.v.to_string(), schema);
             }
@@ -371,16 +361,16 @@ fn combine_type_schemas(mut schemas: Vec<Value>) -> Value {
 /// Applies xenomorph validation annotations as JSON Schema keywords. The
 /// keyword used for length depends on whether the base schema is a string or
 /// an array.
-fn apply_annotations(schema: &mut Value, annotations: &[(&str, &[XenoType])]) {
+fn apply_annotations(schema: &mut Value, annotations: &[Annotation]) {
     let is_array = schema_type_is(schema, "array");
     let map = match schema {
         Value::Object(map) => map,
         _ => return,
     };
 
-    for (name, args) in annotations {
-        let number = first_number_arg(args);
-        match *name {
+    for annotation in annotations {
+        let number = first_number_arg(&annotation.params);
+        match annotation.ident.v {
             "min" => insert_number(map, "minimum", number),
             "max" => insert_number(map, "maximum", number),
             "gt" => insert_number(map, "exclusiveMinimum", number),
@@ -409,12 +399,13 @@ fn insert_number(map: &mut Map<String, Value>, key: &str, number: Option<Value>)
     }
 }
 
-fn first_number_arg(args: &[XenoType]) -> Option<Value> {
+fn first_number_arg(args: &[Expr]) -> Option<Value> {
     for arg in args {
-        for expr in arg {
-            if let Expr::Literal(lit @ Literal::Number(_)) = expr {
-                return Some(literal_to_json(lit));
-            }
+        if let Expr::Type(Type::Simple(SimpleType::Literal(
+            literal @ (Literal::Int(_, _) | Literal::Float(_, _)),
+        ))) = arg
+        {
+            return Some(literal_to_json(literal));
         }
     }
     None
@@ -496,14 +487,23 @@ fn integer_schema(name: &str) -> Option<Value> {
 
 fn literal_to_json(lit: &Literal) -> Value {
     match lit {
-        Literal::Number(NumberType::Int(n, _)) => json!(n),
-        Literal::Number(NumberType::Float(f, _)) => json!(f),
+        Literal::Int(n, _) => n
+            .to_string()
+            .parse::<serde_json::Number>()
+            .map(Value::Number)
+            .unwrap_or_else(|_| json!(n.to_string())),
+        Literal::Float(f, _) => f
+            .to_string()
+            .parse::<serde_json::Number>()
+            .map(Value::Number)
+            .unwrap_or_else(|_| json!(f.to_string())),
         Literal::String(s, _) => json!(s),
         Literal::Boolean(b, _) => json!(b),
     }
 }
 
 /// Extracts the pattern body from a regex literal like `/foo/i`.
+#[cfg(test)]
 fn regex_source(raw: &str) -> String {
     let trimmed = raw.trim();
     if let Some(stripped) = trimmed.strip_prefix('/') {
@@ -514,18 +514,23 @@ fn regex_source(raw: &str) -> String {
     trimmed.to_string()
 }
 
-fn is_nullable(exprs: &XenoType) -> bool {
-    exprs.iter().any(|e| match e {
-        Expr::Identifier(id) => id.v == "null",
-        Expr::BinaryExpr(BinaryExprType::Union | BinaryExprType::Or, pair) => {
-            is_null_expr(&pair.0) || is_null_expr(&pair.1)
-        }
-        _ => false,
-    })
+fn is_optional(ty: &SimpleType) -> bool {
+    matches!(
+        ty,
+        SimpleType::OptionalLiteral(_)
+            | SimpleType::OptionalIdentifier(_)
+            | SimpleType::OptionalArray(_)
+    )
 }
 
-fn is_null_expr(expr: &Expr) -> bool {
-    matches!(expr, Expr::Identifier(id) if id.v == "null")
+fn with_description(mut schema: Value, docs: Option<&xenomorph_common::TokenData>) -> Value {
+    if let (Value::Object(map), Some(docs)) = (&mut schema, docs) {
+        map.insert(
+            "description".to_string(),
+            json!(extract_documentation(docs)),
+        );
+    }
+    schema
 }
 
 fn with_schema_extension(path: &PathBuf) -> PathBuf {
@@ -575,6 +580,74 @@ fn module_path_parts(module_path: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_type_and_field_docs_are_preserved() {
+        let key = xenomorph_common::TokenData {
+            v: "displayName",
+            l: 0,
+            c: 0,
+        };
+        let field_type = xenomorph_common::TokenData {
+            v: "string",
+            l: 0,
+            c: 0,
+        };
+        let field_docs = xenomorph_common::TokenData {
+            v: "/** Name shown to users. */",
+            l: 0,
+            c: 0,
+        };
+        let ty = (
+            Type::Struct(vec![(
+                &key,
+                SimpleType::Identifier(&field_type),
+                Some(&field_docs),
+            )]),
+            vec![],
+        );
+
+        let schema = JsonSchemaGenerator::new().type_decl_to_schema(
+            &Some("A user-facing profile."),
+            "Profile",
+            &ty,
+        );
+
+        assert_eq!(schema["title"], json!("Profile"));
+        assert_eq!(schema["description"], json!("A user-facing profile."));
+        assert_eq!(
+            schema["properties"]["displayName"]["description"],
+            json!("Name shown to users.")
+        );
+    }
+
+    #[test]
+    fn test_numeric_enum_member_docs_are_preserved() {
+        let key = xenomorph_common::TokenData {
+            v: "Active",
+            l: 0,
+            c: 0,
+        };
+        let literal = xenomorph_common::TokenData { v: "1", l: 0, c: 0 };
+        let docs = xenomorph_common::TokenData {
+            v: "/** The active state. */",
+            l: 0,
+            c: 0,
+        };
+        let variants = vec![(
+            &key,
+            SimpleType::Literal(Literal::Int(1.into(), &literal)),
+            Some(&docs),
+        )];
+
+        let schema = JsonSchemaGenerator::new().enum_to_schema(&variants);
+
+        assert_eq!(schema["oneOf"][0]["const"], json!(1));
+        assert_eq!(
+            schema["oneOf"][0]["description"],
+            json!("The active state.")
+        );
+    }
 
     #[test]
     fn test_builtin_string_mapping() {

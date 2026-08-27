@@ -4,10 +4,11 @@ use std::path::PathBuf;
 
 use xenomorph_common::config::{ConfigValue, PluginConfigs};
 use xenomorph_common::parser::{
-    BinaryExprType, Declaration, Expr, KeyValExpr, Literal, NumberType, XenoType,
+    Annotation, Declaration, Expr, KeyValExpr, Literal, SimpleType, Type, XenoType,
 };
 use xenomorph_common::plugins::XenoPlugin;
 use xenomorph_common::semantic::{AnalyzerListener, ScopeInfo};
+use xenomorph_common::utils::extract_documentation;
 
 // ── Plugin registration ─────────────────────────────────────────────
 
@@ -145,19 +146,8 @@ impl<'src> AnalyzerListener<'src> for TsGenerator {
 
 // ── Type declaration generation ─────────────────────────────────────
 
-fn generate_type_decl(out: &mut String, docs: &Option<&str>, name: &str, t: &[Expr]) {
-    let annotations: Vec<String> = t
-        .iter()
-        .filter_map(|e| match e {
-            Expr::Annotation(n, args) => Some(format_annotation(n.v, args)),
-            _ => None,
-        })
-        .collect();
-
-    let type_exprs: Vec<&Expr> = t
-        .iter()
-        .filter(|e| !matches!(e, Expr::Annotation(..)))
-        .collect();
+fn generate_type_decl(out: &mut String, docs: &Option<&str>, name: &str, t: &XenoType) {
+    let annotations: Vec<String> = t.1.iter().map(format_annotation).collect();
 
     // JSDoc
     if docs.is_some() || !annotations.is_empty() {
@@ -173,49 +163,31 @@ fn generate_type_decl(out: &mut String, docs: &Option<&str>, name: &str, t: &[Ex
         out.push_str(" */\n");
     }
 
-    // Single struct → interface
-    if type_exprs.len() == 1 {
-        if let Expr::Struct(fields) = type_exprs[0] {
-            generate_interface(out, name, fields);
+    if let Type::Struct(fields) = &t.0 {
+        generate_interface(out, name, fields);
+        return;
+    }
+
+    if let Type::Enum(variants) = &t.0 {
+        generate_enum(out, name, variants);
+        return;
+    }
+
+    if let Type::Set(inner) = &t.0 {
+        if is_all_literals(inner) {
+            let elems: Vec<String> = inner.iter().map(simple_type_to_ts).collect();
+            out.push_str(&format!(
+                "export const {name} = new Set([{}] as const);\n",
+                elems.join(", ")
+            ));
+            out.push_str(&format!(
+                "export type {name} = typeof {name} extends Set<infer T> ? T : never;\n\n"
+            ));
             return;
         }
     }
 
-    // Single enum → string union or discriminated union
-    if type_exprs.len() == 1 {
-        if let Expr::Enum(variants) = type_exprs[0] {
-            generate_enum(out, name, variants);
-            return;
-        }
-    }
-
-    // Single set of literals → emit const + type
-    if type_exprs.len() == 1 {
-        if let Expr::Set(inner) = type_exprs[0] {
-            if is_all_literals(inner) {
-                let elems: Vec<String> = inner.iter().map(|a| anonym_type_to_ts(a)).collect();
-                out.push_str(&format!(
-                    "export const {name} = new Set([{}] as const);\n",
-                    elems.join(", ")
-                ));
-                out.push_str(&format!(
-                    "export type {name} = typeof {name} extends Set<infer T> ? T : never;\n\n"
-                ));
-                return;
-            }
-        }
-    }
-
-    // Everything else → type alias
-    let ts = if type_exprs.is_empty() {
-        "unknown".to_string()
-    } else {
-        type_exprs
-            .iter()
-            .filter_map(|e| expr_to_ts(e))
-            .collect::<Vec<_>>()
-            .join(" | ")
-    };
+    let ts = type_to_ts(&t.0);
     out.push_str(&format!("export type {name} = {ts};\n\n"));
 }
 
@@ -223,20 +195,14 @@ fn generate_type_decl(out: &mut String, docs: &Option<&str>, name: &str, t: &[Ex
 
 fn generate_interface(out: &mut String, name: &str, fields: &[KeyValExpr]) {
     out.push_str(&format!("export interface {name} {{\n"));
-    for (key, value) in fields {
-        let (ts_type, field_annotations) = anonym_type_to_ts_with_annotations(value);
-        let optional = is_nullable(value);
+    for (key, value, docs) in fields {
+        let ts_type = simple_type_to_ts(value);
+        let optional = is_optional(value);
 
-        if !field_annotations.is_empty() {
-            out.push_str(&format!("  /** {} */\n", field_annotations.join(", ")));
+        if let Some(docs) = docs {
+            push_jsdoc(out, extract_documentation(docs), "  ");
         }
-
         let opt = if optional { "?" } else { "" };
-        let ts_type = if optional {
-            strip_null(&ts_type)
-        } else {
-            ts_type
-        };
         out.push_str(&format!("  {}{opt}: {ts_type};\n", key.v));
     }
     out.push_str("}\n\n");
@@ -245,203 +211,110 @@ fn generate_interface(out: &mut String, name: &str, fields: &[KeyValExpr]) {
 // ── Enum generation ─────────────────────────────────────────────────
 
 fn generate_enum(out: &mut String, name: &str, variants: &[KeyValExpr]) {
-    let all_simple = variants.iter().all(|(_, v)| v.is_empty());
-    let all_numeric = variants
-        .iter()
-        .all(|(_, v)| v.len() == 1 && matches!(v.first(), Some(Expr::Literal(Literal::Number(_)))));
+    let all_numeric = variants.iter().all(|(_, value, _)| {
+        matches!(
+            value,
+            SimpleType::Literal(Literal::Int(_, _) | Literal::Float(_, _))
+        )
+    });
 
-    if all_simple {
-        let members: Vec<String> = variants
-            .iter()
-            .map(|(k, _)| format!("\"{}\"", k.v))
-            .collect();
-        out.push_str(&format!(
-            "export type {name} = {};\n\n",
-            members.join(" | ")
-        ));
-    } else if all_numeric {
+    if all_numeric {
         out.push_str(&format!("export enum {name} {{\n"));
-        for (key, value) in variants {
-            if let Some(Expr::Literal(Literal::Number(n))) = value.first() {
-                let num_str = match n {
-                    NumberType::Int(i, _) => i.to_string(),
-                    NumberType::Float(f, _) => f.to_string(),
-                };
-                out.push_str(&format!("  {} = {num_str},\n", key.v));
+        for (key, value, docs) in variants {
+            if let Some(docs) = docs {
+                push_jsdoc(out, extract_documentation(docs), "  ");
             }
+            out.push_str(&format!("  {} = {},\n", key.v, simple_type_to_ts(value)));
         }
         out.push_str("}\n\n");
     } else {
-        let mut members: Vec<String> = Vec::new();
-        for (key, value) in variants {
-            if value.is_empty() {
-                members.push(format!("{{ kind: \"{}\" }}", key.v));
-            } else {
-                let payload_ts = anonym_type_to_ts(value);
-                members.push(format!("{{ kind: \"{}\"; value: {payload_ts} }}", key.v));
+        out.push_str(&format!("export type {name} =\n"));
+        for (index, (key, value, docs)) in variants.iter().enumerate() {
+            let payload_ts = simple_type_to_ts(value);
+            if let Some(docs) = docs {
+                push_jsdoc(out, extract_documentation(docs), "  ");
             }
+            let suffix = if index + 1 == variants.len() { ";" } else { "" };
+            out.push_str(&format!(
+                "  | {{ kind: \"{}\"; value: {payload_ts} }}{suffix}\n",
+                key.v
+            ));
         }
-        out.push_str(&format!(
-            "export type {name} =\n  | {};\n\n",
-            members.join("\n  | ")
-        ));
+        out.push('\n');
     }
 }
 
-// ── Expression → TypeScript string ──────────────────────────────────
+// ── AST → TypeScript string ─────────────────────────────────────────
 
-fn expr_to_ts(expr: &Expr) -> Option<String> {
-    Some(match expr {
-        Expr::Identifier(id) => builtin_to_ts(id.v).to_string(),
-        Expr::Literal(lit) => literal_to_ts(lit),
-        Expr::Regex(_) => return None,
-        Expr::FieldAccess(fa) => {
-            let parts: Vec<&str> = fa.v.split('.').collect();
-            if parts.len() == 2 {
-                format!("{}[\"{}\"]", parts[0], parts[1])
-            } else {
-                fa.v.to_string()
-            }
-        }
-        Expr::Not(inner) => format!("Exclude<unknown, {}>", expr_to_ts(inner)?),
-        Expr::BinaryExpr(op, pair) => {
-            let left_opt = expr_to_ts(&pair.0);
-            let right_opt = expr_to_ts(&pair.1);
-            let left = if let Some(left) = left_opt {
-                left
-            } else {
-                return right_opt;
-            };
-
-            let right = if let Some(right) = right_opt {
-                right
-            } else {
-                return Some(left);
-            };
-
-            match op {
-                BinaryExprType::Or => {
-                    format!("{left} | {right}")
-                }
-                BinaryExprType::Union => {
-                    format!("{left} & {right}")
-                }
-                BinaryExprType::Difference => {
-                    format!("Exclude<{left}, {right}>")
-                }
-                BinaryExprType::Intersection => {
-                    format!("Pick<{left} & {right}, keyof {right} & keyof {left}>")
-                }
-                BinaryExprType::Xor => {
-                    format!("Omit<{left} & {right}, keyof {right} & keyof {left}>")
-                }
-                BinaryExprType::Range
-                | BinaryExprType::Add
-                | BinaryExprType::Remove
-                | BinaryExprType::SymmetricDifference => return None,
-            }
-        }
-        Expr::Array(type_ident) => {
-            let elem_type = builtin_to_ts(type_ident.v);
-            format!("{}[]", elem_type)
-        }
-        Expr::List(inner) => {
-            if inner.len() == 1 {
-                let elem = anonym_type_to_ts(&inner[0]);
-                if elem.contains('|') || elem.contains('&') {
-                    format!("({elem})[]")
-                } else {
-                    format!("{elem}[]")
-                }
-            } else {
-                let elems: Vec<String> = inner.iter().map(|a| anonym_type_to_ts(a)).collect();
-                format!("[{}]", elems.join(", "))
-            }
-        }
-        Expr::Set(inner) => {
-            if inner.len() == 1 {
-                let elem = anonym_type_to_ts(&inner[0]);
-                format!("Set<{elem}>")
-            } else {
-                let elems: Vec<String> = inner.iter().map(|a| anonym_type_to_ts(a)).collect();
-                format!("Set<{}>", elems.join(" | "))
-            }
-        }
-        Expr::Struct(fields) => {
-            let field_strs: Vec<String> = fields
+fn type_to_ts(ty: &Type) -> String {
+    match ty {
+        Type::Simple(simple) => simple_type_to_ts(simple),
+        Type::Tuple(items) => format!(
+            "[{}]",
+            items
                 .iter()
-                .map(|(k, v)| {
-                    let ts = anonym_type_to_ts(v);
-                    format!("{}: {ts}", k.v)
-                })
-                .collect();
-            format!("{{ {} }}", field_strs.join("; "))
-        }
-        Expr::Enum(variants) => {
-            let strs: Vec<String> = variants
+                .map(simple_type_to_ts)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Type::Set(items) => format!(
+            "Set<{}>",
+            items
                 .iter()
-                .map(|(k, v)| {
-                    if v.is_empty() {
-                        format!("\"{}\"", k.v)
-                    } else {
-                        anonym_type_to_ts(v)
-                    }
-                })
-                .collect();
-            strs.join(" | ")
-        }
-        Expr::Annotation(_, _) => String::new(),
-    })
-}
-
-// ── AnonymType helpers ──────────────────────────────────────────────
-
-fn anonym_type_to_ts(exprs: &XenoType) -> String {
-    let parts: Vec<String> = exprs
-        .iter()
-        .filter(|e| !matches!(e, Expr::Annotation(..)))
-        .filter_map(|e| expr_to_ts(e))
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    if parts.is_empty() {
-        "unknown".to_string()
-    } else if parts.len() == 1 {
-        parts.into_iter().next().unwrap()
-    } else {
-        parts.join(" | ")
+                .map(simple_type_to_ts)
+                .collect::<Vec<_>>()
+                .join(" | ")
+        ),
+        Type::Struct(fields) => format!(
+            "{{ {} }}",
+            fields
+                .iter()
+                .map(|(key, value, docs)| format!(
+                    "{}{}: {}",
+                    inline_jsdoc(*docs),
+                    key.v,
+                    simple_type_to_ts(value)
+                ))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
+        Type::Enum(variants) => variants
+            .iter()
+            .map(|(key, value, docs)| {
+                format!(
+                    "{}{{ kind: \"{}\"; value: {} }}",
+                    inline_jsdoc(*docs),
+                    key.v,
+                    simple_type_to_ts(value)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" | "),
+        Type::Sum(items) => items
+            .iter()
+            .map(simple_type_to_ts)
+            .collect::<Vec<_>>()
+            .join(" | "),
+        Type::Intersection(items) => items
+            .iter()
+            .map(simple_type_to_ts)
+            .collect::<Vec<_>>()
+            .join(" & "),
     }
 }
 
-fn anonym_type_to_ts_with_annotations(exprs: &XenoType) -> (String, Vec<String>) {
-    let mut type_parts = Vec::new();
-    let mut annotations = Vec::new();
-
-    for expr in exprs {
-        match expr {
-            Expr::Annotation(name, args) => {
-                annotations.push(format_annotation(name.v, args));
-            }
-            other => {
-                let ts = expr_to_ts(other);
-                if let Some(t) = ts {
-                    if !t.is_empty() {
-                        type_parts.push(t);
-                    }
-                }
-            }
+fn simple_type_to_ts(ty: &SimpleType) -> String {
+    match ty {
+        SimpleType::Literal(literal) | SimpleType::OptionalLiteral(literal) => {
+            literal_to_ts(literal)
+        }
+        SimpleType::Identifier(identifier) | SimpleType::OptionalIdentifier(identifier) => {
+            builtin_to_ts(identifier.v).to_string()
+        }
+        SimpleType::Array(identifier) | SimpleType::OptionalArray(identifier) => {
+            format!("{}[]", builtin_to_ts(identifier.v))
         }
     }
-
-    let ts = if type_parts.is_empty() {
-        "unknown".to_string()
-    } else if type_parts.len() == 1 {
-        type_parts.into_iter().next().unwrap()
-    } else {
-        type_parts.join(" | ")
-    };
-
-    (ts, annotations)
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -466,48 +339,69 @@ fn builtin_to_ts(name: &str) -> &str {
 
 fn literal_to_ts(lit: &Literal) -> String {
     match lit {
-        Literal::Number(NumberType::Int(n, _)) => n.to_string(),
-        Literal::Number(NumberType::Float(f, _)) => f.to_string(),
+        Literal::Int(n, _) => n.to_string(),
+        Literal::Float(f, _) => f.to_string(),
         Literal::String(s, _) => format!("\"{s}\""),
         Literal::Boolean(b, _) => b.to_string(),
     }
 }
 
-fn format_annotation(name: &str, args: &[XenoType]) -> String {
-    if args.is_empty() || args.iter().all(|a| a.is_empty()) {
-        format!("@{name}")
+fn format_annotation(annotation: &Annotation) -> String {
+    if annotation.params.is_empty() {
+        format!("@{}", annotation.ident.v)
     } else {
-        let arg_strs: Vec<String> = args.iter().map(|a| anonym_type_to_ts(a)).collect();
-        format!("@{name}({})", arg_strs.join(", "))
+        let arg_strs: Vec<String> = annotation.params.iter().map(expr_to_ts).collect();
+        format!("@{}({})", annotation.ident.v, arg_strs.join(", "))
     }
 }
 
-fn is_nullable(exprs: &XenoType) -> bool {
-    exprs.iter().any(|e| match e {
-        Expr::Identifier(id) => id.v == "null",
-        Expr::BinaryExpr(BinaryExprType::Union | BinaryExprType::Or, pair) => {
-            is_null_expr(&pair.0) || is_null_expr(&pair.1)
-        }
-        _ => false,
+fn expr_to_ts(expr: &Expr) -> String {
+    match expr {
+        Expr::Regex(token) => token.v.to_string(),
+        Expr::Annotation(annotation) => format_annotation(annotation),
+        Expr::Type(ty) => type_to_ts(ty),
+    }
+}
+
+fn is_optional(ty: &SimpleType) -> bool {
+    matches!(
+        ty,
+        SimpleType::OptionalLiteral(_)
+            | SimpleType::OptionalIdentifier(_)
+            | SimpleType::OptionalArray(_)
+    )
+}
+
+fn is_all_literals(types: &[SimpleType]) -> bool {
+    types
+        .iter()
+        .all(|ty| matches!(ty, SimpleType::Literal(_) | SimpleType::OptionalLiteral(_)))
+}
+
+fn push_jsdoc(out: &mut String, docs: &str, indent: &str) {
+    out.push_str(&format_jsdoc(docs, indent));
+}
+
+fn format_jsdoc(docs: &str, indent: &str) -> String {
+    let mut result = format!("{indent}/**\n");
+    for line in docs.lines() {
+        result.push_str(&format!("{indent} * {line}\n"));
+    }
+    result.push_str(&format!("{indent} */\n"));
+    result
+}
+
+fn inline_jsdoc(docs: Option<&xenomorph_common::TokenData>) -> String {
+    docs.map(|docs| {
+        format!(
+            "/** {} */ ",
+            extract_documentation(docs)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
     })
-}
-
-fn is_null_expr(expr: &Expr) -> bool {
-    matches!(expr, Expr::Identifier(id) if id.v == "null")
-}
-
-fn is_all_literals(type_list: &[XenoType]) -> bool {
-    type_list.iter().all(|anon| {
-        anon.iter()
-            .all(|e| matches!(e, Expr::Literal(_) | Expr::Annotation(..)))
-    })
-}
-
-fn strip_null(ts: &str) -> String {
-    ts.split(" | ")
-        .filter(|part| part.trim() != "null")
-        .collect::<Vec<_>>()
-        .join(" | ")
+    .unwrap_or_default()
 }
 
 fn ts_import_specifier(from_module_path: &str, to_module_path: &str) -> String {
@@ -542,6 +436,40 @@ fn module_path_parts(module_path: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_type_and_field_docs_are_preserved() {
+        let key = xenomorph_common::TokenData {
+            v: "displayName",
+            l: 0,
+            c: 0,
+        };
+        let field_type = xenomorph_common::TokenData {
+            v: "string",
+            l: 0,
+            c: 0,
+        };
+        let field_docs = xenomorph_common::TokenData {
+            v: "/** Name shown to users. */",
+            l: 0,
+            c: 0,
+        };
+        let ty = (
+            Type::Struct(vec![(
+                &key,
+                SimpleType::Identifier(&field_type),
+                Some(&field_docs),
+            )]),
+            vec![],
+        );
+        let mut out = String::new();
+
+        generate_type_decl(&mut out, &Some("A user-facing profile."), "Profile", &ty);
+
+        assert!(out.contains(" * A user-facing profile."));
+        assert!(out.contains("   * Name shown to users."));
+        assert!(out.contains("  displayName: string;"));
+    }
 
     #[test]
     fn test_builtin_mappings() {

@@ -1,5 +1,5 @@
 use crate::{
-    parser::{Expr, TypeList},
+    parser::{Expr, SimpleType},
     semantic::{AnalyzerListener, ScopeInfo},
     TokenData, XenoDiagnostic,
 };
@@ -18,8 +18,12 @@ impl NameValidator {
 }
 
 impl<'src> AnalyzerListener<'src> for NameValidator {
-    fn on_before_expr(&mut self, expr: &Expr<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {
-        if let Expr::Identifier(id) = expr {
+    fn on_simple_type(&mut self, ty: &SimpleType<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {
+        if let SimpleType::Identifier(id)
+        | SimpleType::OptionalIdentifier(id)
+        | SimpleType::Array(id)
+        | SimpleType::OptionalArray(id) = ty
+        {
             if !self.scope.has_type(id.v) {
                 errors.push(XenoDiagnostic {
                     location: (*id).clone(),
@@ -33,7 +37,7 @@ impl<'src> AnalyzerListener<'src> for NameValidator {
     fn on_before_annotation(
         &mut self,
         name: &TokenData<'src>,
-        _args: &TypeList<'src>,
+        _args: &[Expr<'src>],
         errors: &mut Vec<XenoDiagnostic<'src>>,
     ) {
         if !self.scope.has_annotation(name.v) {

@@ -17,7 +17,8 @@
 ## Complex types
 
 - Structs/Enums: `{...}` or with [generics](#Generics) `<Generics>` `{}`
-- Lists/Tuples: `[a, b, c]` with literals or with types `(<Types>)[]` or `[string, i32]`
+- Lists/Tuples: `[a, b, c]` with literals or types, for example `[string, i32]`
+- Arrays use postfix syntax: `Type[]`, for example `string[]` or `User[]`
 
 ## Builtin validators:
 

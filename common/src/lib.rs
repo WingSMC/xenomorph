@@ -6,6 +6,8 @@ pub mod module;
 pub mod parser;
 pub mod plugins;
 pub mod semantic;
+#[cfg(test)]
+mod test_strings;
 pub mod utils;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

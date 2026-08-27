@@ -6,7 +6,7 @@ use crate::plugins::ListenerFactory;
 use crate::{
     config::PluginConfigs,
     module::ModuleData,
-    parser::{Declaration, Expr, KeyValExpr, TypeList, XenoType},
+    parser::{Annotation, Declaration, Expr, KeyValExpr, SimpleType, Type, XenoType},
     plugins::XenoPlugin,
     semantic::{
         annotation_validator::AnnotationValidator, if_validator::IfChainValidator,
@@ -112,14 +112,14 @@ pub trait AnalyzerListener<'src> {
     fn on_before_field(
         &mut self,
         key: &TokenData<'src>,
-        value: &XenoType<'src>,
+        value: &SimpleType<'src>,
         errors: &mut Vec<XenoDiagnostic<'src>>,
     ) {
     }
     fn on_after_field(
         &mut self,
         key: &TokenData<'src>,
-        value: &XenoType<'src>,
+        value: &SimpleType<'src>,
         errors: &mut Vec<XenoDiagnostic<'src>>,
     ) {
     }
@@ -140,23 +140,41 @@ pub trait AnalyzerListener<'src> {
     fn on_array(&mut self, inner: &TokenData<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {}
     fn on_after_array(&mut self, inner: &TokenData<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {}
 
-    fn on_before_list(&mut self, inner: &TypeList<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {}
-    fn on_after_list(&mut self, inner: &TypeList<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {}
+    fn on_before_list(
+        &mut self,
+        inner: &[SimpleType<'src>],
+        errors: &mut Vec<XenoDiagnostic<'src>>,
+    ) {
+    }
+    fn on_after_list(
+        &mut self,
+        inner: &[SimpleType<'src>],
+        errors: &mut Vec<XenoDiagnostic<'src>>,
+    ) {
+    }
 
-    fn on_before_set(&mut self, inner: &TypeList<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {}
-    fn on_after_set(&mut self, inner: &TypeList<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {}
+    fn on_before_set(
+        &mut self,
+        inner: &[SimpleType<'src>],
+        errors: &mut Vec<XenoDiagnostic<'src>>,
+    ) {
+    }
+    fn on_after_set(&mut self, inner: &[SimpleType<'src>], errors: &mut Vec<XenoDiagnostic<'src>>) {
+    }
+
+    fn on_simple_type(&mut self, ty: &SimpleType<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {}
 
     fn on_before_annotation(
         &mut self,
         name: &TokenData<'src>,
-        args: &TypeList<'src>,
+        args: &[Expr<'src>],
         errors: &mut Vec<XenoDiagnostic<'src>>,
     ) {
     }
     fn on_after_annotation(
         &mut self,
         name: &TokenData<'src>,
-        args: &TypeList<'src>,
+        args: &[Expr<'src>],
         errors: &mut Vec<XenoDiagnostic<'src>>,
     ) {
     }
@@ -356,17 +374,18 @@ fn walk_decl<'src>(
 
 fn walk_type<'src>(
     ls: &mut Listeners<'src>,
-    exprs: &XenoType<'src>,
+    ty: &XenoType<'src>,
     errors: &mut Vec<XenoDiagnostic<'src>>,
 ) {
     for l in ls.iter_mut() {
-        l.on_before_type(exprs, errors);
+        l.on_before_type(ty, errors);
     }
-    for expr in exprs {
-        walk_expr(ls, expr, errors);
+    walk_type_expr(ls, &ty.0, errors);
+    for annotation in &ty.1 {
+        walk_annotation(ls, annotation, errors);
     }
     for l in ls.iter_mut() {
-        l.on_after_type(exprs, errors);
+        l.on_after_type(ty, errors);
     }
 }
 
@@ -396,15 +415,47 @@ fn walk_expr<'src>(
         l.on_before_expr(expr, errors);
     }
     match expr {
-        Expr::Struct(fields) => {
+        Expr::Regex(_) => {}
+        Expr::Annotation(annotation) => walk_annotation(ls, annotation, errors),
+        Expr::Type(ty) => walk_type_expr(ls, ty, errors),
+    }
+    for l in ls.iter_mut() {
+        l.on_after_expr(expr, errors);
+    }
+}
+
+fn walk_annotation<'src>(
+    ls: &mut Listeners<'src>,
+    annotation: &Annotation<'src>,
+    errors: &mut Vec<XenoDiagnostic<'src>>,
+) {
+    for l in ls.iter_mut() {
+        l.on_before_annotation(annotation.ident, &annotation.params, errors);
+    }
+    for param in &annotation.params {
+        walk_expr(ls, param, errors);
+    }
+    for l in ls.iter_mut() {
+        l.on_after_annotation(annotation.ident, &annotation.params, errors);
+    }
+}
+
+fn walk_type_expr<'src>(
+    ls: &mut Listeners<'src>,
+    ty: &Type<'src>,
+    errors: &mut Vec<XenoDiagnostic<'src>>,
+) {
+    match ty {
+        Type::Simple(simple) => walk_simple_type(ls, simple, errors),
+        Type::Struct(fields) => {
             for l in ls.iter_mut() {
                 l.on_before_struct(fields, errors);
             }
-            for (key, value) in fields {
+            for (key, value, _) in fields {
                 for l in ls.iter_mut() {
                     l.on_before_field(key, value, errors);
                 }
-                walk_type(ls, value, errors);
+                walk_simple_type(ls, value, errors);
                 for l in ls.iter_mut() {
                     l.on_after_field(key, value, errors);
                 }
@@ -413,15 +464,15 @@ fn walk_expr<'src>(
                 l.on_after_struct(fields, errors);
             }
         }
-        Expr::Enum(variants) => {
+        Type::Enum(variants) => {
             for l in ls.iter_mut() {
                 l.on_before_enum(variants, errors);
             }
-            for (key, value) in variants {
+            for (key, value, _) in variants {
                 for l in ls.iter_mut() {
                     l.on_before_field(key, value, errors);
                 }
-                walk_type(ls, value, errors);
+                walk_simple_type(ls, value, errors);
                 for l in ls.iter_mut() {
                     l.on_after_field(key, value, errors);
                 }
@@ -430,55 +481,49 @@ fn walk_expr<'src>(
                 l.on_after_enum(variants, errors);
             }
         }
-        Expr::Array(ident) => {
-            for l in ls.iter_mut() {
-                l.on_array(ident, errors);
-            }
-        }
-        Expr::List(inner) => {
+        Type::Tuple(inner) => {
             for l in ls.iter_mut() {
                 l.on_before_list(inner, errors);
             }
-            for anon_type in inner {
-                walk_type(ls, anon_type, errors);
+            for simple in inner {
+                walk_simple_type(ls, simple, errors);
             }
             for l in ls.iter_mut() {
                 l.on_after_list(inner, errors);
             }
         }
-        Expr::Set(inner) => {
+        Type::Set(inner) => {
             for l in ls.iter_mut() {
                 l.on_before_set(inner, errors);
             }
-            for anon_type in inner {
-                walk_type(ls, anon_type, errors);
+            for simple in inner {
+                walk_simple_type(ls, simple, errors);
             }
             for l in ls.iter_mut() {
                 l.on_after_set(inner, errors);
             }
         }
-        Expr::Annotation(name, args) => {
-            for l in ls.iter_mut() {
-                l.on_before_annotation(name, args, errors);
-            }
-            for anon_type in args {
-                walk_type(ls, anon_type, errors);
-            }
-            for l in ls.iter_mut() {
-                l.on_after_annotation(name, args, errors);
+        Type::Sum(inner) | Type::Intersection(inner) => {
+            for simple in inner {
+                walk_simple_type(ls, simple, errors);
             }
         }
-        Expr::Not(inner) => {
-            walk_expr(ls, inner, errors);
-        }
-        Expr::BinaryExpr(_, pair) => {
-            walk_expr(ls, &pair.0, errors);
-            walk_expr(ls, &pair.1, errors);
-        }
-        Expr::Identifier(_) | Expr::Literal(_) | Expr::Regex(_) | Expr::FieldAccess(_) => {}
     }
+}
+
+fn walk_simple_type<'src>(
+    ls: &mut Listeners<'src>,
+    ty: &SimpleType<'src>,
+    errors: &mut Vec<XenoDiagnostic<'src>>,
+) {
     for l in ls.iter_mut() {
-        l.on_after_expr(expr, errors);
+        l.on_simple_type(ty, errors);
+    }
+    if let SimpleType::Array(ident) | SimpleType::OptionalArray(ident) = ty {
+        for l in ls.iter_mut() {
+            l.on_array(ident, errors);
+            l.on_after_array(ident, errors);
+        }
     }
 }
 

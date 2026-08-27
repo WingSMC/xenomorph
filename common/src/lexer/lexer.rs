@@ -49,7 +49,7 @@ impl<'src> Lexer<'src> {
     pub fn next(&mut self) -> Option<char> {
         let c = self.it.next();
         if let Some(c) = c {
-            self.location.src_index += 1;
+            self.location.src_index += c.len_utf8();
             self.location.column += 1;
             if c == '\n' {
                 self.location.line += 1;
@@ -84,16 +84,27 @@ impl<'src> Lexer<'src> {
     }
 
     pub fn location_to_token(&self, location: &LexerLocation) -> TokenData<'src> {
+        let end = self.src[location.src_index..]
+            .chars()
+            .next()
+            .map(|c| location.src_index + c.len_utf8())
+            .unwrap_or(location.src_index);
         TokenData {
-            v: &self.src[location.src_index..=location.src_index],
+            v: &self.src[location.src_index..end],
             l: location.line,
             c: location.column,
         }
     }
 
-    pub fn token_from_to_lexer(&self, start: &LexerLocation) -> TokenData<'src> {
+    /**
+    Returns the source consumed since `start`.
+
+    `src_index` is the UTF-8 byte offset of the next unconsumed character, so
+    the token occupies the half-open byte range `start.src_index..src_index`.
+    */
+    pub fn token_from(&self, start: &LexerLocation) -> TokenData<'src> {
         TokenData {
-            v: &self.src[start.src_index..=self.location.src_index],
+            v: &self.src[start.src_index..self.location.src_index],
             l: start.line,
             c: start.column,
         }
@@ -101,20 +112,13 @@ impl<'src> Lexer<'src> {
 
     pub fn token_single_at_lexer(&self) -> TokenData<'src> {
         let start = &self.location;
+        let end = self.src[start.src_index..]
+            .chars()
+            .next()
+            .map(|c| start.src_index + c.len_utf8())
+            .unwrap_or(start.src_index);
         TokenData {
-            v: &self.src[start.src_index..=start.src_index],
-            l: start.line,
-            c: start.column,
-        }
-    }
-
-    /**
-    If you step over the last character of a token with next()
-    so the current lexer location is one after the token, use this.
-    */
-    pub fn token_from_but_not_including_lexer(&self, start: &LexerLocation) -> TokenData<'src> {
-        TokenData {
-            v: &self.src[start.src_index..self.location.src_index],
+            v: &self.src[start.src_index..end],
             l: start.line,
             c: start.column,
         }
@@ -179,7 +183,7 @@ impl<'src> Lexer<'src> {
         Ok(self.tokens)
     }
 
-    fn consume_word(&mut self) -> () {
+    fn consume_word(&mut self) {
         let initial_loc = self.location_snapshot();
 
         while let Some(&c) = self.peek() {
@@ -191,7 +195,7 @@ impl<'src> Lexer<'src> {
             }
         }
 
-        let token_data = self.token_from_to_lexer(&initial_loc);
+        let token_data = self.token_from(&initial_loc);
 
         let w = match token_data.v {
             "type" => (TokenVariant::Type, token_data),
@@ -213,11 +217,13 @@ impl<'src> Lexer<'src> {
     }
     fn consume_path(&mut self) {
         let initial_loc = self.location_snapshot();
-        while let Some('a'..='z' | 'A'..='Z' | '_' | '/') = self.peek() {
+        while let Some('a'..='z' | 'A'..='Z' | '_' | '0'..='9' | '/') = self.peek() {
             self.next();
         }
-        self.tokens
-            .push((TokenVariant::Path, self.token_from_to_lexer(&initial_loc)));
+        if self.location.src_index > initial_loc.src_index {
+            self.tokens
+                .push((TokenVariant::Path, self.token_from(&initial_loc)));
+        }
     }
 
     fn consume_string(&mut self) -> Result<Token<'src>, XenoDiagnostic<'src>> {
@@ -226,19 +232,14 @@ impl<'src> Lexer<'src> {
 
         while let Some(c) = self.next() {
             match c {
-                '"' => {
-                    return Ok((
-                        TokenVariant::String,
-                        self.token_from_but_not_including_lexer(&initial_loc),
-                    ))
-                }
+                '"' => return Ok((TokenVariant::String, self.token_from(&initial_loc))),
                 _ => continue,
             }
         }
 
         Err(XenoDiagnostic {
             message: STRING_TERMINATION_ERROR.to_string(),
-            location: self.token_from_but_not_including_lexer(&initial_loc),
+            location: self.token_from(&initial_loc),
             severity: crate::XenoDiagSeverity::Err,
         })
     }
@@ -250,10 +251,7 @@ impl<'src> Lexer<'src> {
         match self.peek() {
             Some('=') => {
                 self.next();
-                (
-                    TokenVariant::Neq,
-                    self.token_from_but_not_including_lexer(&initial_loc),
-                )
+                (TokenVariant::Neq, self.token_from(&initial_loc))
             }
             _ => (TokenVariant::Not, self.location_to_token(&initial_loc)),
         }
@@ -290,10 +288,7 @@ impl<'src> Lexer<'src> {
             }
         }
 
-        (
-            TokenVariant::Number,
-            self.token_from_but_not_including_lexer(&initial_loc),
-        )
+        (TokenVariant::Number, self.token_from(&initial_loc))
     }
 
     // fn consume_range_lt_dot_symmdiff(&mut self) -> Token<'src> {
@@ -375,10 +370,7 @@ impl<'src> Lexer<'src> {
                 if c == '*' {
                     if let Some('/') = self.peek() {
                         self.next();
-                        return Ok(Some((
-                            TokenVariant::Documentation,
-                            self.token_from_but_not_including_lexer(&start),
-                        )));
+                        return Ok(Some((TokenVariant::Documentation, self.token_from(&start))));
                     }
                 }
             }
@@ -396,7 +388,7 @@ impl<'src> Lexer<'src> {
 
         return Err(XenoDiagnostic {
             message: COMMENT_NOT_TERMINATED.to_string(),
-            location: self.token_from_but_not_including_lexer(&start),
+            location: self.token_from(&start),
             severity: crate::XenoDiagSeverity::Err,
         });
     }
@@ -411,10 +403,7 @@ impl<'src> Lexer<'src> {
                 '\n' => break,
                 '\\' => has_escape = !has_escape,
                 '/' if !has_escape => {
-                    return Ok(Some((
-                        TokenVariant::Regex,
-                        self.token_from_but_not_including_lexer(&start),
-                    )))
+                    return Ok(Some((TokenVariant::Regex, self.token_from(&start))))
                 }
                 _ => has_escape = false,
             }
@@ -422,7 +411,7 @@ impl<'src> Lexer<'src> {
 
         return Err(XenoDiagnostic {
             message: MALFORMED_REGEX.to_string(),
-            location: self.token_from_but_not_including_lexer(&start),
+            location: self.token_from(&start),
             severity: crate::XenoDiagSeverity::Err,
         });
     }

@@ -83,7 +83,9 @@ type Action = enum {
 }
 
 type Admin = User & {
-	actions: [Date, Action][] @minlen(1) @maxlen(10),
+	actions: ActionEntry[] @minlen(1) @maxlen(10),
 }
+
+type ActionEntry = [Date, Action]
 
 ```

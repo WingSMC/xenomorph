@@ -10,12 +10,13 @@ type BrightColor = {
 };
 
 type Action = {};
+type ActionEntry = [date, Action];
 
 /**
 * This is a comment for the Action type
 */
 type Admin = User & {
-    actions: [date, Action][]  @minlen(1) @maxlen(10),
+    actions: ActionEntry[] @minlen(1) @maxlen(10),
 };
 
 type User = {

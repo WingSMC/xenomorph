@@ -5,10 +5,7 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 use xenomorph_common::{
     lexer::{Token, TokenVariant},
-    module::{
-        types::{DeclarationInfo, ErrorPhase},
-        XenoRegistry,
-    },
+    module::{types::DeclarationInfo, XenoRegistry},
     parser::Declaration,
     TokenData,
 };
@@ -142,32 +139,6 @@ impl Backend {
             .collect()
     }
 
-    /// Walks backward from a token to collect an import path like "foo/bar".
-    /// Returns None if the token chain doesn't trace back to an Import token.
-    fn collect_import_path(tokens: &[Token], current_token: &Token) -> Option<String> {
-        let idx = tokens.iter().position(|t| {
-            t.1.l == current_token.1.l && t.1.c == current_token.1.c && t.0 == current_token.0
-        })?;
-
-        // Walk backward collecting Identifier and Slash tokens
-        let mut segments: Vec<&str> = Vec::new();
-        let mut i = idx;
-        loop {
-            if i == 0 {
-                return None;
-            }
-            i -= 1;
-            match tokens[i].0 {
-                TokenVariant::Identifier => segments.push(tokens[i].1.v),
-                TokenVariant::Slash => continue,
-                TokenVariant::Import => break,
-                _ => return None,
-            }
-        }
-        segments.reverse();
-        Some(segments.join("/"))
-    }
-
     // ── Token helpers ───────────────────────────────────────────────
 
     fn find_token_at_position<'a>(
@@ -220,11 +191,10 @@ impl Backend {
                             character: col + len,
                         },
                     },
-                    severity: Some(match err.phase {
-                        ErrorPhase::Lexer | ErrorPhase::Parser | ErrorPhase::Module => {
-                            DiagnosticSeverity::ERROR
-                        }
-                        ErrorPhase::Analyzer => DiagnosticSeverity::ERROR,
+                    severity: Some(match err.severity {
+                        xenomorph_common::XenoDiagSeverity::Err => DiagnosticSeverity::ERROR,
+                        xenomorph_common::XenoDiagSeverity::Warn => DiagnosticSeverity::WARNING,
+                        xenomorph_common::XenoDiagSeverity::Info => DiagnosticSeverity::INFORMATION,
                     }),
                     message: err.message.clone(),
                     source: Some("xenomorph".to_string()),
@@ -322,11 +292,8 @@ impl Backend {
                 TokenVariant::Import => {
                     items.extend(self.get_import_completions(""));
                 }
-                TokenVariant::Slash => {
-                    // Check if we're in an import path: walk back to collect segments
-                    if let Some(path) = Self::collect_import_path(tokens, current_token) {
-                        items.extend(self.get_import_completions(&format!("{}/", path)));
-                    }
+                TokenVariant::Path => {
+                    items.extend(self.get_import_completions(current_token.1.v));
                 }
                 TokenVariant::Identifier => {
                     let token_idx = tokens.iter().position(|t| {
@@ -342,18 +309,6 @@ impl Backend {
                         .map(|t| t.0);
 
                     match prev_variant {
-                        Some(TokenVariant::Import) => {
-                            // Typing first segment of import path
-                            items.extend(self.get_import_completions(""));
-                        }
-                        Some(TokenVariant::Slash) => {
-                            // Typing a segment after slash in import path
-                            if let Some(path) = Self::collect_import_path(tokens, current_token) {
-                                // path includes current identifier; use parent path
-                                let parent = path.rsplitn(2, '/').last().unwrap_or("");
-                                items.extend(self.get_import_completions(&format!("{}/", parent)));
-                            }
-                        }
                         Some(TokenVariant::Colon) | Some(TokenVariant::Or) => {
                             items.extend(all_types());
                         }
@@ -503,6 +458,7 @@ impl LanguageServer for Backend {
                         ":".to_string(),
                         "@".to_string(),
                         "{".to_string(),
+                        "/".to_string(),
                         " ".to_string(),
                     ]),
                     all_commit_characters: None,
@@ -641,10 +597,10 @@ impl LanguageServer for Backend {
             let token = Self::find_token_at_position(tokens, position)?;
 
             // If cursor is on an import line, navigate to the imported file
-            if token.0 == TokenVariant::Identifier {
+            if token.0 == TokenVariant::Path {
                 for decl in ast.iter() {
-                    if let Declaration::Import { path, location } = decl {
-                        if token.1.l == location.l {
+                    if let Declaration::Import { path, .. } = decl {
+                        if path.join("/") == token.1.v {
                             let segments: Vec<&str> = path.iter().copied().collect();
                             if let Ok((_, abs_path)) = self.registry.resolve_import(&segments, None)
                             {
@@ -802,7 +758,7 @@ impl LanguageServer for Backend {
                     #[allow(deprecated)]
                     ast.iter()
                         .filter_map(|decl| match decl {
-                            Declaration::Import { .. } => None,
+                            Declaration::Import { .. } | Declaration::Custom { .. } => None,
                             Declaration::Type { name, .. } => Some(SymbolInformation {
                                 name: name.v.to_string(),
                                 kind: SymbolKind::STRUCT,
@@ -839,7 +795,7 @@ impl LanguageServer for Backend {
 
                     // Only allow renaming user-defined declarations
                     let is_user_defined = ast.iter().any(|decl| match decl {
-                        Declaration::Import { .. } => false,
+                        Declaration::Import { .. } | Declaration::Custom { .. } => false,
                         Declaration::Type { name, .. } => name.v == token.1.v,
                     });
 
@@ -873,7 +829,7 @@ impl LanguageServer for Backend {
                     let old_name = token.1.v;
 
                     let is_user_defined = ast.iter().any(|decl| match decl {
-                        Declaration::Import { .. } => false,
+                        Declaration::Import { .. } | Declaration::Custom { .. } => false,
                         Declaration::Type { name, .. } => name.v == old_name,
                     });
 

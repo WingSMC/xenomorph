@@ -50,6 +50,7 @@ impl<'src> Parser<'src> {
 
         if let Some(t) = self.peek() {
             if t.0 == variant {
+                self.step_forward();
                 return;
             }
         }
@@ -74,7 +75,7 @@ impl<'src> Parser<'src> {
                 severity: XenoDiagSeverity::Err,
                 location: self
                     .tokens
-                    .get(ind - 1)
+                    .get(ind.saturating_sub(1))
                     .map(|t| t.1.clone())
                     .unwrap_or_default(),
                 message: "Unexpected end of file.".to_string(),
@@ -124,6 +125,43 @@ impl<'src> Parser<'src> {
         Some(d)
     }
 
+    /// Expects the current token without consuming it on a mismatch. This is
+    /// useful for local recovery because a delimiter may be the unexpected
+    /// token and must remain available as a synchronization point.
+    #[must_use]
+    pub fn expect_at_current(&mut self, expected: TokenVariant) -> Option<&'src TokenData<'src>> {
+        let Some((actual, data)) = self.peek() else {
+            self.need_next();
+            return None;
+        };
+
+        if *actual != expected {
+            self.diagnostics.push(XenoDiagnostic {
+                location: data.clone(),
+                message: format!(
+                    "Expected {:?} at {} instead got {:?}.",
+                    expected, data, actual
+                ),
+                severity: XenoDiagSeverity::Err,
+            });
+            return None;
+        }
+
+        self.step_forward();
+        Some(data)
+    }
+
+    /// Advances to the first synchronization token without consuming it.
+    pub fn recover_to_any(&mut self, variants: &[TokenVariant]) -> Option<TokenVariant> {
+        while let Some((variant, _)) = self.peek() {
+            if variants.contains(variant) {
+                return Some(*variant);
+            }
+            self.step_forward();
+        }
+        None
+    }
+
     pub fn parse_list<T>(
         &mut self,
         opener: TokenVariant,
@@ -134,7 +172,8 @@ impl<'src> Parser<'src> {
         self.expect(opener)?;
 
         let mut types = Vec::new();
-        while let Some(ty) = member_parser(self) {
+        while !closer.is_some_and(|closer| self.peek_is(closer)) {
+            let ty = member_parser(self)?;
             types.push(ty);
 
             if !self.peek_is(sep) {

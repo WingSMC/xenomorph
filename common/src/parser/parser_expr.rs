@@ -1,5 +1,6 @@
 use bigdecimal::BigDecimal;
 use num_bigint::BigInt;
+use std::fmt;
 
 use crate::{
     lexer::{Token, TokenVariant},
@@ -8,7 +9,6 @@ use crate::{
     TokenData, XenoDiagSeverity, XenoDiagnostic,
 };
 
-#[derive(Debug)]
 pub enum Declaration<'src> {
     Import {
         path: Vec<&'src str>,
@@ -27,8 +27,50 @@ pub enum Declaration<'src> {
         decl_id: &'static str,
         docs: Option<&'src str>,
         name: Option<&'src TokenData<'src>>,
-        value: Box<dyn std::any::Any>,
+        value: Box<dyn std::any::Any + Send + Sync>,
     },
+}
+
+impl fmt::Debug for Declaration<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Declaration::Import { path, location } => f
+                .debug_struct("Import")
+                .field("path", path)
+                .field("location", location)
+                .finish(),
+            Declaration::Type {
+                docs,
+                name,
+                generics,
+                ty,
+                from,
+                to,
+            } => f
+                .debug_struct("Type")
+                .field("docs", docs)
+                .field("name", name)
+                .field("generics", generics)
+                .field("ty", ty)
+                .field("from", from)
+                .field("to", to)
+                .finish(),
+            Declaration::Custom {
+                plugin_id,
+                decl_id,
+                docs,
+                name,
+                ..
+            } => f
+                .debug_struct("Custom")
+                .field("plugin_id", plugin_id)
+                .field("decl_id", decl_id)
+                .field("docs", docs)
+                .field("name", name)
+                .field("value", &"<opaque>")
+                .finish(),
+        }
+    }
 }
 
 // pub type BinaryExpr<'src> = Box<(Expr<'src>, Expr<'src>)>;
@@ -137,7 +179,7 @@ pub enum SimpleType<'src> {
     Identifier(&'src TokenData<'src>),
     OptionalIdentifier(&'src TokenData<'src>),
 
-    /** e.g. uint32[] */
+    /** Postfix array syntax, e.g. uint32[] */
     Array(&'src TokenData<'src>),
     OptionalArray(&'src TokenData<'src>),
 }
@@ -187,7 +229,7 @@ impl<'src> Declaration<'src> {
         let dec = match var {
             TokenVariant::Type => Declaration::parse_type_declaration(parser, d, docs),
             TokenVariant::Import => Declaration::parse_import_declaration(parser, d, docs),
-            TokenVariant::Validator | _ => {
+            _ => {
                 parser.diagnostics.push(XenoDiagnostic {
                     location: d.clone(),
                     message: format!("Unknown declaration at {}, ({:?}).", d, var),
@@ -266,7 +308,6 @@ impl<'src> Declaration<'src> {
             });
         }
 
-        parser.expect(TokenVariant::Import)?;
         // TODO can this be used with LSP for path recommendations?
         let path_tok = parser.expect(TokenVariant::Path)?;
         let path = path_tok.v.split('/').collect::<Vec<&str>>();
@@ -338,7 +379,7 @@ impl<'src> Type<'src> {
         parser.expect(TokenVariant::LCurly)?;
 
         let mut fields = Vec::new();
-        loop {
+        while !parser.peek_is(TokenVariant::RCurly) && parser.peek().is_some() {
             let docs = if let Some((TokenVariant::Documentation, d)) = parser.peek() {
                 parser.step_forward();
                 Some(d)
@@ -346,20 +387,46 @@ impl<'src> Type<'src> {
                 None
             };
 
-            if let Some((TokenVariant::Identifier, d)) = parser.peek() {
-                parser.step_forward();
-                parser.expect(TokenVariant::Colon)?;
-                let ty = SimpleType::parse(parser)?;
-                fields.push((d, ty, docs));
-            } else {
-                if docs.is_some() {
+            if parser.peek_is(TokenVariant::RCurly) {
+                if let Some(docs) = docs {
                     parser.diagnostics.push(XenoDiagnostic {
-                        location: docs.unwrap().clone(),
+                        location: docs.clone(),
                         message: "Documentation comment without a field.".to_string(),
                         severity: XenoDiagSeverity::Warn,
                     });
                 }
                 break;
+            }
+
+            let field = 'field: {
+                let Some(key) = parser.expect_at_current(TokenVariant::Identifier) else {
+                    break 'field None;
+                };
+                if parser.expect_at_current(TokenVariant::Colon).is_none() {
+                    break 'field None;
+                }
+                let Some(ty) = SimpleType::parse(parser) else {
+                    break 'field None;
+                };
+                Some((key, ty, docs))
+            };
+
+            if let Some(field) = field {
+                fields.push(field);
+                if parser.peek_is(TokenVariant::RCurly) {
+                    continue;
+                }
+                if parser.skip_if(TokenVariant::Comma) {
+                    continue;
+                }
+
+                let _ = parser.expect_at_current(TokenVariant::Comma);
+            }
+
+            match parser.recover_to_any(&[TokenVariant::Comma, TokenVariant::RCurly]) {
+                Some(TokenVariant::Comma) => parser.step_forward(),
+                Some(TokenVariant::RCurly) | None => break,
+                _ => unreachable!(),
             }
         }
 
@@ -385,19 +452,18 @@ impl<'src> SimpleType<'src> {
 
         let t = parser.peek()?;
         match t.0 {
-            TokenVariant::LBracket => {
-                parser.step_forward();
-                parser.expect(TokenVariant::RBracket)?;
-                let ident = parser.expect(TokenVariant::Identifier)?;
-
-                if is_optional {
-                    Some(SimpleType::OptionalArray(&ident))
-                } else {
-                    Some(SimpleType::Array(&ident))
-                }
-            }
             TokenVariant::Identifier => {
                 parser.step_forward();
+
+                if parser.skip_if(TokenVariant::LBracket) {
+                    parser.expect_at_current(TokenVariant::RBracket)?;
+
+                    if is_optional {
+                        return Some(SimpleType::OptionalArray(&t.1));
+                    } else {
+                        return Some(SimpleType::Array(&t.1));
+                    }
+                }
 
                 if is_optional {
                     Some(SimpleType::OptionalIdentifier(&t.1))

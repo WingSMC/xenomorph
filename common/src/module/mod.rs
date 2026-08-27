@@ -128,10 +128,16 @@ impl XenoRegistry {
     pub fn load_workspace(generation_mode: bool) -> Result<XenoRegistry, Vec<ModuleDiagnostic>> {
         let reg = XenoRegistry::new(generation_mode).map_err(|e| vec![e])?;
         let errs = reg.load_module(&[&reg.entry], true, None);
-        if !errs.is_empty() {
+        if Self::has_fatal_diagnostics(&errs) {
             return Err(errs);
         }
         Ok(reg)
+    }
+
+    fn has_fatal_diagnostics(diagnostics: &[ModuleDiagnostic]) -> bool {
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == XenoDiagSeverity::Err)
     }
 
     // ── Path utilities ──────────────────────────────────────────────
@@ -653,14 +659,7 @@ impl XenoRegistry {
                 Ok(ast
                     .iter()
                     .filter_map(|d| match d {
-                        Declaration::Type {
-                            docs,
-                            name,
-                            generics,
-                            ty,
-                            from,
-                            to,
-                        } => Some((
+                        Declaration::Type { docs, name, .. } => Some((
                             name.v,
                             DeclarationInfo {
                                 name: name.v.to_string(),
@@ -695,5 +694,38 @@ impl XenoRegistry {
         md.with_imports_mut(|imports| *imports = import_list);
 
         Ok(md)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ErrorPhase, ModuleDiagnostic};
+    use crate::{module::XenoRegistry, XenoDiagSeverity};
+
+    fn diagnostic(severity: XenoDiagSeverity) -> ModuleDiagnostic {
+        ModuleDiagnostic {
+            module_path: "test".to_string(),
+            message: "diagnostic".to_string(),
+            location: None,
+            phase: ErrorPhase::Parser,
+            severity,
+        }
+    }
+
+    #[test]
+    fn warning_and_info_diagnostics_are_not_fatal() {
+        let diagnostics = vec![
+            diagnostic(XenoDiagSeverity::Warn),
+            diagnostic(XenoDiagSeverity::Info),
+        ];
+
+        assert!(!XenoRegistry::has_fatal_diagnostics(&diagnostics));
+    }
+
+    #[test]
+    fn error_diagnostics_are_fatal() {
+        let diagnostics = vec![diagnostic(XenoDiagSeverity::Err)];
+
+        assert!(XenoRegistry::has_fatal_diagnostics(&diagnostics));
     }
 }
