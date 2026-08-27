@@ -1,5 +1,5 @@
 use crate::{
-    parser::{AnonymType, Expr, TypeList},
+    parser::{Expr, TypeList, XenoType},
     semantic::AnalyzerListener,
     TokenData, XenoDiagnostic,
 };
@@ -34,19 +34,11 @@ impl IfChainValidator {
 // ── Built-in listeners ──────────────────────────────────────────────
 
 impl<'src> AnalyzerListener<'src> for IfChainValidator {
-    fn on_before_type(
-        &mut self,
-        _exprs: &AnonymType<'src>,
-        _errors: &mut Vec<XenoDiagnostic<'src>>,
-    ) {
+    fn on_before_type(&mut self, _exprs: &XenoType<'src>, _errors: &mut Vec<XenoDiagnostic<'src>>) {
         self.stack.push(IfChainState::None);
     }
 
-    fn on_after_type(
-        &mut self,
-        _exprs: &AnonymType<'src>,
-        _errors: &mut Vec<XenoDiagnostic<'src>>,
-    ) {
+    fn on_after_type(&mut self, _exprs: &XenoType<'src>, _errors: &mut Vec<XenoDiagnostic<'src>>) {
         self.stack.pop();
     }
 

@@ -47,6 +47,9 @@ pub struct DeclarationInfo {
     pub column: u32,
     /// Length of the declaration name.
     pub name_len: u32,
-    /// For struct declarations, the fields of the struct.
-    pub fields: Option<Vec<(String, String)>>,
+    // TODO / For struct declarations, the fields of the struct.
+    // TODO figure this out
+    // pub fields: Option<Vec<(TokenData<'_>, SimpleType<'_>)>>,
+    // pub parents: &
+    // pub ty,
 }

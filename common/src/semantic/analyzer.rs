@@ -6,7 +6,7 @@ use crate::plugins::ListenerFactory;
 use crate::{
     config::PluginConfigs,
     module::ModuleData,
-    parser::{AnonymType, Declaration, Expr, KeyValExpr, TypeList},
+    parser::{Declaration, Expr, KeyValExpr, TypeList, XenoType},
     plugins::XenoPlugin,
     semantic::{
         annotation_validator::AnnotationValidator, if_validator::IfChainValidator,
@@ -90,9 +90,8 @@ pub trait AnalyzerListener<'src> {
     // }
     // fn on_after_custom(&mut self, errors: &mut Vec<XenoError<'src>>) {}
 
-    fn on_before_type(&mut self, exprs: &AnonymType<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {
-    }
-    fn on_after_type(&mut self, exprs: &AnonymType<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {}
+    fn on_before_type(&mut self, exprs: &XenoType<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {}
+    fn on_after_type(&mut self, exprs: &XenoType<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {}
 
     fn on_before_expr(&mut self, expr: &Expr<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {}
     fn on_after_expr(&mut self, expr: &Expr<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {}
@@ -113,14 +112,14 @@ pub trait AnalyzerListener<'src> {
     fn on_before_field(
         &mut self,
         key: &TokenData<'src>,
-        value: &AnonymType<'src>,
+        value: &XenoType<'src>,
         errors: &mut Vec<XenoDiagnostic<'src>>,
     ) {
     }
     fn on_after_field(
         &mut self,
         key: &TokenData<'src>,
-        value: &AnonymType<'src>,
+        value: &XenoType<'src>,
         errors: &mut Vec<XenoDiagnostic<'src>>,
     ) {
     }
@@ -339,7 +338,7 @@ fn walk_decl<'src>(
         l.on_before_decl(decl, errors);
     }
     match decl {
-        Declaration::TypeDecl { t, .. } => {
+        Declaration::Type { ty: t, .. } => {
             walk_type(ls, t, errors);
         }
         _ => {} // Declaration::Custom {
@@ -357,7 +356,7 @@ fn walk_decl<'src>(
 
 fn walk_type<'src>(
     ls: &mut Listeners<'src>,
-    exprs: &AnonymType<'src>,
+    exprs: &XenoType<'src>,
     errors: &mut Vec<XenoDiagnostic<'src>>,
 ) {
     for l in ls.iter_mut() {
@@ -501,7 +500,9 @@ impl XenoDefNode<'_> {
 
         for declaration in ast {
             match declaration {
-                Declaration::TypeDecl { name, docs, t, .. } => {
+                Declaration::Type {
+                    name, docs, ty: t, ..
+                } => {
                     let node = XenoDefNode {
                         name: name.v,
                         docs: *docs,

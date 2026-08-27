@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    parser::{AnonymType, BinaryExpr, Declaration, Expr, Literal, NumberType, TypeList},
+    parser::{BinaryExpr, Declaration, Expr, Literal, NumberType, TypeList, XenoType},
     semantic::{
         is_type_compatible, AnalyzerListener, ScopeInfo, XenoAnnotation, XenoParameterType,
         XenoType, BUILTIN_ANNOTATIONS, BUILTIN_TYPES,
@@ -50,7 +50,7 @@ impl AnnotationValidator {
         self.type_stack.last().map_or(&[], Vec::as_slice)
     }
 
-    fn resolve_types(&self, exprs: &AnonymType<'_>) -> Vec<&'static XenoType> {
+    fn resolve_types(&self, exprs: &XenoType<'_>) -> Vec<&'static XenoType> {
         let mut types = Vec::new();
         let mut visited_aliases = HashSet::new();
         for expr in exprs {
@@ -135,7 +135,7 @@ impl AnnotationValidator {
         }
     }
 
-    fn collect_type_hints(&self, exprs: &AnonymType<'_>) -> Vec<TypeHint> {
+    fn collect_type_hints(&self, exprs: &XenoType<'_>) -> Vec<TypeHint> {
         let mut hints = Vec::new();
         for expr in exprs {
             self.collect_type_hint(expr, &mut hints);
@@ -251,7 +251,7 @@ impl AnnotationValidator {
         }
     }
 
-    fn arg_matches(&self, arg: &AnonymType<'_>, expected: XenoParameterType) -> bool {
+    fn arg_matches(&self, arg: &XenoType<'_>, expected: XenoParameterType) -> bool {
         match expected {
             XenoParameterType::None => arg.is_empty(),
             XenoParameterType::Expression => !arg.is_empty(),
@@ -302,7 +302,7 @@ impl AnnotationValidator {
         }
     }
 
-    fn arg_location<'src>(arg: &AnonymType<'src>) -> Option<TokenData<'src>> {
+    fn arg_location<'src>(arg: &XenoType<'src>) -> Option<TokenData<'src>> {
         arg.first().map(Self::expr_location)
     }
 
@@ -333,7 +333,7 @@ impl AnnotationValidator {
         }
     }
 
-    fn arg_type_name(arg: &AnonymType<'_>) -> &'static str {
+    fn arg_type_name(arg: &XenoType<'_>) -> &'static str {
         match arg.as_slice() {
             [] => "no argument",
             [Expr::Literal(Literal::Number(NumberType::Int(_, _)))] => "integer literal",
@@ -388,26 +388,18 @@ impl<'src> AnalyzerListener<'src> for AnnotationValidator {
         self.type_aliases.clear();
 
         for declaration in ast {
-            if let Declaration::TypeDecl { name, t, .. } = declaration {
+            if let Declaration::Type { name, ty: t, .. } = declaration {
                 let hints = self.collect_type_hints(t);
                 self.type_aliases.insert(name.v.to_string(), hints);
             }
         }
     }
 
-    fn on_before_type(
-        &mut self,
-        exprs: &AnonymType<'src>,
-        _errors: &mut Vec<XenoDiagnostic<'src>>,
-    ) {
+    fn on_before_type(&mut self, exprs: &XenoType<'src>, _errors: &mut Vec<XenoDiagnostic<'src>>) {
         self.type_stack.push(self.resolve_types(exprs));
     }
 
-    fn on_after_type(
-        &mut self,
-        _exprs: &AnonymType<'src>,
-        _errors: &mut Vec<XenoDiagnostic<'src>>,
-    ) {
+    fn on_after_type(&mut self, _exprs: &XenoType<'src>, _errors: &mut Vec<XenoDiagnostic<'src>>) {
         self.type_stack.pop();
     }
 
@@ -487,20 +479,20 @@ mod tests {
         ];
         let from = TokenData::default();
         let ast = vec![
-            Declaration::TypeDecl {
+            Declaration::Type {
                 docs: None,
                 name: &a_name,
                 from: &from,
-                t: vec![Expr::Literal(Literal::String(
+                ty: vec![Expr::Literal(Literal::String(
                     "literal".to_string(),
                     &string_literal,
                 ))],
             },
-            Declaration::TypeDecl {
+            Declaration::Type {
                 docs: None,
                 name: &b_name,
                 from: &from,
-                t: b_type.clone(),
+                ty: b_type.clone(),
             },
         ];
         let mut validator = AnnotationValidator::new(&scope());
@@ -545,17 +537,17 @@ mod tests {
         ];
         let from = TokenData::default();
         let ast = vec![
-            Declaration::TypeDecl {
+            Declaration::Type {
                 docs: None,
                 name: &a_name,
                 from: &from,
-                t: vec![Expr::Identifier(&u8_type)],
+                ty: vec![Expr::Identifier(&u8_type)],
             },
-            Declaration::TypeDecl {
+            Declaration::Type {
                 docs: None,
                 name: &b_name,
                 from: &from,
-                t: b_type.clone(),
+                ty: b_type.clone(),
             },
         ];
         let mut validator = AnnotationValidator::new(&scope());

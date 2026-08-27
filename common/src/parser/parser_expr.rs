@@ -1,10 +1,12 @@
-use crate::TokenData;
-use std::{/* any::Any, */ fmt};
+use bigdecimal::BigDecimal;
+use num_bigint::BigInt;
 
-pub type BinaryExpr<'src> = Box<(Expr<'src>, Expr<'src>)>;
-pub type KeyValExpr<'src> = (&'src TokenData<'src>, AnonymType<'src>);
-pub type AnonymType<'src> = Vec<Expr<'src>>;
-pub type TypeList<'src> = Vec<AnonymType<'src>>;
+use crate::{
+    lexer::{Token, TokenVariant},
+    parser::Parser,
+    utils::extract_documentation,
+    TokenData, XenoDiagSeverity, XenoDiagnostic,
+};
 
 #[derive(Debug)]
 pub enum Declaration<'src> {
@@ -12,211 +14,479 @@ pub enum Declaration<'src> {
         path: Vec<&'src str>,
         location: &'src TokenData<'src>,
     },
-    TypeDecl {
+    Type {
         docs: Option<&'src str>,
         name: &'src TokenData<'src>,
+        generics: Option<Vec<(&'src TokenData<'src>, Option<&'src TokenData<'src>>)>>,
+        ty: XenoType<'src>,
         from: &'src TokenData<'src>,
-        // TODO for boundary: location of the entire declaration, for better error messages and content finding
-        // to: Location
-        t: Vec<Expr<'src>>,
+        to: &'src TokenData<'src>,
     },
-    // Custom {
-    //     plugin_id: &'static str,
-    //     decl_id: &'static str,
-    //     docs: Option<&'src str>,
-    //     name: Option<&'src TokenData<'src>>,
-    //     value: Box<dyn Any>,
-    // },
+    Custom {
+        plugin_id: &'static str,
+        decl_id: &'static str,
+        docs: Option<&'src str>,
+        name: Option<&'src TokenData<'src>>,
+        value: Box<dyn std::any::Any>,
+    },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum NumberType<'src> {
-    Int(i64, &'src TokenData<'src>),
-    Float(f64, &'src TokenData<'src>),
+// pub type BinaryExpr<'src> = Box<(Expr<'src>, Expr<'src>)>;
+// #[derive(Debug, Clone, Copy, PartialEq)]
+// pub enum BinaryExprType {
+//     Union,
+//     Intersection,
+//     Difference,
+//     SymmetricDifference,
+//     // Xor,
+//     // Range,
+//     // Add,
+//     // Remove,
+// }
+
+/**
+ * Something on the right side of a type declaration
+ * Type is either the parent type or a new type,
+ * and the annotations are the constraints/meta-info on the type.
+ */
+pub type XenoType<'src> = (Type<'src>, Vec<Annotation<'src>>);
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Annotation<'src> {
+    pub ident: &'src TokenData<'src>,
+    pub params: Vec<Expr<'src>>,
+}
+
+impl<'src> Annotation<'src> {
+    pub fn get_last_token(&self) -> &'src TokenData<'src> {
+        self.params
+            .last()
+            .and_then(|e| e.get_last_token())
+            .unwrap_or(self.ident)
+    }
+
+    pub fn parse_annotations(parser: &mut Parser<'src>) -> Vec<Annotation<'src>> {
+        let mut annotations = Vec::new();
+        while let Some((TokenVariant::At, _)) = parser.peek() {
+            Self::parse_annotation(parser).map(|a| annotations.push(a));
+        }
+        annotations
+    }
+
+    pub fn parse_annotation(parser: &mut Parser<'src>) -> Option<Annotation<'src>> {
+        parser.expect(TokenVariant::At)?;
+        let ident = parser.expect(TokenVariant::Identifier)?;
+
+        let params = if let Some((TokenVariant::LParen, _)) = parser.peek() {
+            parser.parse_list(
+                TokenVariant::LParen,
+                TokenVariant::Comma,
+                Some(TokenVariant::RParen),
+                Expr::parse,
+            )?
+        } else {
+            Vec::new()
+        };
+
+        Some(Annotation { ident, params })
+    }
+}
+
+/**
+ * A type expression (or literal expression)
+ */
+#[derive(Debug, Clone, PartialEq)]
+pub enum Type<'src> {
+    /** Read `SimpleType` docs */
+    Simple(SimpleType<'src>),
+
+    /** e.g. [Type1, Type2, Type3] */
+    Tuple(Vec<SimpleType<'src>>),
+    /**
+    A set which can contain any number of types (or literals)
+    where types must be partially ordered to ensure uniqueness,
+    try to not rely on ordering.
+    The inferred set type will be the lowest common supertype of all the types in the set.
+
+    e.g. set ["Blue", "Red", "Green"] // if this is translated to TS this will become a Set<string>
+    */
+    Set(Vec<SimpleType<'src>>),
+
+    /** e.g. { field1: Type1, field2: Type2 } */
+    Struct(Vec<KeyValExpr<'src>>),
+    /**
+    List of mutually exclusive variants, each with a name and type.
+
+    enum { variant1: Type1, variant2: Type2 }
+    */
+    Enum(Vec<KeyValExpr<'src>>),
+    /** e.g. | Type1 | Type2 | Type3 */
+    Sum(Vec<SimpleType<'src>>),
+    /** e.g. & Type1 & Type2 & Type3 */
+    Intersection(Vec<SimpleType<'src>>),
+}
+
+/** Used for struct fields, sets, tuples */
+#[derive(Debug, Clone, PartialEq)]
+pub enum SimpleType<'src> {
+    /** e.g. 42, 3.141592653, true, "hello" */
+    Literal(Literal<'src>),
+    OptionalLiteral(Literal<'src>),
+
+    /** name of a type */
+    Identifier(&'src TokenData<'src>),
+    OptionalIdentifier(&'src TokenData<'src>),
+
+    /** e.g. uint32[] */
+    Array(&'src TokenData<'src>),
+    OptionalArray(&'src TokenData<'src>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Literal<'src> {
-    Number(NumberType<'src>),
+    Int(BigInt, &'src TokenData<'src>),
+    Float(BigDecimal, &'src TokenData<'src>),
     String(String, &'src TokenData<'src>),
     Boolean(bool, &'src TokenData<'src>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum BinaryExprType {
-    Union,
-    Intersection,
-    Difference,
-    SymmetricDifference,
-    Or,
-    Xor,
-    Range,
-    Add,
-    Remove,
-}
+pub type KeyValExpr<'src> = (
+    // field identifier
+    &'src TokenData<'src>,
+    // field type
+    SimpleType<'src>,
+    // documentation comment for the field
+    Option<&'src TokenData<'src>>,
+);
 
-type TokenRef<'src> = &'src TokenData<'src>;
-
-#[repr(u8)]
+/** Used in annotation params */
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr<'src> {
-    Identifier(TokenRef<'src>),
-    Literal(Literal<'src>),
-    Regex(TokenRef<'src>),
-    Annotation(TokenRef<'src>, TypeList<'src>),
-    Not(Box<Expr<'src>>),
-    FieldAccess(TokenRef<'src>),
-    BinaryExpr(BinaryExprType, BinaryExpr<'src>),
-
-    List(TypeList<'src>),
-    Set(TypeList<'src>),
-    Array(TokenRef<'src>),
-    Struct(Vec<KeyValExpr<'src>>),
-    Enum(Vec<KeyValExpr<'src>>),
+    /// e.g. /regex/
+    Regex(&'src TokenData<'src>),
+    /// Identifier with params, e.g. @annotation(param1, param2)
+    Annotation(Annotation<'src>),
+    /// e.g. uint32, "asd", [Type1, Type2], { field1: Type1, field2: Type2 }
+    Type(Type<'src>),
 }
 
-impl<'src> fmt::Display for Declaration<'src> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Declaration::Import { path, .. } => {
-                write!(f, "import {}", path.join("/"))
+impl<'src> Declaration<'src> {
+    pub fn parse(parser: &mut Parser<'src>) -> Option<Declaration<'src>> {
+        let token = parser.need_next()?;
+        let docs = match token {
+            (TokenVariant::Documentation, data) => Some(extract_documentation(data)),
+            _ => None,
+        };
+
+        let (var, d) = if docs.is_some() {
+            parser.need_next()?
+        } else {
+            token
+        };
+
+        let dec = match var {
+            TokenVariant::Type => Declaration::parse_type_declaration(parser, d, docs),
+            TokenVariant::Import => Declaration::parse_import_declaration(parser, d, docs),
+            TokenVariant::Validator | _ => {
+                parser.diagnostics.push(XenoDiagnostic {
+                    location: d.clone(),
+                    message: format!("Unknown declaration at {}, ({:?}).", d, var),
+                    severity: XenoDiagSeverity::Err,
+                });
+                return None;
             }
-            Declaration::TypeDecl { name, t, .. } => {
-                write!(f, "type {} = ", name.v)?;
-                for (i, item) in t.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, " | ")?;
-                    }
-                    write!(f, "{}", item)?;
+        }?;
+
+        parser.expect(TokenVariant::Semicolon)?;
+
+        Some(dec)
+    }
+
+    pub fn parse_type_declaration(
+        parser: &mut Parser<'src>,
+        from: &'src TokenData<'src>,
+        docs: Option<&'src str>,
+    ) -> Option<Declaration<'src>> {
+        let name = parser.expect(TokenVariant::Identifier)?;
+
+        let generics = if let Some((TokenVariant::Lt, _)) = parser.peek() {
+            parser.step_forward();
+
+            let mut generics = Vec::new();
+            while let Some((TokenVariant::Identifier, d)) = parser.peek() {
+                parser.step_forward();
+
+                let constraint = if let Some((TokenVariant::Colon, _)) = parser.peek() {
+                    parser.step_forward();
+                    let ident = parser.expect(TokenVariant::Identifier)?;
+                    Some(ident)
+                } else {
+                    None
+                };
+                parser.skip_if(TokenVariant::Comma);
+
+                generics.push((d, constraint));
+            }
+            parser.expect(TokenVariant::Gt)?;
+            Some(generics)
+        } else {
+            None
+        };
+
+        parser.expect(TokenVariant::Eq)?;
+
+        let core_type = Type::parse(parser)?;
+        let anns = Annotation::parse_annotations(parser);
+
+        let t = (core_type, anns);
+        let to =
+            t.1.last()
+                .map(|a| a.get_last_token())
+                .or_else(|| t.0.get_last_token())
+                .unwrap_or(from);
+        Some(Declaration::Type {
+            docs,
+            name,
+            generics,
+            ty: t,
+            from,
+            to,
+        })
+    }
+    pub fn parse_import_declaration(
+        parser: &mut Parser<'src>,
+        location: &'src TokenData<'src>,
+        docs: Option<&'src str>,
+    ) -> Option<Declaration<'src>> {
+        if docs.is_some() {
+            parser.diagnostics.push(XenoDiagnostic {
+                location: location.clone(),
+                message: "Import declarations cannot have documentation comments.".to_string(),
+                severity: XenoDiagSeverity::Info,
+            });
+        }
+
+        parser.expect(TokenVariant::Import)?;
+        // TODO can this be used with LSP for path recommendations?
+        let path_tok = parser.expect(TokenVariant::Path)?;
+        let path = path_tok.v.split('/').collect::<Vec<&str>>();
+
+        Some(Declaration::Import { path, location })
+    }
+}
+
+impl<'src> Type<'src> {
+    pub fn get_last_token(&self) -> Option<&'src TokenData<'src>> {
+        match self {
+            Type::Simple(ty) => Some(ty.get_last_token()),
+            Type::Struct(fs) | Type::Enum(fs) => fs.last().map(|f| f.1.get_last_token()),
+            Type::Tuple(ts) | Type::Set(ts) | Type::Intersection(ts) | Type::Sum(ts) => {
+                ts.last().map(|t| t.get_last_token())
+            }
+        }
+    }
+
+    pub fn parse(parser: &mut Parser<'src>) -> Option<Type<'src>> {
+        let (variant, _) = parser.peek()?;
+        match variant {
+            TokenVariant::Set => Self::parse_set(parser),
+            TokenVariant::LBracket => Self::parse_tuple(parser).map(Type::Tuple),
+
+            TokenVariant::Enum => Self::parse_enum(parser),
+            TokenVariant::LCurly => Self::parse_struct(parser).map(Type::Struct),
+
+            TokenVariant::And => parser
+                .parse_list(
+                    TokenVariant::And,
+                    TokenVariant::And,
+                    None,
+                    SimpleType::parse,
+                )
+                .map(Type::Intersection),
+            TokenVariant::Or => parser
+                .parse_list(TokenVariant::Or, TokenVariant::Or, None, SimpleType::parse)
+                .map(Type::Sum),
+
+            _ => SimpleType::parse(parser).map(Type::Simple),
+        }
+    }
+
+    fn parse_set(parser: &mut Parser<'src>) -> Option<Type<'src>> {
+        parser.expect(TokenVariant::Set)?;
+
+        let fs = Self::parse_tuple(parser)?;
+        Some(Type::Set(fs))
+    }
+
+    fn parse_tuple(parser: &mut Parser<'src>) -> Option<Vec<SimpleType<'src>>> {
+        parser.parse_list(
+            TokenVariant::LBracket,
+            TokenVariant::Comma,
+            Some(TokenVariant::RBracket),
+            SimpleType::parse,
+        )
+    }
+
+    fn parse_enum(parser: &mut Parser<'src>) -> Option<Type<'src>> {
+        parser.expect(TokenVariant::Enum)?;
+
+        let fs = Self::parse_struct(parser)?;
+        Some(Type::Enum(fs))
+    }
+
+    fn parse_struct(parser: &mut Parser<'src>) -> Option<Vec<KeyValExpr<'src>>> {
+        parser.expect(TokenVariant::LCurly)?;
+
+        let mut fields = Vec::new();
+        loop {
+            let docs = if let Some((TokenVariant::Documentation, d)) = parser.peek() {
+                parser.step_forward();
+                Some(d)
+            } else {
+                None
+            };
+
+            if let Some((TokenVariant::Identifier, d)) = parser.peek() {
+                parser.step_forward();
+                parser.expect(TokenVariant::Colon)?;
+                let ty = SimpleType::parse(parser)?;
+                fields.push((d, ty, docs));
+            } else {
+                if docs.is_some() {
+                    parser.diagnostics.push(XenoDiagnostic {
+                        location: docs.unwrap().clone(),
+                        message: "Documentation comment without a field.".to_string(),
+                        severity: XenoDiagSeverity::Warn,
+                    });
                 }
-                write!(f, "")
-            } // Declaration::Custom {
-              //     plugin_id, decl_id, ..
-              // } => {
-              //     write!(f, "<custom: {}:{}>", plugin_id, decl_id)
-              // }
+                break;
+            }
+        }
+
+        parser.expect(TokenVariant::RCurly)?;
+
+        Some(fields)
+    }
+}
+
+impl<'src> SimpleType<'src> {
+    pub fn get_last_token(&self) -> &'src TokenData<'src> {
+        match self {
+            SimpleType::Literal(l) | SimpleType::OptionalLiteral(l) => l.get_last_token(),
+            SimpleType::Identifier(d)
+            | SimpleType::OptionalIdentifier(d)
+            | SimpleType::Array(d)
+            | SimpleType::OptionalArray(d) => d,
+        }
+    }
+
+    pub fn parse(parser: &mut Parser<'src>) -> Option<SimpleType<'src>> {
+        let is_optional = parser.skip_if(TokenVariant::Question);
+
+        let t = parser.peek()?;
+        match t.0 {
+            TokenVariant::LBracket => {
+                parser.step_forward();
+                parser.expect(TokenVariant::RBracket)?;
+                let ident = parser.expect(TokenVariant::Identifier)?;
+
+                if is_optional {
+                    Some(SimpleType::OptionalArray(&ident))
+                } else {
+                    Some(SimpleType::Array(&ident))
+                }
+            }
+            TokenVariant::Identifier => {
+                parser.step_forward();
+
+                if is_optional {
+                    Some(SimpleType::OptionalIdentifier(&t.1))
+                } else {
+                    Some(SimpleType::Identifier(&t.1))
+                }
+            }
+
+            _ => Literal::parse(parser, &t)
+                .map(|l| {
+                    if is_optional {
+                        SimpleType::OptionalLiteral(l)
+                    } else {
+                        SimpleType::Literal(l)
+                    }
+                })
+                .or_else(|| {
+                    parser.diagnostics.push(XenoDiagnostic {
+                        location: t.1.clone(),
+                        message: format!("Unexpected token {:?} in simple type expression.", t.0),
+                        severity: XenoDiagSeverity::Err,
+                    });
+                    None
+                }),
         }
     }
 }
 
-impl<'src> fmt::Display for NumberType<'src> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl<'src> Literal<'src> {
+    pub fn get_last_token(&self) -> &'src TokenData<'src> {
         match self {
-            NumberType::Int(n, _) => write!(f, "{}: Int", n),
-            NumberType::Float(x, _) => write!(f, "{}: Float", x),
+            Literal::Int(_, td)
+            | Literal::Float(_, td)
+            | Literal::String(_, td)
+            | Literal::Boolean(_, td) => *td,
         }
     }
+
+    pub fn parse(parser: &mut Parser<'src>, t: &'src Token<'src>) -> Option<Literal<'src>> {
+        let res = match t.0 {
+            TokenVariant::True => Literal::Boolean(true, &t.1),
+            TokenVariant::False => Literal::Boolean(false, &t.1),
+            TokenVariant::String => Literal::String(t.1.v[1..t.1.v.len() - 1].to_string(), &t.1),
+            TokenVariant::Number => Self::parse_number(&t.1)
+                .map_err(|e| parser.diagnostics.push(e))
+                .ok()?,
+            _ => return None,
+        };
+        parser.step_forward();
+        Some(res)
+    }
+
+    fn parse_number(d: &'src TokenData<'src>) -> Result<Literal<'src>, XenoDiagnostic<'src>> {
+        let has_dot = d.v.contains('.');
+        if has_dot {
+            d.v.parse::<BigDecimal>()
+                .map(|num| Literal::Float(num, d))
+                .map_err(|e| e.to_string())
+        } else {
+            d.v.parse::<BigInt>()
+                .map(|num| Literal::Int(num, d))
+                .map_err(|e| e.to_string())
+        }
+        .map_err(|e| XenoDiagnostic {
+            location: d.clone(),
+            message: format!("Error parsing number: {}", e),
+            severity: XenoDiagSeverity::Err,
+        })
+    }
 }
 
-impl<'src> fmt::Display for Literal<'src> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl<'src> Expr<'src> {
+    pub fn get_last_token(&self) -> Option<&'src TokenData<'src>> {
         match self {
-            Literal::Number(num) => write!(f, "{}", num),
-            Literal::String(s, _) => write!(f, "\"{}\"", s),
-            Literal::Boolean(b, _) => write!(f, "{}", b),
+            Expr::Regex(d) => Some(*d),
+            Expr::Annotation(a) => Some(a.get_last_token()),
+            Expr::Type(t) => t.get_last_token(),
         }
     }
-}
 
-impl<'src> fmt::Display for BinaryExprType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            BinaryExprType::Union => write!(f, "&"),
-            BinaryExprType::Intersection => write!(f, "*"),
-            BinaryExprType::Difference => write!(f, "-"),
-            BinaryExprType::SymmetricDifference => write!(f, "<>"),
-            BinaryExprType::Or => write!(f, "|"),
-            BinaryExprType::Xor => write!(f, "^"),
-            BinaryExprType::Range => write!(f, ".."),
-            BinaryExprType::Add => write!(f, "+"),
-            BinaryExprType::Remove => write!(f, "-"),
+    pub fn parse(parser: &mut Parser<'src>) -> Option<Expr<'src>> {
+        let t = parser.peek()?;
+        match t.0 {
+            TokenVariant::Regex => {
+                parser.step_forward();
+                Some(Expr::Regex(&t.1))
+            }
+            TokenVariant::At => Annotation::parse_annotation(parser).map(Expr::Annotation),
+            _ => Type::parse(parser).map(Expr::Type),
         }
     }
-}
-
-impl<'src> fmt::Display for Expr<'src> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Expr::Identifier(token) => write!(f, "{}", token.v),
-            Expr::Literal(lit) => write!(f, "{}", lit),
-
-            Expr::Array(tok) => write!(f, "{}[]", tok.v),
-
-            Expr::List(items) => {
-                write!(f, "[")?;
-                for (i, item) in items.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?
-                    }
-                    format_vector_expr(f, item)?;
-                }
-                write!(f, "]")
-            }
-
-            Expr::Struct(fields) => {
-                write!(f, "{{\n")?;
-                for (i, (key, value)) in fields.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?
-                    }
-                    write!(f, "{}:", key.v)?;
-                    format_vector_expr(f, value)?;
-                    write!(f, ",\n")?;
-                }
-                write!(f, "}}\n")
-            }
-
-            Expr::Enum(variants) => {
-                write!(f, "enum {{")?;
-                for (i, (key, value)) in variants.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?
-                    }
-                    write!(f, "{}({:?})", key.v, value)?;
-                }
-                write!(f, "}}")
-            }
-
-            Expr::BinaryExpr(t, binary_exp) => format_binary_expr(f, t, binary_exp),
-            Expr::Annotation(id, params) => {
-                write!(f, "@{}(", id.v)?;
-                for (i, item) in params.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?
-                    }
-                    format_vector_expr(f, item)?;
-                }
-                write!(f, ")")
-            }
-
-            Expr::Regex(token) => write!(f, "{}", token.v),
-            Expr::Not(expr) => write!(f, "!{}", expr),
-            Expr::FieldAccess(token) => write!(f, "${}", token.v),
-            Expr::Set(items) => {
-                write!(f, "{{")?;
-                for (i, item) in items.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?
-                    }
-                    format_vector_expr(f, item)?;
-                }
-                write!(f, "}}")
-            }
-        }
-    }
-}
-
-fn format_binary_expr<'src>(
-    f: &mut fmt::Formatter<'_>,
-    t: &BinaryExprType,
-    expr: &BinaryExpr,
-) -> fmt::Result {
-    write!(f, "({} {} {})", expr.0, t, expr.1)
-}
-
-fn format_vector_expr<'src>(f: &mut fmt::Formatter<'_>, expr: &Vec<Expr<'src>>) -> fmt::Result {
-    for (_, item) in expr.iter().enumerate() {
-        write!(f, " {}", item)?;
-    }
-    write!(f, "")
 }

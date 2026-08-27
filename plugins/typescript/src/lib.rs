@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use xenomorph_common::config::{ConfigValue, PluginConfigs};
 use xenomorph_common::parser::{
-    AnonymType, BinaryExprType, Declaration, Expr, KeyValExpr, Literal, NumberType,
+    BinaryExprType, Declaration, Expr, KeyValExpr, Literal, NumberType, XenoType,
 };
 use xenomorph_common::plugins::XenoPlugin;
 use xenomorph_common::semantic::{AnalyzerListener, ScopeInfo};
@@ -109,7 +109,9 @@ impl<'src> AnalyzerListener<'src> for TsGenerator {
         // Generate type declarations
         for decl in ast {
             match decl {
-                Declaration::TypeDecl { docs, name, t, .. } => {
+                Declaration::Type {
+                    docs, name, ty: t, ..
+                } => {
                     generate_type_decl(&mut self.out, docs, name.v, t);
                 }
                 _ => {}
@@ -394,7 +396,7 @@ fn expr_to_ts(expr: &Expr) -> Option<String> {
 
 // ── AnonymType helpers ──────────────────────────────────────────────
 
-fn anonym_type_to_ts(exprs: &AnonymType) -> String {
+fn anonym_type_to_ts(exprs: &XenoType) -> String {
     let parts: Vec<String> = exprs
         .iter()
         .filter(|e| !matches!(e, Expr::Annotation(..)))
@@ -411,7 +413,7 @@ fn anonym_type_to_ts(exprs: &AnonymType) -> String {
     }
 }
 
-fn anonym_type_to_ts_with_annotations(exprs: &AnonymType) -> (String, Vec<String>) {
+fn anonym_type_to_ts_with_annotations(exprs: &XenoType) -> (String, Vec<String>) {
     let mut type_parts = Vec::new();
     let mut annotations = Vec::new();
 
@@ -471,7 +473,7 @@ fn literal_to_ts(lit: &Literal) -> String {
     }
 }
 
-fn format_annotation(name: &str, args: &[AnonymType]) -> String {
+fn format_annotation(name: &str, args: &[XenoType]) -> String {
     if args.is_empty() || args.iter().all(|a| a.is_empty()) {
         format!("@{name}")
     } else {
@@ -480,7 +482,7 @@ fn format_annotation(name: &str, args: &[AnonymType]) -> String {
     }
 }
 
-fn is_nullable(exprs: &AnonymType) -> bool {
+fn is_nullable(exprs: &XenoType) -> bool {
     exprs.iter().any(|e| match e {
         Expr::Identifier(id) => id.v == "null",
         Expr::BinaryExpr(BinaryExprType::Union | BinaryExprType::Or, pair) => {
@@ -494,7 +496,7 @@ fn is_null_expr(expr: &Expr) -> bool {
     matches!(expr, Expr::Identifier(id) if id.v == "null")
 }
 
-fn is_all_literals(type_list: &[AnonymType]) -> bool {
+fn is_all_literals(type_list: &[XenoType]) -> bool {
     type_list.iter().all(|anon| {
         anon.iter()
             .all(|e| matches!(e, Expr::Literal(_) | Expr::Annotation(..)))

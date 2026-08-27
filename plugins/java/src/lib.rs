@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use xenomorph_common::config::{ConfigValue, PluginConfigs};
 use xenomorph_common::parser::{
-    AnonymType, BinaryExprType, Declaration, Expr, KeyValExpr, Literal, NumberType,
+    BinaryExprType, Declaration, Expr, KeyValExpr, Literal, NumberType, XenoType,
 };
 use xenomorph_common::plugins::{PluginCompletion, XenoPlugin};
 use xenomorph_common::semantic::{AnalyzerListener, ScopeInfo};
@@ -145,7 +145,10 @@ impl<'src> AnalyzerListener<'src> for JavaGenerator {
         _errors: &mut Vec<xenomorph_common::XenoDiagnostic<'src>>,
     ) {
         for decl in ast {
-            if let Declaration::TypeDecl { docs, name, t, .. } = decl {
+            if let Declaration::Type {
+                docs, name, ty: t, ..
+            } = decl
+            {
                 if let Some(content) = self.generate_type_decl(docs, name.v, t) {
                     self.files.push((name.v.to_string(), content));
                 }
@@ -350,7 +353,7 @@ impl JavaGenerator {
 
     /// Resolves an anonymous type (one field's value) to a Java type,
     /// registering any required imports.
-    fn type_to_java(&self, exprs: &AnonymType, imports: &mut BTreeSet<String>) -> String {
+    fn type_to_java(&self, exprs: &XenoType, imports: &mut BTreeSet<String>) -> String {
         for expr in exprs {
             match expr {
                 Expr::Annotation(..) => continue,
@@ -477,7 +480,7 @@ fn collect_lombok_decorators(exprs: &[Expr]) -> Vec<String> {
 
 /// Renders a single `@Lombok(...)` argument as a Java decorator name.
 /// Supports plain identifiers (`Data`) and field-access forms (`$Exclude`).
-fn decorator_name(arg: &AnonymType) -> Option<String> {
+fn decorator_name(arg: &XenoType) -> Option<String> {
     match non_annotation_exprs(arg).as_slice() {
         [Expr::Identifier(id)] => Some(id.v.to_string()),
         [Expr::FieldAccess(id)] => Some(id.v.to_string()),
@@ -502,7 +505,7 @@ fn non_annotation_exprs<'a, 'src>(exprs: &'a [Expr<'src>]) -> Vec<&'a Expr<'src>
 }
 
 /// Returns true when a field's type includes `null`, making it optional.
-fn is_nullable(exprs: &AnonymType) -> bool {
+fn is_nullable(exprs: &XenoType) -> bool {
     exprs.iter().any(is_null_expr)
 }
 

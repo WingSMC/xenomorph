@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use serde_json::{json, Map, Value};
 use xenomorph_common::config::{ConfigValue, PluginConfigs};
 use xenomorph_common::parser::{
-    AnonymType, BinaryExprType, Declaration, Expr, KeyValExpr, Literal, NumberType,
+    BinaryExprType, Declaration, Expr, KeyValExpr, Literal, NumberType, XenoType,
 };
 use xenomorph_common::plugins::XenoPlugin;
 use xenomorph_common::semantic::{AnalyzerListener, ScopeInfo};
@@ -126,7 +126,7 @@ impl JsonSchemaGenerator {
             .filter_map(|e| self.expr_to_schema(e))
             .collect();
 
-        let annotations: Vec<(&str, &[AnonymType])> = exprs
+        let annotations: Vec<(&str, &[XenoType])> = exprs
             .iter()
             .filter_map(|e| match e {
                 Expr::Annotation(n, args) => Some((n.v, args.as_slice())),
@@ -194,7 +194,7 @@ impl JsonSchemaGenerator {
         })
     }
 
-    fn list_to_schema(&self, inner: &[AnonymType]) -> Value {
+    fn list_to_schema(&self, inner: &[XenoType]) -> Value {
         if inner.len() == 1 {
             json!({
                 "type": "array",
@@ -217,7 +217,7 @@ impl JsonSchemaGenerator {
         }
     }
 
-    fn set_to_schema(&self, inner: &[AnonymType]) -> Value {
+    fn set_to_schema(&self, inner: &[XenoType]) -> Value {
         let items = if inner.len() == 1 {
             self.anonym_type_to_schema(&inner[0])
         } else {
@@ -317,7 +317,7 @@ impl<'src> AnalyzerListener<'src> for JsonSchemaGenerator {
         _errors: &mut Vec<xenomorph_common::XenoDiagnostic<'src>>,
     ) {
         for decl in ast {
-            if let Declaration::TypeDecl { docs, name, t, .. } = decl {
+            if let Declaration::Type { docs, name, ty: t, .. } = decl {
                 let schema = self.type_decl_to_schema(docs, name.v, t);
                 self.defs.insert(name.v.to_string(), schema);
             }
@@ -371,7 +371,7 @@ fn combine_type_schemas(mut schemas: Vec<Value>) -> Value {
 /// Applies xenomorph validation annotations as JSON Schema keywords. The
 /// keyword used for length depends on whether the base schema is a string or
 /// an array.
-fn apply_annotations(schema: &mut Value, annotations: &[(&str, &[AnonymType])]) {
+fn apply_annotations(schema: &mut Value, annotations: &[(&str, &[XenoType])]) {
     let is_array = schema_type_is(schema, "array");
     let map = match schema {
         Value::Object(map) => map,
@@ -409,7 +409,7 @@ fn insert_number(map: &mut Map<String, Value>, key: &str, number: Option<Value>)
     }
 }
 
-fn first_number_arg(args: &[AnonymType]) -> Option<Value> {
+fn first_number_arg(args: &[XenoType]) -> Option<Value> {
     for arg in args {
         for expr in arg {
             if let Expr::Literal(lit @ Literal::Number(_)) = expr {
@@ -514,7 +514,7 @@ fn regex_source(raw: &str) -> String {
     trimmed.to_string()
 }
 
-fn is_nullable(exprs: &AnonymType) -> bool {
+fn is_nullable(exprs: &XenoType) -> bool {
     exprs.iter().any(|e| match e {
         Expr::Identifier(id) => id.v == "null",
         Expr::BinaryExpr(BinaryExprType::Union | BinaryExprType::Or, pair) => {

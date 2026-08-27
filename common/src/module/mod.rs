@@ -9,7 +9,7 @@ pub mod types;
 use crate::config::Config;
 use crate::lexer::{Lexer, Token, XenoTokens};
 use crate::module::types::{DeclarationInfo, ErrorPhase, ModuleDiagnostic, ModulePath};
-use crate::parser::{Declaration, Expr, Parser, XenoAst};
+use crate::parser::{Declaration, Parser, XenoAst};
 use crate::plugins::XenoPlugin;
 use crate::semantic::Analyzer;
 use crate::utils::calculate_hash;
@@ -103,6 +103,7 @@ fn get_root() -> Result<(PathBuf, String), ModuleDiagnostic> {
 
 /// Thread-safe module registry. Single source of truth for all module data.
 pub struct XenoRegistry {
+    // TODO per-module RwLock
     pub module_cache: RwLock<HashMap<ModulePath, ModuleData>>,
     pub root: PathBuf,
     pub entry: String,
@@ -613,18 +614,28 @@ impl XenoRegistry {
             module_errors: Vec::new(),
             imports: Vec::new(),
             tokens_builder: |source| {
-                Lexer::tokenize(source).map_err(|e| {
-                    vec![ModuleDiagnostic {
-                        module_path: module_path.clone(),
-                        message: format!("{}", e.message),
-                        location: Some((e.location.l, e.location.c, e.location.v.len() as u32)),
-                        phase: ErrorPhase::Lexer,
-                        severity: e.severity,
-                    }]
-                })
+                Lexer::tokenize(source)
+                    .inspect(|ts| {
+                        if Config::get().debug.tokens {
+                            print!("{:?}", ts);
+                        }
+                    })
+                    .map_err(|e| {
+                        vec![ModuleDiagnostic {
+                            module_path: module_path.clone(),
+                            message: format!("{}", e.message),
+                            location: Some((e.location.l, e.location.c, e.location.v.len() as u32)),
+                            phase: ErrorPhase::Lexer,
+                            severity: e.severity,
+                        }]
+                    })
             },
             ast_builder: |tokens| {
                 let (ast, diagnostics) = Parser::parse(tokens);
+
+                if Config::get().debug.ast {
+                    print!("{:?}", ast);
+                }
 
                 parser_errors_cell
                     .borrow_mut()
@@ -642,7 +653,14 @@ impl XenoRegistry {
                 Ok(ast
                     .iter()
                     .filter_map(|d| match d {
-                        Declaration::TypeDecl { docs, name, t, .. } => Some((
+                        Declaration::Type {
+                            docs,
+                            name,
+                            generics,
+                            ty,
+                            from,
+                            to,
+                        } => Some((
                             name.v,
                             DeclarationInfo {
                                 name: name.v.to_string(),
@@ -652,28 +670,6 @@ impl XenoRegistry {
                                 line: name.l,
                                 column: name.c,
                                 name_len: name.v.len() as u32,
-                                fields: {
-                                    let v = t
-                                        .iter()
-                                        .filter_map(|item| match item {
-                                            Expr::Struct(fields) => {
-                                                Some(fields.iter().filter_map(|(d, e)| {
-                                                    let t = e.get(0)?;
-                                                    match t {
-                                                        Expr::Identifier(id) => Some((
-                                                            d.v.to_string(),
-                                                            id.v.to_string(),
-                                                        )),
-                                                        _ => None,
-                                                    }
-                                                }))
-                                            }
-                                            _ => None,
-                                        })
-                                        .flatten()
-                                        .collect::<Vec<(String, String)>>();
-                                    (!v.is_empty()).then_some(v)
-                                },
                             },
                         )),
                         _ => None,

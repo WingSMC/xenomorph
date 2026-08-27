@@ -406,7 +406,7 @@ impl Backend {
 
         // 1. Check local AST declarations
         for decl in ast {
-            if let Declaration::TypeDecl { name, docs, .. } = decl {
+            if let Declaration::Type { name, docs, .. } = decl {
                 if name.v == searched_name {
                     let contents = format!("**{}**\n\n{}", name.v, docs.unwrap_or(""));
                     return Some(Hover {
@@ -666,7 +666,7 @@ impl LanguageServer for Backend {
             // Try local declaration
             if token.0 == TokenVariant::Identifier {
                 for decl in ast {
-                    if let Declaration::TypeDecl { name, .. } = decl {
+                    if let Declaration::Type { name, .. } = decl {
                         if name.v == token.1.v {
                             return Some(GotoDefinitionResponse::Scalar(Location {
                                 uri: uri.clone(),
@@ -803,7 +803,7 @@ impl LanguageServer for Backend {
                     ast.iter()
                         .filter_map(|decl| match decl {
                             Declaration::Import { .. } => None,
-                            Declaration::TypeDecl { name, .. } => Some(SymbolInformation {
+                            Declaration::Type { name, .. } => Some(SymbolInformation {
                                 name: name.v.to_string(),
                                 kind: SymbolKind::STRUCT,
                                 tags: None,
@@ -840,7 +840,7 @@ impl LanguageServer for Backend {
                     // Only allow renaming user-defined declarations
                     let is_user_defined = ast.iter().any(|decl| match decl {
                         Declaration::Import { .. } => false,
-                        Declaration::TypeDecl { name, .. } => name.v == token.1.v,
+                        Declaration::Type { name, .. } => name.v == token.1.v,
                     });
 
                     if !is_user_defined {
@@ -874,7 +874,7 @@ impl LanguageServer for Backend {
 
                     let is_user_defined = ast.iter().any(|decl| match decl {
                         Declaration::Import { .. } => false,
-                        Declaration::TypeDecl { name, .. } => name.v == old_name,
+                        Declaration::Type { name, .. } => name.v == old_name,
                     });
 
                     if !is_user_defined {
