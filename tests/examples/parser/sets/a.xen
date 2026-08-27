@@ -1,10 +1,11 @@
 import parser/sets/alma/korte;
+import lexer/1;
 
 /** asd */
 type MyColors = set ["red", "green", "blue"];
 type DoggieColors = set ["red"];
-type BothOurFavouriteColors = MyColors + DoggieColors;
-type ColorsOnlyILike = BothOurFavouriteColors \ DoggieColors;
+type BothOurFavouriteColors = MyColors & DoggieColors;
+type ColorsOnlyILike = BothOurFavouriteColors - DoggieColors;
 
 type B = string;
 type C = B @maxlen(5);

@@ -13,7 +13,16 @@ Xenomorph is meant to be a universal schema descriptor. It is a front-end for pl
 
 ## Parser
 
+`xeno` parses the configured workspace. For editor and tooling integrations,
+`xeno inspect` reads standalone Xenomorph source from standard input and emits
+structured JSON containing the lexer token stream, syntax AST, and parser
+diagnostics. Standalone inspection does not resolve imports or run workspace
+semantic analysis.
+
 ## LSP
+
+`xenomorph_lsp` communicates over standard input/output and can be launched by
+the VS Code extension when the executable is available on `PATH`.
 
 ## Development
 

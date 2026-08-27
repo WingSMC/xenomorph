@@ -1010,6 +1010,8 @@ dependencies = [
 name = "xenomorph_parser"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "xenomorph_common",
 ]
 

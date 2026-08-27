@@ -24,10 +24,15 @@
         "Snippets",
         "Testing"
     ],
+    "activationEvents": [
+        "onLanguage:xenomorph",
+        "onCommand:xenomorph.parse",
+        "onCommand:xenomorph.debug",
+        "onCommand:xenomorph.showAst"
+    ],
     "scripts": {
         "all": "nr build && nr package",
-        "build": "cd client && nr build && cd .. && nr setup:lsp",
-        "setup:lsp": "node ./scripts/copy-lsp.mjs",
+        "build": "cd client && nr build",
         "package": "node ./scripts/package.mjs",
         "publish": "node ./scripts/package.mjs --publish"
     },
@@ -37,6 +42,26 @@
         "tamasfe.even-better-toml"
     ],
     "contributes": {
+        "commands": [
+            {
+                "command": "xenomorph.parse",
+                "title": "Parse Current Document",
+                "category": "Xenomorph",
+                "icon": "$(checklist)"
+            },
+            {
+                "command": "xenomorph.debug",
+                "title": "Debug Current Document (Tokens + AST)",
+                "category": "Xenomorph",
+                "icon": "$(debug-alt)"
+            },
+            {
+                "command": "xenomorph.showAst",
+                "title": "Show AST Visualization",
+                "category": "Xenomorph",
+                "icon": "$(type-hierarchy)"
+            }
+        ],
         "languages": [
             {
                 "id": "xenomorph",
@@ -70,6 +95,45 @@
             "evenBetterToml.schema.associations": {
                 ".*xenomorph\\.toml$": "./.xenomorph/xenomorph.schema.json"
             }
+        },
+        "configuration": {
+            "title": "Xenomorph",
+            "properties": {
+                "xenomorph.lsp.executable": {
+                    "type": "string",
+                    "default": "xenomorph_lsp",
+                    "scope": "machine-overridable",
+                    "description": "LSP executable name or path. The default resolves xenomorph_lsp from PATH. Reload the extension after changing it."
+                },
+                "xenomorph.parser.executable": {
+                    "type": "string",
+                    "default": "xeno",
+                    "scope": "machine-overridable",
+                    "description": "Parser executable name or path. The default resolves xeno from PATH."
+                },
+                "xenomorph.parser.timeout": {
+                    "type": "number",
+                    "default": 15000,
+                    "minimum": 1000,
+                    "scope": "resource",
+                    "description": "Maximum time in milliseconds for parse, debug, and AST inspection commands."
+                },
+                "xenomorph.codeLens.enabled": {
+                    "type": "boolean",
+                    "default": true,
+                    "scope": "resource",
+                    "description": "Show Parse, Debug, and View AST actions above declarations."
+                }
+            }
+        },
+        "menus": {
+            "editor/title": [
+                {
+                    "command": "xenomorph.showAst",
+                    "when": "editorLangId == xenomorph",
+                    "group": "navigation"
+                }
+            ]
         }
     }
 }
