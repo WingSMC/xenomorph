@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use serde_json::{json, Map, Value};
 use xenomorph_common::config::{ConfigValue, PluginConfigs};
@@ -148,10 +149,8 @@ impl JsonSchemaGenerator {
 
     fn simple_type_to_schema(&self, ty: &SimpleType) -> Value {
         let (base, optional) = match ty {
-            SimpleType::Literal(literal) => (json!({ "const": literal_to_json(literal) }), false),
-            SimpleType::OptionalLiteral(literal) => {
-                (json!({ "const": literal_to_json(literal) }), true)
-            }
+            SimpleType::Literal(literal) => (literal_to_schema(literal), false),
+            SimpleType::OptionalLiteral(literal) => (literal_to_schema(literal), true),
             SimpleType::Identifier(identifier, _) => {
                 (self.identifier_to_schema(identifier.v), false)
             }
@@ -241,7 +240,7 @@ impl JsonSchemaGenerator {
         let all_numeric = variants.iter().all(|(_, value, _)| {
             matches!(
                 value,
-                SimpleType::Literal(Literal::Int(_, _) | Literal::Float(_, _))
+                SimpleType::Literal(Literal::Int(_) | Literal::Float(_))
             )
         });
 
@@ -409,7 +408,7 @@ fn insert_number(map: &mut Map<String, Value>, key: &str, number: Option<Value>)
 fn first_number_arg(args: &[Expr]) -> Option<Value> {
     for arg in args {
         if let Expr::Type(Type::Simple(SimpleType::Literal(
-            literal @ (Literal::Int(_, _) | Literal::Float(_, _)),
+            literal @ (Literal::Int(_) | Literal::Float(_)),
         ))) = arg
         {
             return Some(literal_to_json(literal));
@@ -458,7 +457,7 @@ fn builtin_to_schema(name: &str) -> Option<Value> {
         "binary" => json!({ "type": "string", "contentEncoding": "base64" }),
         "bool" => json!({ "type": "boolean" }),
         "number" | "f32" | "f64" | "decimal" => json!({ "type": "number" }),
-        "bigint" => json!({ "type": "integer" }),
+        "integer" | "bigint" => json!({ "type": "integer" }),
         "any" => json!({}),
         "null" => json!({ "type": "null" }),
         "dict" => json!({ "type": "object" }),
@@ -470,6 +469,9 @@ fn builtin_to_schema(name: &str) -> Option<Value> {
 /// Builds an `integer` schema with bounds for sized int types like `u8`/`i16`.
 fn integer_schema(name: &str) -> Option<Value> {
     let bits: u32 = name.get(1..).and_then(|b| b.parse().ok())?;
+    if !matches!(bits, 4 | 8 | 16 | 32 | 64 | 128) {
+        return None;
+    }
     let signed = match name.as_bytes().first() {
         Some(b'i') => true,
         Some(b'u') => false,
@@ -479,19 +481,20 @@ fn integer_schema(name: &str) -> Option<Value> {
     let mut schema = Map::new();
     schema.insert("type".to_string(), json!("integer"));
 
-    // Only emit bounds that fit safely in a JSON number (<= 32-bit width).
     if signed {
-        if bits <= 32 {
-            let max = (1i64 << (bits - 1)) - 1;
-            schema.insert("minimum".to_string(), json!(-(max + 1)));
-            schema.insert("maximum".to_string(), json!(max));
-        }
+        let half_range = num_bigint::BigInt::from(1_u8) << (bits - 1);
+        schema.insert(
+            "minimum".to_string(),
+            exact_json_number(&-half_range.clone()),
+        );
+        schema.insert(
+            "maximum".to_string(),
+            exact_json_number(&(half_range - 1_u8)),
+        );
     } else {
         schema.insert("minimum".to_string(), json!(0));
-        if bits <= 32 {
-            let max = (1i64 << bits) - 1;
-            schema.insert("maximum".to_string(), json!(max));
-        }
+        let max = (num_bigint::BigInt::from(1_u8) << bits) - 1_u8;
+        schema.insert("maximum".to_string(), exact_json_number(&max));
     }
 
     Some(Value::Object(schema))
@@ -501,19 +504,29 @@ fn integer_schema(name: &str) -> Option<Value> {
 
 fn literal_to_json(lit: &Literal) -> Value {
     match lit {
-        Literal::Int(n, _) => n
-            .to_string()
-            .parse::<serde_json::Number>()
-            .map(Value::Number)
-            .unwrap_or_else(|_| json!(n.to_string())),
-        Literal::Float(f, _) => f
-            .to_string()
-            .parse::<serde_json::Number>()
-            .map(Value::Number)
-            .unwrap_or_else(|_| json!(f.to_string())),
+        Literal::Int(integer) => exact_json_number(&integer.value),
+        Literal::Float(float) => exact_json_number(&float.value),
         Literal::String(s, _) => json!(s),
         Literal::Boolean(b, _) => json!(b),
     }
+}
+
+fn literal_to_schema(literal: &Literal) -> Value {
+    let mut schema = match literal
+        .cast_target()
+        .and_then(|target| integer_schema(target.v).or_else(|| builtin_to_schema(target.v)))
+    {
+        Some(Value::Object(schema)) => schema,
+        _ => Map::new(),
+    };
+    schema.insert("const".to_string(), literal_to_json(literal));
+    Value::Object(schema)
+}
+
+fn exact_json_number(value: &impl ToString) -> Value {
+    serde_json::Number::from_str(&value.to_string())
+        .map(Value::Number)
+        .expect("BigInt and BigDecimal values are valid JSON numbers")
 }
 
 /// Extracts the pattern body from a regex literal like `/foo/i`.
@@ -593,6 +606,7 @@ fn module_path_parts(module_path: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xenomorph_common::parser::{IntLiteral, IntegerRepresentation, IntegerSize};
 
     #[test]
     fn test_type_and_field_docs_are_preserved() {
@@ -649,7 +663,15 @@ mod tests {
         };
         let variants = vec![(
             &key,
-            SimpleType::Literal(Literal::Int(1.into(), &literal)),
+            SimpleType::Literal(Literal::Int(IntLiteral {
+                value: 1.into(),
+                representation: IntegerRepresentation {
+                    signed: false,
+                    size: IntegerSize::Bits(1),
+                },
+                token: &literal,
+                cast: None,
+            })),
             Some(&docs),
         )];
 
@@ -676,6 +698,10 @@ mod tests {
             builtin_to_schema("bool"),
             Some(json!({ "type": "boolean" }))
         );
+        assert_eq!(
+            builtin_to_schema("integer"),
+            Some(json!({ "type": "integer" }))
+        );
     }
 
     #[test]
@@ -699,12 +725,50 @@ mod tests {
     }
 
     #[test]
-    fn test_large_integer_has_no_max() {
+    fn test_large_integer_bounds_remain_exact_json_numbers() {
         assert_eq!(
             integer_schema("u64"),
-            Some(json!({ "type": "integer", "minimum": 0 }))
+            Some(json!({
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 18446744073709551615_u64,
+            }))
         );
-        assert_eq!(integer_schema("i128"), Some(json!({ "type": "integer" })));
+        let i128_schema = integer_schema("i128").expect("i128 schema");
+        assert_eq!(
+            i128_schema["minimum"].to_string(),
+            "-170141183460469231731687303715884105728"
+        );
+        assert_eq!(
+            i128_schema["maximum"].to_string(),
+            "170141183460469231731687303715884105727"
+        );
+    }
+
+    #[test]
+    fn explicitly_sized_literal_preserves_json_schema_bounds() {
+        let value = xenomorph_common::TokenData { v: "1", l: 0, c: 0 };
+        let target = xenomorph_common::TokenData {
+            v: "u64",
+            l: 0,
+            c: 5,
+        };
+        let literal = Literal::Int(IntLiteral {
+            value: 1.into(),
+            representation: IntegerRepresentation {
+                signed: false,
+                size: IntegerSize::Bits(64),
+            },
+            token: &value,
+            cast: Some(&target),
+        });
+
+        let schema = literal_to_schema(&literal);
+
+        assert_eq!(schema["type"], json!("integer"));
+        assert_eq!(schema["const"], json!(1));
+        assert_eq!(schema["minimum"], json!(0));
+        assert_eq!(schema["maximum"].to_string(), "18446744073709551615");
     }
 
     #[test]

@@ -4,12 +4,13 @@ use std::path::PathBuf;
 
 use xenomorph_common::config::{ConfigValue, PluginConfigs};
 use xenomorph_common::parser::{
-    Annotation, Declaration, Expr, KeyValExpr, Literal, SimpleType, Type, XenoType,
+    Annotation, Declaration, Expr, FloatSize, IntLiteral, KeyValExpr, Literal, SimpleType, Type,
+    XenoType,
 };
 use xenomorph_common::plugins::XenoPlugin;
 use xenomorph_common::semantic::{AnalyzerListener, ScopeInfo};
 use xenomorph_common::utils::extract_documentation;
-use xenomorph_common::TokenData;
+use xenomorph_common::{TokenData, XenoDiagSeverity, XenoDiagnostic};
 
 // ── Plugin registration ─────────────────────────────────────────────
 
@@ -125,6 +126,25 @@ impl<'src> AnalyzerListener<'src> for TsGenerator {
         }
     }
 
+    fn on_simple_type(&mut self, ty: &SimpleType<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {
+        let literal = match ty {
+            SimpleType::Literal(literal) | SimpleType::OptionalLiteral(literal) => literal,
+            _ => return,
+        };
+        if let Literal::Float(float) = literal {
+            if !xenomorph_common::parser::decimal_roundtrips_as(&float.value, FloatSize::F64) {
+                errors.push(XenoDiagnostic {
+                    location: float.cast.unwrap_or(float.token).clone(),
+                    message: format!(
+                        "TypeScript cannot represent floating-point literal '{}' exactly with its built-in number type.",
+                        float.token.v
+                    ),
+                    severity: XenoDiagSeverity::Err,
+                });
+            }
+        }
+    }
+
     fn on_after_module(&mut self, scope: &ScopeInfo) {
         let out_path = match &self.output_dir {
             Some(dir) => {
@@ -223,11 +243,10 @@ fn generate_interface(out: &mut String, name: &str, generic_params: &str, fields
 // ── Enum generation ─────────────────────────────────────────────────
 
 fn generate_enum(out: &mut String, name: &str, variants: &[KeyValExpr]) {
-    let all_numeric = variants.iter().all(|(_, value, _)| {
-        matches!(
-            value,
-            SimpleType::Literal(Literal::Int(_, _) | Literal::Float(_, _))
-        )
+    let all_numeric = variants.iter().all(|(_, value, _)| match value {
+        SimpleType::Literal(Literal::Float(_)) => true,
+        SimpleType::Literal(Literal::Int(integer)) => !integer_uses_bigint(integer),
+        _ => false,
     });
 
     if all_numeric {
@@ -369,9 +388,9 @@ fn builtin_to_ts(name: &str) -> &str {
         | "semver" | "strong_password" | "date" | "datetime" | "duration" | "xml" | "yaml"
         | "json" | "toml" | "csv" | "tsv" => "string",
         "bool" => "boolean",
-        "number" | "i4" | "i8" | "i16" | "i32" | "i64" | "i128" | "u4" | "u8" | "u16" | "u32"
-        | "u64" | "u128" | "f32" | "f64" | "decimal" => "number",
-        "bigint" => "bigint",
+        "number" | "i4" | "i8" | "i16" | "i32" | "u4" | "u8" | "u16" | "u32" | "f32" | "f64"
+        | "decimal" => "number",
+        "i64" | "i128" | "u64" | "u128" | "bigint" | "integer" => "bigint",
         "binary" => "Uint8Array",
         "regex" => "RegExp",
         "any" => "any",
@@ -383,11 +402,29 @@ fn builtin_to_ts(name: &str) -> &str {
 
 fn literal_to_ts(lit: &Literal) -> String {
     match lit {
-        Literal::Int(n, _) => n.to_string(),
-        Literal::Float(f, _) => f.to_string(),
+        Literal::Int(integer) if integer_uses_bigint(integer) => format!("{}n", integer.value),
+        Literal::Int(integer) => integer.value.to_string(),
+        Literal::Float(float) => float.value.to_string(),
         Literal::String(s, _) => format!("\"{s}\""),
         Literal::Boolean(b, _) => b.to_string(),
     }
+}
+
+fn integer_uses_bigint(integer: &IntLiteral<'_>) -> bool {
+    if integer
+        .cast
+        .is_some_and(|cast| matches!(cast.v, "i64" | "i128" | "u64" | "u128" | "bigint"))
+    {
+        return true;
+    }
+
+    integer
+        .value
+        .to_string()
+        .parse::<i64>()
+        .map_or(true, |value| {
+            !(-9_007_199_254_740_991..=9_007_199_254_740_991).contains(&value)
+        })
 }
 
 fn format_annotation(annotation: &Annotation) -> String {
@@ -480,6 +517,9 @@ fn module_path_parts(module_path: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xenomorph_common::parser::{
+        FloatLiteral, FloatRepresentation, IntegerRepresentation, IntegerSize,
+    };
 
     #[test]
     fn test_type_and_field_docs_are_preserved() {
@@ -610,12 +650,122 @@ mod tests {
         assert_eq!(builtin_to_ts("string"), "string");
         assert_eq!(builtin_to_ts("bool"), "boolean");
         assert_eq!(builtin_to_ts("u8"), "number");
-        assert_eq!(builtin_to_ts("u64"), "number");
+        assert_eq!(builtin_to_ts("u64"), "bigint");
         assert_eq!(builtin_to_ts("bigint"), "bigint");
         assert_eq!(builtin_to_ts("binary"), "Uint8Array");
         assert_eq!(builtin_to_ts("json"), "string");
         assert_eq!(builtin_to_ts("null"), "null");
         assert_eq!(builtin_to_ts("MyCustomType"), "MyCustomType");
+    }
+
+    #[test]
+    fn integer_literals_use_number_or_bigint_without_precision_loss() {
+        let safe_token = TokenData {
+            v: "9007199254740991",
+            l: 0,
+            c: 0,
+        };
+        let unsafe_token = TokenData {
+            v: "9007199254740992",
+            l: 0,
+            c: 0,
+        };
+        let u64_token = TokenData {
+            v: "u64",
+            l: 0,
+            c: 20,
+        };
+        let safe = Literal::Int(IntLiteral {
+            value: 9_007_199_254_740_991_i64.into(),
+            representation: IntegerRepresentation {
+                signed: false,
+                size: IntegerSize::Bits(53),
+            },
+            token: &safe_token,
+            cast: None,
+        });
+        let unsafe_integer = Literal::Int(IntLiteral {
+            value: 9_007_199_254_740_992_i64.into(),
+            representation: IntegerRepresentation {
+                signed: false,
+                size: IntegerSize::Bits(54),
+            },
+            token: &unsafe_token,
+            cast: None,
+        });
+        let explicit_u64 = Literal::Int(IntLiteral {
+            value: 1.into(),
+            representation: IntegerRepresentation {
+                signed: false,
+                size: IntegerSize::Bits(64),
+            },
+            token: &safe_token,
+            cast: Some(&u64_token),
+        });
+
+        assert_eq!(literal_to_ts(&safe), "9007199254740991");
+        assert_eq!(literal_to_ts(&unsafe_integer), "9007199254740992n");
+        assert_eq!(literal_to_ts(&explicit_u64), "1n");
+    }
+
+    #[test]
+    fn overprecise_float_reports_a_generation_error() {
+        let token = TokenData {
+            v: "1.234567890123456789",
+            l: 0,
+            c: 0,
+        };
+        let ty = SimpleType::Literal(Literal::Float(FloatLiteral {
+            value: token.v.parse().expect("valid decimal"),
+            representation: FloatRepresentation {
+                signed: true,
+                precision: 19,
+                scale: 18,
+                size: FloatSize::Decimal,
+            },
+            token: &token,
+            cast: None,
+        }));
+        let mut generator = TsGenerator::new();
+        let mut errors = Vec::new();
+
+        generator.on_simple_type(&ty, &mut errors);
+
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].message.contains("cannot represent"));
+    }
+
+    #[test]
+    fn exactly_representable_decimal_cast_uses_number() {
+        let token = TokenData {
+            v: "1.25",
+            l: 0,
+            c: 0,
+        };
+        let decimal = TokenData {
+            v: "decimal",
+            l: 0,
+            c: 8,
+        };
+        let literal = Literal::Float(FloatLiteral {
+            value: token.v.parse().expect("valid decimal"),
+            representation: FloatRepresentation {
+                signed: true,
+                precision: 3,
+                scale: 2,
+                size: FloatSize::Decimal,
+            },
+            token: &token,
+            cast: Some(&decimal),
+        });
+        let ty = SimpleType::Literal(literal.clone());
+        let mut generator = TsGenerator::new();
+        let mut errors = Vec::new();
+
+        generator.on_simple_type(&ty, &mut errors);
+
+        assert!(errors.is_empty());
+        assert_eq!(literal_to_ts(&literal), "1.25");
     }
 
     #[test]

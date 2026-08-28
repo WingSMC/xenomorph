@@ -3,7 +3,9 @@ use std::io::{self, Read};
 use xenomorph_common::config::{write_rc_schema, Config, LogLevel, RC_SCHEMA_RELATIVE_PATH};
 use xenomorph_common::lexer::{Lexer, Token, TokenVariant};
 use xenomorph_common::module::{types::ModuleDiagnostic, XenoRegistry};
-use xenomorph_common::parser::{Annotation, Declaration, Expr, Literal, Parser, SimpleType, Type};
+use xenomorph_common::parser::{
+    Annotation, Declaration, Expr, FloatSize, IntegerSize, Literal, Parser, SimpleType, Type,
+};
 use xenomorph_common::plugins::XenoPlugin;
 use xenomorph_common::{TokenData, XenoDiagSeverity, XenoDiagnostic};
 
@@ -402,13 +404,70 @@ fn simple_type_node(ty: &SimpleType<'_>) -> AstNode {
 }
 
 fn literal_node(kind: &'static str, literal: &Literal<'_>) -> AstNode {
-    let (label, token) = match literal {
-        Literal::Int(value, token) => (value.to_string(), *token),
-        Literal::Float(value, token) => (value.to_string(), *token),
-        Literal::String(value, token) => (format!("\"{value}\""), *token),
-        Literal::Boolean(value, token) => (value.to_string(), *token),
+    let (label, children) = match literal {
+        Literal::Int(value) => {
+            let size = match value.representation.size {
+                IntegerSize::Bits(bits) => {
+                    format!("{bits} bit{}", if bits == 1 { "" } else { "s" })
+                }
+                IntegerSize::Arbitrary => "arbitrary precision".to_string(),
+            };
+            let source = if value.cast.is_some() {
+                "explicit"
+            } else {
+                "inferred"
+            };
+            let signedness = if value.representation.signed {
+                "signed"
+            } else {
+                "unsigned"
+            };
+            (
+                value.value.to_string(),
+                vec![node(
+                    "IntegerRepresentation",
+                    Some(format!("{signedness}, {size}, {source}")),
+                    value.cast.map(token_range),
+                    Vec::new(),
+                )],
+            )
+        }
+        Literal::Float(value) => {
+            let size = match value.representation.size {
+                FloatSize::F32 => "f32",
+                FloatSize::F64 => "f64",
+                FloatSize::Decimal => "decimal",
+            };
+            let source = if value.cast.is_some() {
+                "explicit"
+            } else {
+                "inferred"
+            };
+            (
+                value.value.to_string(),
+                vec![node(
+                    "FloatRepresentation",
+                    Some(format!(
+                        "signed, {size}, precision {}, scale {}, {source}",
+                        value.representation.precision, value.representation.scale
+                    )),
+                    value.cast.map(token_range),
+                    Vec::new(),
+                )],
+            )
+        }
+        Literal::String(value, _) => (format!("\"{value}\""), Vec::new()),
+        Literal::Boolean(value, _) => (value.to_string(), Vec::new()),
     };
-    node(kind, Some(label), Some(token_range(token)), Vec::new())
+    node(
+        kind,
+        Some(label),
+        Some(InspectRange {
+            start: token_range(literal.token()).start,
+            end: token_range(literal.get_last_token()).end,
+        }),
+        children,
+    )
 }
 
 fn field_node(field: &xenomorph_common::parser::KeyValExpr<'_>) -> AstNode {
@@ -624,6 +683,21 @@ mod tests {
         assert_eq!(result.diagnostics.len(), 1);
         assert_eq!(result.diagnostics[0].severity, "error");
         assert_eq!(result.diagnostics[0].range.start.character, 14);
+    }
+
+    #[test]
+    fn inspector_exposes_numeric_literal_representation() {
+        let result = inspect_source("type Id = 1 as u64;");
+
+        assert!(result.diagnostics.is_empty());
+        let literal = &result.ast[0].children[1];
+        assert_eq!(literal.kind, "Literal");
+        assert_eq!(literal.range.unwrap().end.character, 18);
+        assert_eq!(literal.children[0].kind, "IntegerRepresentation");
+        assert_eq!(
+            literal.children[0].label.as_deref(),
+            Some("unsigned, 64 bits, explicit")
+        );
     }
 
     #[test]

@@ -202,6 +202,7 @@ impl<'src> Lexer<'src> {
             // "validator" => (TokenVariant::Validator, token_data),
             "set" => (TokenVariant::Set, token_data),
             "enum" => (TokenVariant::Enum, token_data),
+            "as" => (TokenVariant::As, token_data),
             "true" => (TokenVariant::True, token_data),
             "false" => (TokenVariant::False, token_data),
             "import" => {

@@ -763,10 +763,10 @@ pub fn simple_to_owned_type(simple: &SimpleType<'_>) -> OwnedType {
                     .collect(),
             }))
         }
-        SimpleType::Literal(Literal::Int(_, _))
-        | SimpleType::OptionalLiteral(Literal::Int(_, _)) => OwnedType::named("integer"),
-        SimpleType::Literal(Literal::Float(_, _))
-        | SimpleType::OptionalLiteral(Literal::Float(_, _)) => OwnedType::named("number"),
+        SimpleType::Literal(literal @ (Literal::Int(_) | Literal::Float(_)))
+        | SimpleType::OptionalLiteral(literal @ (Literal::Int(_) | Literal::Float(_))) => {
+            OwnedType::named(literal.semantic_type_name())
+        }
         SimpleType::Literal(Literal::String(_, _))
         | SimpleType::OptionalLiteral(Literal::String(_, _)) => OwnedType::named("string"),
         SimpleType::Literal(Literal::Boolean(_, _))

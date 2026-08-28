@@ -1,6 +1,6 @@
 use crate::{
     lexer::Lexer,
-    parser::{Declaration, Expr, Literal, Parser, SimpleType, Type},
+    parser::{Declaration, Expr, FloatSize, IntegerSize, Literal, Parser, SimpleType, Type},
     test_strings::parser as source,
     XenoDiagSeverity, XenoDiagnostic,
 };
@@ -120,15 +120,15 @@ fn parses_every_simple_type_and_literal_case() {
     ));
     assert!(matches!(
         type_declaration(&ast[4]).1,
-        Type::Simple(SimpleType::Literal(Literal::Int(_, _)))
+        Type::Simple(SimpleType::Literal(Literal::Int(_)))
     ));
     assert!(matches!(
         type_declaration(&ast[5]).1,
-        Type::Simple(SimpleType::OptionalLiteral(Literal::Int(_, _)))
+        Type::Simple(SimpleType::OptionalLiteral(Literal::Int(_)))
     ));
     assert!(matches!(
         type_declaration(&ast[6]).1,
-        Type::Simple(SimpleType::Literal(Literal::Float(_, _)))
+        Type::Simple(SimpleType::Literal(Literal::Float(_)))
     ));
     assert!(matches!(
         type_declaration(&ast[7]).1,
@@ -142,6 +142,103 @@ fn parses_every_simple_type_and_literal_case() {
         type_declaration(&ast[9]).1,
         Type::Simple(SimpleType::Literal(Literal::Boolean(false, _)))
     ));
+}
+
+#[test]
+fn numeric_literals_infer_minimum_representations() {
+    let text = "type Zero = 0; type Positive = 255; type Negative = -129; type SmallFloat = 1.5; type Precise = 1.234567890123456789;";
+    let tokens = Lexer::tokenize(text).expect("numeric literals must lex");
+    let (ast, diagnostics) = parse(&tokens);
+
+    assert_no_errors(&diagnostics);
+    let literal_at = |index| match type_declaration(&ast[index]).1 {
+        Type::Simple(SimpleType::Literal(literal)) => literal,
+        ty => panic!("expected literal, got {ty:?}"),
+    };
+
+    assert!(matches!(literal_at(0), Literal::Int(value)
+        if !value.representation.signed && value.representation.size == IntegerSize::Bits(1)));
+    assert!(matches!(literal_at(1), Literal::Int(value)
+        if !value.representation.signed && value.representation.size == IntegerSize::Bits(8)));
+    assert!(matches!(literal_at(2), Literal::Int(value)
+        if value.representation.signed && value.representation.size == IntegerSize::Bits(9)));
+    assert!(matches!(literal_at(3), Literal::Float(value)
+        if value.representation.precision == 2
+            && value.representation.scale == 1
+            && value.representation.size == FloatSize::F32));
+    assert!(matches!(literal_at(4), Literal::Float(value)
+        if value.representation.size == FloatSize::Decimal));
+}
+
+#[test]
+fn parses_explicit_numeric_literal_representations() {
+    let text = "type Signed = 1 as i32; type Unsigned = 1 as u64; type Float = 1.5 as f64; type Exact = 1.25 as decimal; type Big = 1 as bigint;";
+    let tokens = Lexer::tokenize(text).expect("numeric casts must lex");
+    let (ast, diagnostics) = parse(&tokens);
+
+    assert_no_errors(&diagnostics);
+    assert!(matches!(type_declaration(&ast[0]).1,
+        Type::Simple(SimpleType::Literal(Literal::Int(value)))
+            if value.representation.signed
+                && value.representation.size == IntegerSize::Bits(32)
+                && value.cast.is_some_and(|cast| cast.v == "i32")));
+    assert!(matches!(type_declaration(&ast[1]).1,
+        Type::Simple(SimpleType::Literal(Literal::Int(value)))
+            if !value.representation.signed
+                && value.representation.size == IntegerSize::Bits(64)
+                && value.cast.is_some_and(|cast| cast.v == "u64")));
+    assert!(matches!(type_declaration(&ast[2]).1,
+        Type::Simple(SimpleType::Literal(Literal::Float(value)))
+            if value.representation.size == FloatSize::F64));
+    assert!(matches!(type_declaration(&ast[3]).1,
+        Type::Simple(SimpleType::Literal(Literal::Float(value)))
+            if value.representation.size == FloatSize::Decimal));
+    assert!(matches!(type_declaration(&ast[4]).1,
+        Type::Simple(SimpleType::Literal(Literal::Int(value)))
+            if value.representation.size == IntegerSize::Arbitrary));
+}
+
+#[test]
+fn parses_numeric_casts_in_annotation_arguments() {
+    let text = "type Limited = u64 @min(1 as u64);";
+    let tokens = Lexer::tokenize(text).expect("numeric cast must lex");
+    let (ast, diagnostics) = parse(&tokens);
+
+    assert_no_errors(&diagnostics);
+    let Declaration::Type {
+        ty: (_, annotations),
+        ..
+    } = &ast[0]
+    else {
+        panic!("expected type declaration");
+    };
+    assert!(matches!(
+        &annotations[0].params[0],
+        Expr::Type(Type::Simple(SimpleType::Literal(Literal::Int(integer))))
+            if integer.cast.is_some_and(|cast| cast.v == "u64")
+    ));
+}
+
+#[test]
+fn rejects_invalid_or_lossy_numeric_literal_casts() {
+    for (text, expected) in [
+        ("type Bad = 256 as u8;", "outside the range of u8"),
+        ("type Bad = -1 as u8;", "outside the range of u8"),
+        ("type Bad = 1 as string;", "Cannot cast integer literal"),
+        (
+            "type Bad = 1.23456789 as f32;",
+            "cannot be represented by f32",
+        ),
+    ] {
+        let tokens = Lexer::tokenize(text).expect("invalid cast still lexes");
+        let (_, diagnostics) = parse(&tokens);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(expected)),
+            "expected diagnostic containing {expected:?}, got {diagnostics:#?}"
+        );
+    }
 }
 
 #[test]

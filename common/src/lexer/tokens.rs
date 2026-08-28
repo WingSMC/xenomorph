@@ -9,6 +9,7 @@ pub enum TokenVariant {
     Validator,
     Set,
     Enum,
+    As,
     True,
     False,
 

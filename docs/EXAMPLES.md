@@ -1,5 +1,27 @@
 # Examples
 
+## Numeric literals
+
+Use `as` when a literal needs a specific signedness, width, or floating-point representation. Without `as`, Xenomorph keeps the exact arbitrary-precision value and records the smallest suitable representation.
+
+```xen
+type InferredSmallInteger = 1;
+type SignedStatus = 1 as i32;
+type UnsignedId = 1 as u64;
+type SinglePrecisionRatio = 1.5 as f32;
+type ExactDecimal = 1.234567890123456789 as decimal;
+
+type Limits = {
+	retries: 3 as u8,
+	max_id: 18446744073709551615 as u64,
+	ratio: 1.5 as f32,
+};
+
+type PositiveId = u64 @min(1 as u64);
+```
+
+Casts are checked. For example, `256 as u8`, `-1 as u8`, and a decimal that loses precision as `f32` are errors. See [Grammar: Numeric literal representation and casts](GRAMMAR.md#numeric-literal-representation-and-casts) for inference and generator rules.
+
 ## Lists
 
 Lists can be made of literals and types.

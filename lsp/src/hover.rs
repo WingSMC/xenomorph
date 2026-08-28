@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use xenomorph_common::{
-    parser::{Annotation, Declaration, Expr, Literal, SimpleType, Type},
+    parser::{Annotation, Declaration, Expr, SimpleType, Type},
     TokenData,
 };
 
@@ -199,8 +199,8 @@ fn format_simple_types(
 
 fn format_simple_type(ty: &SimpleType<'_>, substitutions: &HashMap<&str, &str>) -> String {
     match ty {
-        SimpleType::Literal(literal) => format_literal(literal),
-        SimpleType::OptionalLiteral(literal) => format!("?{}", format_literal(literal)),
+        SimpleType::Literal(literal) => literal.source_text(),
+        SimpleType::OptionalLiteral(literal) => format!("?{}", literal.source_text()),
         SimpleType::Identifier(identifier, arguments) => {
             format_named_type(identifier.v, arguments.as_deref(), substitutions)
         }
@@ -237,10 +237,6 @@ fn format_named_type(
             format_simple_types(arguments, substitutions, ", ")
         ),
     }
-}
-
-fn format_literal(literal: &Literal<'_>) -> String {
-    literal.get_last_token().v.to_string()
 }
 
 fn format_annotation(annotation: &Annotation<'_>, substitutions: &HashMap<&str, &str>) -> String {

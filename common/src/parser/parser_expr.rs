@@ -1,6 +1,6 @@
 use bigdecimal::BigDecimal;
 use num_bigint::BigInt;
-use std::fmt;
+use std::{fmt, str::FromStr};
 
 use crate::{
     lexer::{Token, TokenVariant},
@@ -179,17 +179,67 @@ pub enum SimpleType<'src> {
     Identifier(&'src TokenData<'src>, Option<Vec<SimpleType<'src>>>),
     OptionalIdentifier(&'src TokenData<'src>, Option<Vec<SimpleType<'src>>>),
 
-    /** Postfix array syntax, e.g. uint32[] */
+    /** Postfix array syntax, e.g. u32[] */
     Array(&'src TokenData<'src>, Option<Vec<SimpleType<'src>>>),
     OptionalArray(&'src TokenData<'src>, Option<Vec<SimpleType<'src>>>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Literal<'src> {
-    Int(BigInt, &'src TokenData<'src>),
-    Float(BigDecimal, &'src TokenData<'src>),
+    Int(IntLiteral<'src>),
+    Float(FloatLiteral<'src>),
     String(String, &'src TokenData<'src>),
     Boolean(bool, &'src TokenData<'src>),
+}
+
+/// Storage required by an integer literal. `Bits` is either the exact minimum
+/// bit count inferred from the value or the fixed width requested by a cast.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntegerSize {
+    Bits(u64),
+    Arbitrary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IntegerRepresentation {
+    pub signed: bool,
+    pub size: IntegerSize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct IntLiteral<'src> {
+    pub value: BigInt,
+    pub representation: IntegerRepresentation,
+    pub token: &'src TokenData<'src>,
+    pub cast: Option<&'src TokenData<'src>>,
+}
+
+/// The smallest supported floating-point storage that can round-trip the
+/// source decimal, or an explicitly requested storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloatSize {
+    F32,
+    F64,
+    Decimal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FloatRepresentation {
+    /// IEEE floats and arbitrary-precision decimals support negative values.
+    pub signed: bool,
+    /// Significant decimal digits in the source literal.
+    pub precision: u64,
+    /// Decimal digits following the decimal point in the source literal.
+    pub scale: u64,
+    pub size: FloatSize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FloatLiteral<'src> {
+    pub value: BigDecimal,
+    pub representation: FloatRepresentation,
+    pub token: &'src TokenData<'src>,
+    pub cast: Option<&'src TokenData<'src>>,
 }
 
 pub type KeyValExpr<'src> = (
@@ -208,7 +258,7 @@ pub enum Expr<'src> {
     Regex(&'src TokenData<'src>),
     /// Identifier with params, e.g. @annotation(param1, param2)
     Annotation(Annotation<'src>),
-    /// e.g. uint32, "asd", [Type1, Type2], { field1: Type1, field2: Type2 }
+    /// e.g. u32, "asd", [Type1, Type2], { field1: Type1, field2: Type2 }
     Type(Type<'src>),
 }
 
@@ -515,43 +565,237 @@ impl<'src> SimpleType<'src> {
 impl<'src> Literal<'src> {
     pub fn get_last_token(&self) -> &'src TokenData<'src> {
         match self {
-            Literal::Int(_, td)
-            | Literal::Float(_, td)
-            | Literal::String(_, td)
-            | Literal::Boolean(_, td) => *td,
+            Literal::Int(literal) => literal.cast.unwrap_or(literal.token),
+            Literal::Float(literal) => literal.cast.unwrap_or(literal.token),
+            Literal::String(_, token) | Literal::Boolean(_, token) => token,
+        }
+    }
+
+    pub fn token(&self) -> &'src TokenData<'src> {
+        match self {
+            Literal::Int(literal) => literal.token,
+            Literal::Float(literal) => literal.token,
+            Literal::String(_, token) | Literal::Boolean(_, token) => token,
+        }
+    }
+
+    pub fn cast_target(&self) -> Option<&'src TokenData<'src>> {
+        match self {
+            Literal::Int(literal) => literal.cast,
+            Literal::Float(literal) => literal.cast,
+            Literal::String(_, _) | Literal::Boolean(_, _) => None,
+        }
+    }
+
+    /// Returns the semantic type selected by an explicit cast. Uncast
+    /// literals retain their broad `integer` or `number` literal type.
+    pub fn semantic_type_name(&self) -> &'src str {
+        match self {
+            Literal::Int(literal) => literal.cast.map_or("integer", |target| target.v),
+            Literal::Float(literal) => literal.cast.map_or("number", |target| target.v),
+            Literal::String(_, _) => "string",
+            Literal::Boolean(_, _) => "bool",
+        }
+    }
+
+    pub fn source_text(&self) -> String {
+        match self.cast_target() {
+            Some(target) => format!("{} as {}", self.token().v, target.v),
+            None => self.token().v.to_string(),
         }
     }
 
     pub fn parse(parser: &mut Parser<'src>, t: &'src Token<'src>) -> Option<Literal<'src>> {
-        let res = match t.0 {
+        if t.0 == TokenVariant::Number {
+            parser.step_forward();
+            let cast = if parser.peek_is(TokenVariant::As) {
+                parser.step_forward();
+                Some(parser.expect_at_current(TokenVariant::Identifier)?)
+            } else {
+                None
+            };
+            return Self::parse_number(&t.1, cast)
+                .map_err(|e| parser.diagnostics.push(e))
+                .ok();
+        }
+
+        let literal = match t.0 {
             TokenVariant::True => Literal::Boolean(true, &t.1),
             TokenVariant::False => Literal::Boolean(false, &t.1),
             TokenVariant::String => Literal::String(t.1.v[1..t.1.v.len() - 1].to_string(), &t.1),
-            TokenVariant::Number => Self::parse_number(&t.1)
-                .map_err(|e| parser.diagnostics.push(e))
-                .ok()?,
             _ => return None,
         };
         parser.step_forward();
-        Some(res)
+        Some(literal)
     }
 
-    fn parse_number(d: &'src TokenData<'src>) -> Result<Literal<'src>, XenoDiagnostic<'src>> {
+    fn parse_number(
+        d: &'src TokenData<'src>,
+        cast: Option<&'src TokenData<'src>>,
+    ) -> Result<Literal<'src>, XenoDiagnostic<'src>> {
         let has_dot = d.v.contains('.');
         if has_dot {
             d.v.parse::<BigDecimal>()
-                .map(|num| Literal::Float(num, d))
-                .map_err(|e| e.to_string())
+                .map_err(|error| error.to_string())
+                .and_then(|value| {
+                    let (precision, scale) = decimal_shape(d.v);
+                    let inferred_size = infer_float_size(&value);
+                    let size = match cast.map(|target| target.v) {
+                        None | Some("number") => inferred_size,
+                        Some("f32") => FloatSize::F32,
+                        Some("f64") => FloatSize::F64,
+                        Some("decimal") => FloatSize::Decimal,
+                        Some(target) => {
+                            return Err(format!(
+                                "Cannot cast floating-point literal to '{target}'. Expected f32, f64, decimal, or number."
+                            ));
+                        }
+                    };
+
+                    if matches!(size, FloatSize::F32 | FloatSize::F64)
+                        && !decimal_roundtrips_as(&value, size)
+                    {
+                        return Err(format!(
+                            "Floating-point literal '{}' cannot be represented by {} without losing decimal precision.",
+                            d.v,
+                            float_size_name(size)
+                        ));
+                    }
+
+                    Ok(Literal::Float(FloatLiteral {
+                        value,
+                        representation: FloatRepresentation {
+                            signed: true,
+                            precision,
+                            scale,
+                            size,
+                        },
+                        token: d,
+                        cast,
+                    }))
+                })
         } else {
             d.v.parse::<BigInt>()
-                .map(|num| Literal::Int(num, d))
-                .map_err(|e| e.to_string())
+                .map_err(|error| error.to_string())
+                .and_then(|value| {
+                    let inferred = infer_integer_representation(&value);
+                    let representation = match cast.map(|target| target.v) {
+                        None | Some("integer") => inferred,
+                        Some("bigint") => IntegerRepresentation {
+                            signed: true,
+                            size: IntegerSize::Arbitrary,
+                        },
+                        Some(target) => parse_fixed_integer_representation(target)
+                            .ok_or_else(|| {
+                                format!(
+                                    "Cannot cast integer literal to '{target}'. Expected i4..i128, u4..u128, bigint, or integer."
+                                )
+                            })?,
+                    };
+
+                    if !integer_fits(&value, representation) {
+                        return Err(format!(
+                            "Integer literal '{}' is outside the range of {}.",
+                            d.v,
+                            cast.map_or("the selected representation", |target| target.v)
+                        ));
+                    }
+
+                    Ok(Literal::Int(IntLiteral {
+                        value,
+                        representation,
+                        token: d,
+                        cast,
+                    }))
+                })
         }
         .map_err(|e| XenoDiagnostic {
-            location: d.clone(),
+            location: cast.unwrap_or(d).clone(),
             message: format!("Error parsing number: {}", e),
             severity: XenoDiagSeverity::Err,
         })
+    }
+}
+
+fn infer_integer_representation(value: &BigInt) -> IntegerRepresentation {
+    let signed = value.sign() == num_bigint::Sign::Minus;
+    let bits = if signed {
+        ((-value) - BigInt::from(1_u8)).bits() + 1
+    } else {
+        value.bits().max(1)
+    };
+    IntegerRepresentation {
+        signed,
+        size: IntegerSize::Bits(bits),
+    }
+}
+
+fn parse_fixed_integer_representation(target: &str) -> Option<IntegerRepresentation> {
+    let (signed, bits) = match target.as_bytes().first() {
+        Some(b'i') => (true, target.get(1..)?.parse::<u64>().ok()?),
+        Some(b'u') => (false, target.get(1..)?.parse::<u64>().ok()?),
+        _ => return None,
+    };
+    matches!(bits, 4 | 8 | 16 | 32 | 64 | 128).then_some(IntegerRepresentation {
+        signed,
+        size: IntegerSize::Bits(bits),
+    })
+}
+
+pub fn integer_fits(value: &BigInt, representation: IntegerRepresentation) -> bool {
+    let IntegerSize::Bits(bits) = representation.size else {
+        return true;
+    };
+    if representation.signed {
+        let half_range = BigInt::from(1_u8) << (bits - 1);
+        value >= &-half_range.clone() && value < &half_range
+    } else {
+        value.sign() != num_bigint::Sign::Minus && value < &(BigInt::from(1_u8) << bits)
+    }
+}
+
+fn decimal_shape(raw: &str) -> (u64, u64) {
+    let unsigned = raw.strip_prefix('-').unwrap_or(raw);
+    let (integer, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    let significant = integer
+        .chars()
+        .chain(fraction.chars())
+        .skip_while(|digit| *digit == '0')
+        .count()
+        .max(1) as u64;
+    (significant, fraction.len() as u64)
+}
+
+pub fn decimal_roundtrips_as(value: &BigDecimal, size: FloatSize) -> bool {
+    let rendered = match size {
+        FloatSize::F32 => match value.to_string().parse::<f32>() {
+            Ok(value) if value.is_finite() => value.to_string(),
+            _ => return false,
+        },
+        FloatSize::F64 => match value.to_string().parse::<f64>() {
+            Ok(value) if value.is_finite() => value.to_string(),
+            _ => return false,
+        },
+        FloatSize::Decimal => return true,
+    };
+    BigDecimal::from_str(&rendered).is_ok_and(|roundtrip| roundtrip == *value)
+}
+
+fn infer_float_size(value: &BigDecimal) -> FloatSize {
+    if decimal_roundtrips_as(value, FloatSize::F32) {
+        FloatSize::F32
+    } else if decimal_roundtrips_as(value, FloatSize::F64) {
+        FloatSize::F64
+    } else {
+        FloatSize::Decimal
+    }
+}
+
+fn float_size_name(size: FloatSize) -> &'static str {
+    match size {
+        FloatSize::F32 => "f32",
+        FloatSize::F64 => "f64",
+        FloatSize::Decimal => "decimal",
     }
 }
 

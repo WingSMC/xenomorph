@@ -105,8 +105,9 @@ impl AnnotationValidator {
 
     fn collect_literal_type(literal: &Literal<'_>, types: &mut Vec<OwnedType>) {
         match literal {
-            Literal::Int(_, _) => types.push(OwnedType::named("integer")),
-            Literal::Float(_, _) => types.push(OwnedType::named("number")),
+            Literal::Int(_) | Literal::Float(_) => {
+                types.push(OwnedType::named(literal.semantic_type_name()))
+            }
             Literal::String(_, _) => types.push(OwnedType::named("string")),
             Literal::Boolean(_, _) => types.push(OwnedType::named("bool")),
         }
@@ -231,8 +232,9 @@ impl AnnotationValidator {
             XenoTraitKind::LiteralType => match arg {
                 Expr::Type(Type::Simple(SimpleType::Literal(literal))) => {
                     let candidate = match literal {
-                        Literal::Int(_, _) => OwnedType::named("integer"),
-                        Literal::Float(_, _) => OwnedType::named("number"),
+                        Literal::Int(_) | Literal::Float(_) => {
+                            OwnedType::named(literal.semantic_type_name())
+                        }
                         Literal::String(_, _) => OwnedType::named("string"),
                         Literal::Boolean(_, _) => OwnedType::named("bool"),
                     };
@@ -289,8 +291,8 @@ impl AnnotationValidator {
         match arg {
             Expr::Regex(_) => "regex literal",
             Expr::Annotation(_) => "annotation",
-            Expr::Type(Type::Simple(SimpleType::Literal(Literal::Int(_, _)))) => "integer literal",
-            Expr::Type(Type::Simple(SimpleType::Literal(Literal::Float(_, _)))) => "number literal",
+            Expr::Type(Type::Simple(SimpleType::Literal(Literal::Int(_)))) => "integer literal",
+            Expr::Type(Type::Simple(SimpleType::Literal(Literal::Float(_)))) => "number literal",
             Expr::Type(Type::Simple(SimpleType::Literal(Literal::String(_, _)))) => {
                 "string literal"
             }
@@ -382,7 +384,7 @@ mod tests {
     use num_bigint::BigInt;
 
     use super::*;
-    use crate::parser::Annotation;
+    use crate::parser::{Annotation, IntLiteral, IntegerRepresentation, IntegerSize};
     use crate::semantic::{TypeDeclarationInfo, TypeHierarchy, BUILTIN_ANNOTATIONS, BUILTIN_TYPES};
 
     fn scope(ast: &[Declaration<'_>]) -> ScopeInfo {
@@ -434,8 +436,15 @@ mod tests {
 
     fn int_arg<'src>(value: &'src TokenData<'src>) -> Expr<'src> {
         Expr::Type(Type::Simple(SimpleType::Literal(Literal::Int(
-            BigInt::from(5),
-            value,
+            IntLiteral {
+                value: BigInt::from(5),
+                representation: IntegerRepresentation {
+                    signed: false,
+                    size: IntegerSize::Bits(3),
+                },
+                token: value,
+                cast: None,
+            },
         ))))
     }
 

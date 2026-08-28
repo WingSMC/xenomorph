@@ -89,6 +89,18 @@ mod tests {
     }
 
     #[test]
+    fn as_is_a_keyword_for_literal_casts() {
+        assert_eq!(
+            tok("1 as u64"),
+            vec![
+                (TokenVariant::Number, "1"),
+                (TokenVariant::As, "as"),
+                (TokenVariant::Identifier, "u64"),
+            ]
+        );
+    }
+
+    #[test]
     fn imports_are_lexed_as_one_path_token() {
         assert_eq!(
             tok(source::IMPORT),

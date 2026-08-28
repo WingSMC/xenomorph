@@ -142,6 +142,10 @@
                     "match": "=|!="
                 },
                 {
+                    "name": "keyword.operator.cast.xenomorph",
+                    "match": "\\bas\\b"
+                },
+                {
                     "name": "keyword.operator.range.xenomorph",
                     "match": "<\\.<|\\.\\.|\\.<|<\\."
                 },
