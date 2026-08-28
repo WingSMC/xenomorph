@@ -422,13 +422,23 @@ impl Analyzer {
 
         walk_ast(&mut listeners, ast, &mut errors);
 
-        // Notify listeners that the module is done
-        for l in listeners.iter_mut() {
-            l.on_after_module(&scope);
+        // Generators write their files when the module is finalized. Keep the
+        // log level presentational: warnings and infos do not block this step,
+        // but errors from any phase do.
+        if !self.generation_mode || can_generate(&errors) {
+            for l in listeners.iter_mut() {
+                l.on_after_module(&scope);
+            }
         }
 
         errors
     }
+}
+
+fn can_generate(diagnostics: &[XenoDiagnostic<'_>]) -> bool {
+    !diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == crate::XenoDiagSeverity::Err)
 }
 
 // ── Walk functions (free functions to avoid &mut self borrow issues) ─
@@ -712,7 +722,33 @@ impl XenoDefNode<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::semantic::{TypeDeclarationInfo, HAS_LENGTH, NUMERIC};
+    use crate::{
+        semantic::{TypeDeclarationInfo, HAS_LENGTH, NUMERIC},
+        XenoDiagSeverity,
+    };
+
+    fn diagnostic(severity: XenoDiagSeverity) -> XenoDiagnostic<'static> {
+        XenoDiagnostic {
+            location: TokenData::default(),
+            message: "diagnostic".to_string(),
+            severity,
+        }
+    }
+
+    #[test]
+    fn warnings_and_infos_allow_generation() {
+        let diagnostics = [
+            diagnostic(XenoDiagSeverity::Warn),
+            diagnostic(XenoDiagSeverity::Info),
+        ];
+
+        assert!(can_generate(&diagnostics));
+    }
+
+    #[test]
+    fn errors_block_generation() {
+        assert!(!can_generate(&[diagnostic(XenoDiagSeverity::Err)]));
+    }
 
     fn scope_with_declarations(
         type_declarations: HashMap<String, TypeDeclarationInfo>,

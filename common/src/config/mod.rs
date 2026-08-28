@@ -4,6 +4,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+use crate::XenoDiagSeverity;
+
 pub mod schema;
 pub use schema::{build_rc_schema, write_rc_schema, RC_SCHEMA_RELATIVE_PATH};
 
@@ -59,6 +61,28 @@ pub struct DebugConfig {
 
     #[serde(default)]
     pub ast: bool,
+
+    #[serde(default)]
+    pub loglevel: LogLevel,
+}
+
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    Error,
+    Warning,
+    #[default]
+    Info,
+}
+
+impl LogLevel {
+    pub fn allows(self, severity: XenoDiagSeverity) -> bool {
+        match self {
+            Self::Error => severity == XenoDiagSeverity::Err,
+            Self::Warning => severity != XenoDiagSeverity::Info,
+            Self::Info => true,
+        }
+    }
 }
 
 fn default_parser_path() -> String {
@@ -110,6 +134,7 @@ impl Default for DebugConfig {
             plugins: false,
             tokens: false,
             ast: false,
+            loglevel: LogLevel::default(),
         }
     }
 }
@@ -169,5 +194,47 @@ fn init_config() -> Config {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Config, LogLevel};
+    use crate::XenoDiagSeverity;
+
+    #[test]
+    fn loglevel_defaults_to_info() {
+        let config: Config = toml::from_str("").expect("empty config should use defaults");
+
+        assert_eq!(config.debug.loglevel, LogLevel::Info);
+    }
+
+    #[test]
+    fn loglevel_deserializes_supported_values() {
+        for (value, expected) in [
+            ("error", LogLevel::Error),
+            ("warning", LogLevel::Warning),
+            ("info", LogLevel::Info),
+        ] {
+            let config: Config = toml::from_str(&format!("[debug]\nloglevel = \"{value}\"\n"))
+                .expect("supported loglevel should deserialize");
+
+            assert_eq!(config.debug.loglevel, expected);
+        }
+    }
+
+    #[test]
+    fn loglevel_filters_diagnostic_severities() {
+        assert!(LogLevel::Error.allows(XenoDiagSeverity::Err));
+        assert!(!LogLevel::Error.allows(XenoDiagSeverity::Warn));
+        assert!(!LogLevel::Error.allows(XenoDiagSeverity::Info));
+
+        assert!(LogLevel::Warning.allows(XenoDiagSeverity::Err));
+        assert!(LogLevel::Warning.allows(XenoDiagSeverity::Warn));
+        assert!(!LogLevel::Warning.allows(XenoDiagSeverity::Info));
+
+        assert!(LogLevel::Info.allows(XenoDiagSeverity::Err));
+        assert!(LogLevel::Info.allows(XenoDiagSeverity::Warn));
+        assert!(LogLevel::Info.allows(XenoDiagSeverity::Info));
     }
 }

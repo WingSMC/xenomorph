@@ -23,3 +23,14 @@ type User<T: HasLength> = {
 Specialized user type with the name as a string.
 */
 type SpecializedUser = User<string>;
+
+
+type Gt0<T: Numeric> = T @min(1);
+type BigInt<T: Numeric> = Gt0<T>[] @minlen(1) @Lombok(Getter);
+
+type NumericStore = {
+    /** Serialization discriminant tag */
+    Ty: "#nvStore",
+    /** Test */
+    bigInts: ?BigInt<u8>,
+} @Lombok(Data, Builder);

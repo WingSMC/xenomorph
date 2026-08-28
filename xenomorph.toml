@@ -3,6 +3,12 @@
 [parser]
 entry = "./tests/examples/test"
 
+[debug]
+loglevel = "info"
+# tokens = true
+# ast = true
+# plugins = true
+
 [plugins]
 path = "./target/release/"
 plugins = ["xenomorph_json_schema", "xenomorph_java", "xenomorph_typescript"]

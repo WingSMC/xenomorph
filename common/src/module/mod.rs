@@ -328,7 +328,25 @@ impl XenoRegistry {
             let cache = self.module_cache.read().unwrap();
             let md = cache.get(&module_path).unwrap();
 
-            let xeno_errors = self.analyzer.run(
+            let import_errors = self.validate_imports(md, &module_path);
+            let lexer_errs = md.borrow_lexer_errors().clone();
+            let parser_errs = md.borrow_parser_errors().clone();
+            let generation_allowed = !Self::has_fatal_diagnostics(&errors)
+                && !Self::has_fatal_diagnostics(&import_errors)
+                && !Self::has_fatal_diagnostics(&lexer_errs)
+                && !Self::has_fatal_diagnostics(&parser_errs);
+
+            // When an earlier phase failed, run validators without generator
+            // listeners. Warnings and infos leave generation mode unchanged.
+            let analysis_only;
+            let analyzer = if generation_allowed {
+                &self.analyzer
+            } else {
+                analysis_only = Analyzer::new(false, self.plugins);
+                &analysis_only
+            };
+
+            let xeno_errors = analyzer.run(
                 md.borrow_ast(),
                 md,
                 &imports,
@@ -347,10 +365,6 @@ impl XenoRegistry {
                     severity: e.severity,
                 })
                 .collect();
-
-            let import_errors = self.validate_imports(md, &module_path);
-            let lexer_errs = md.borrow_lexer_errors().clone();
-            let parser_errs = md.borrow_parser_errors().clone();
 
             (analyzer_errors, import_errors, lexer_errs, parser_errs)
         };
