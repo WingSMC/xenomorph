@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
-use xenomorph_common::config::{ConfigValue, PluginConfigs};
+use xenomorph_common::config::{Config, ConfigValue, PluginConfigs};
 use xenomorph_common::parser::{
     decimal_roundtrips_as, integer_fits, Annotation, Declaration, Expr, FloatSize, IntLiteral,
     IntegerRepresentation, IntegerSize, KeyValExpr, Literal, SimpleType, Type, XenoType,
@@ -262,7 +262,7 @@ impl<'src> AnalyzerListener<'src> for JavaGenerator {
 
     fn on_after_module(&mut self, scope: &ScopeInfo) {
         let base = match &self.output_dir {
-            Some(dir) => dir.clone(),
+            Some(dir) => Config::get().workdir.join(dir),
             None => self
                 .abs_path
                 .parent()

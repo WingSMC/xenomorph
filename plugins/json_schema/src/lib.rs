@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use serde_json::{json, Map, Value};
-use xenomorph_common::config::{ConfigValue, PluginConfigs};
+use xenomorph_common::config::{Config, ConfigValue, PluginConfigs};
 use xenomorph_common::parser::{
     Annotation, Declaration, Expr, KeyValExpr, Literal, SimpleType, Type, XenoType,
 };
@@ -538,7 +538,7 @@ impl<'src> AnalyzerListener<'src> for JsonSchemaGenerator {
                         .module_path
                         .replace('/', std::path::MAIN_SEPARATOR_STR)
                 );
-                let path = dir.join(filename);
+                let path = Config::get().workdir.join(dir).join(filename);
                 if let Some(parent) = path.parent() {
                     let _ = fs::create_dir_all(parent);
                 }

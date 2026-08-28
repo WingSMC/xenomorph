@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-use xenomorph_common::config::{ConfigValue, PluginConfigs};
+use xenomorph_common::config::{Config, ConfigValue, PluginConfigs};
 use xenomorph_common::parser::{
     Annotation, Declaration, Expr, FloatSize, IntLiteral, KeyValExpr, Literal, SimpleType, Type,
     XenoType,
@@ -154,7 +154,7 @@ impl<'src> AnalyzerListener<'src> for TsGenerator {
                         .module_path
                         .replace('/', std::path::MAIN_SEPARATOR_STR)
                 );
-                let path = dir.join(filename);
+                let path = Config::get().workdir.join(dir).join(filename);
                 if let Some(parent) = path.parent() {
                     let _ = fs::create_dir_all(parent);
                 }
