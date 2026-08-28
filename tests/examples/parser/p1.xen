@@ -28,9 +28,17 @@ type Asd = {
 */
 type Admin = & User<string> & Asd;
 
-type UserId = string @MongoId @SQLPrimary(u64);
+type UserId = u64 @SQLPrimary;
 type UserName<T: string> = T @match(/^[A-Z]{3,5}_[0-9]{1,3}$/) @minlen(5) @maxlen(20);
 type UserAge = u8 @min(13) @max(150);
+
+type UserType = enum {
+    Admin: -1 as i8,
+    Guest: 1,
+    User: 2,
+    Premium: 3,
+};
+
 type User <T: string> = {
     // by default it will use string for other targets
     // if it is generating a mongo orm it will use string
