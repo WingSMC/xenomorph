@@ -763,7 +763,7 @@ impl XenoRegistry {
                 Lexer::tokenize(source)
                     .inspect(|ts| {
                         if Config::get().debug.tokens {
-                            print!("{:?}", ts);
+                            eprint!("{:?}", ts);
                         }
                     })
                     .map_err(|e| {
@@ -780,7 +780,7 @@ impl XenoRegistry {
                 let (ast, diagnostics) = Parser::parse(tokens);
 
                 if Config::get().debug.ast {
-                    print!("{:?}", ast);
+                    eprint!("{:?}", ast);
                 }
 
                 parser_errors_cell

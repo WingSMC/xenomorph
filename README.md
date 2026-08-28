@@ -19,6 +19,10 @@ structured JSON containing the lexer token stream, syntax AST, and parser
 diagnostics. Standalone inspection does not resolve imports or run workspace
 semantic analysis.
 
+`xeno graph` prints the configured workspace's module graph in a readable
+`importer -> imported` format. Use `xeno graph --json` for the versioned JSON
+representation consumed by editor and other tooling integrations.
+
 ## LSP
 
 `xenomorph_lsp` communicates over standard input/output and can be launched by

@@ -1,7 +1,8 @@
 # Change Log
 
-## Unreleased
+## [0.1.2]
 
+- Add module graph preview and JSON commands backed by `xeno graph --json`.
 - Use semantic tokens from the Rust lexer and parser for syntax highlighting;
   retain only comment fallback rules in the TextMate grammar.
 - Resolve the `xenomorph_lsp` and `xeno` executables from `PATH` instead of

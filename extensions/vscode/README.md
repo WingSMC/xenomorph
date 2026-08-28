@@ -13,7 +13,7 @@ both Rust and regular expressions.
 The extension runs the globally installed executables directly from `PATH`:
 
 - `xenomorph_lsp` provides language-server features.
-- `xeno` provides parse, lexer-debug, and AST-inspection features.
+- `xeno` provides parse, lexer-debug, AST-inspection, and module-graph features.
 
 The extension does not package either executable. If you use different names
 or absolute paths, configure `xenomorph.lsp.executable` and
@@ -31,6 +31,10 @@ Open the Command Palette with `Ctrl+Shift+P` and search for **Xenomorph**:
   lexer token stream, AST, and parser diagnostics to the Output channel.
 - **Xenomorph: Show AST Visualization** opens an interactive AST tab beside
   the editor.
+- **Xenomorph: Show Module Graph** opens the configured workspace's interactive
+  module dependency graph.
+- **Xenomorph: Show Module Graph JSON** opens the CLI graph protocol as a JSON
+  document.
 
 The commands inspect the current in-memory editor text, so saving first is not
 required.
@@ -57,7 +61,14 @@ The AST tab renders the parser's structured output as a tree. You can:
 - review parser diagnostics in the side panel.
 
 The editor title bar also contains a tree icon that opens the AST for the
-active Xenomorph document.
+active Xenomorph document and a references icon that opens the module graph.
+
+## Module graph visualization
+
+The module graph runs `xeno graph --json` in the active workspace. Arrows point
+from an importer to the module it imports. Entry, error, and warning nodes are
+highlighted; click any module to open its source file. The graph supports pan,
+zoom, and fit controls.
 
 ## Parser inspection protocol
 

@@ -5,6 +5,7 @@ import {
     OutputChannel,
     Range,
     Uri,
+    ViewColumn,
     window,
     workspace,
 } from 'vscode';
@@ -28,6 +29,11 @@ import {
     logVisualization,
     runInspector,
 } from './inspector';
+import { logModuleGraph, runModuleGraph } from './moduleGraph';
+import {
+    disposeModuleGraphWebview,
+    showModuleGraphWebview,
+} from './moduleGraphWebview';
 
 function createServerOptions(): {
     run: Executable;
@@ -65,6 +71,12 @@ export function activate(context: ExtensionContext): void {
         commands.registerCommand('xenomorph.showAst', (target?: SourceTarget) =>
             inspectCommand('ast', target),
         ),
+        commands.registerCommand('xenomorph.showModuleGraph', () =>
+            moduleGraphCommand('preview'),
+        ),
+        commands.registerCommand('xenomorph.showModuleGraphJson', () =>
+            moduleGraphCommand('json'),
+        ),
     );
 
     const clientOptions: LanguageClientOptions = {
@@ -90,6 +102,65 @@ export function activate(context: ExtensionContext): void {
             `Xenomorph LSP failed to start (${lspExecutable}). Ensure it is on PATH. ${message}`,
         );
     });
+}
+
+async function moduleGraphCommand(mode: 'preview' | 'json'): Promise<void> {
+    if (!output) {
+        return;
+    }
+
+    const workspaceUri = await resolveWorkspaceUri();
+    if (!workspaceUri) {
+        return;
+    }
+
+    try {
+        const graph = await runModuleGraph(workspaceUri);
+        logModuleGraph(output, graph);
+        if (mode === 'preview') {
+            showModuleGraphWebview(graph);
+        } else {
+            const document = await workspace.openTextDocument({
+                content: JSON.stringify(graph, null, 2),
+                language: 'json',
+            });
+            await window.showTextDocument(document, {
+                viewColumn: ViewColumn.Beside,
+                preserveFocus: false,
+            });
+        }
+    } catch (error) {
+        const message = errorMessage(error);
+        output.appendLine(`[Module Graph] ${message}`);
+        output.show(true);
+        void window.showErrorMessage(message);
+    }
+}
+
+async function resolveWorkspaceUri(): Promise<Uri | undefined> {
+    const activeUri = window.activeTextEditor?.document.uri;
+    const activeWorkspace = activeUri
+        ? workspace.getWorkspaceFolder(activeUri)
+        : undefined;
+    if (activeWorkspace) {
+        return activeWorkspace.uri;
+    }
+
+    const folders = workspace.workspaceFolders ?? [];
+    if (folders.length === 1) {
+        return folders[0].uri;
+    }
+    if (folders.length > 1) {
+        const selected = await window.showWorkspaceFolderPick({
+            placeHolder: 'Select the Xenomorph workspace to graph',
+        });
+        return selected?.uri;
+    }
+
+    void window.showInformationMessage(
+        'Open a folder containing xenomorph.toml first.',
+    );
+    return undefined;
 }
 
 async function inspectCommand(
@@ -168,6 +239,7 @@ async function resolveTarget(
 
 export async function deactivate(): Promise<void> {
     disposeAstWebview();
+    disposeModuleGraphWebview();
     if (!client) {
         return;
     }

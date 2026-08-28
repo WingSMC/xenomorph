@@ -1,5 +1,7 @@
+mod graph;
 mod inspector;
 
+use graph::run_graph;
 use inspector::run_inspector;
 use xenomorph_common::config::{write_rc_schema, Config, LogLevel, RC_SCHEMA_RELATIVE_PATH};
 use xenomorph_common::module::{types::ModuleDiagnostic, XenoRegistry};
@@ -7,9 +9,11 @@ use xenomorph_common::plugins::XenoPlugin;
 use xenomorph_common::XenoDiagSeverity;
 
 fn main() {
-    match std::env::args().nth(1).as_deref() {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    match args.first().map(String::as_str) {
         Some("schema") => generate_rc_schema(),
         Some("inspect") => run_inspector(),
+        Some("graph") => run_graph(&args[1..]),
         _ => run_parser(),
     }
 }
