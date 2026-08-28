@@ -17,6 +17,7 @@ type User<T: HasLength> = {
     name: UserName<T>,
     age: UserAge,
     favouriteColor: Color,
+    constField: 12325413256,
 };
 
 /**

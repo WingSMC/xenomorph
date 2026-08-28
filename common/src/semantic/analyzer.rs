@@ -791,6 +791,7 @@ mod tests {
             TypeDeclarationInfo {
                 generic_params: vec![generic.clone()],
                 parents: vec![OwnedType::named("T")],
+                transparent_alias: true,
             },
         );
         declarations.insert(
@@ -801,6 +802,7 @@ mod tests {
                     name: "Wrapped".to_string(),
                     arguments: vec![OwnedType::named("T")],
                 }],
+                transparent_alias: true,
             },
         );
         let scope = scope_with_declarations(declarations);

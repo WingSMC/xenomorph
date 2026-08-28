@@ -8,10 +8,12 @@ use xenomorph_common::parser::{
 };
 use xenomorph_common::plugins::XenoPlugin;
 use xenomorph_common::semantic::{
-    AnalyzerListener, ScopeInfo, XenoAnnotation, XenoAnnotationKind, XenoConstraint, XenoParam,
-    XenoParent, XenoTrait, XenoTraitKind, XenoType as SemanticType, ANY_TARGET_PARAM,
+    simple_to_owned_type, AnalyzerListener, OwnedType, ScopeInfo, TypeHierarchy, XenoAnnotation,
+    XenoAnnotationKind, XenoConstraint, XenoParam, XenoParent, XenoTrait, XenoTraitKind,
+    XenoType as SemanticType, ANY_TARGET_PARAM,
 };
 use xenomorph_common::utils::extract_documentation;
+use xenomorph_common::TokenData;
 
 // ── Plugin registration ─────────────────────────────────────────────
 
@@ -156,6 +158,8 @@ struct JavaGenerator {
     blanket_builder: bool,
     /// Blanket `@Data` on every class.
     blanket_data: bool,
+    /// Complete semantic type graph used to expand transparent aliases.
+    type_hierarchy: TypeHierarchy,
     /// Generated files for the current module: (type name, file contents).
     files: Vec<(String, String)>,
 }
@@ -170,6 +174,7 @@ impl JavaGenerator {
             blanket_value: false,
             blanket_builder: false,
             blanket_data: false,
+            type_hierarchy: TypeHierarchy::default(),
             files: Vec::new(),
         }
     }
@@ -203,6 +208,7 @@ impl<'src> AnalyzerListener<'src> for JavaGenerator {
     fn on_before_module(&mut self, scope: &ScopeInfo) {
         self.abs_path = scope.abs_path.clone();
         self.module_path = scope.module_path.clone();
+        self.type_hierarchy = scope.type_hierarchy.clone();
         self.files.clear();
     }
 
@@ -213,10 +219,15 @@ impl<'src> AnalyzerListener<'src> for JavaGenerator {
     ) {
         for decl in ast {
             if let Declaration::Type {
-                docs, name, ty: t, ..
+                docs,
+                name,
+                generics,
+                ty: t,
+                ..
             } = decl
             {
-                if let Some(content) = self.generate_type_decl(docs, name.v, t) {
+                if let Some(content) = self.generate_type_decl(docs, name.v, generics.as_deref(), t)
+                {
                     self.files.push((name.v.to_string(), content));
                 }
             }
@@ -254,14 +265,23 @@ impl<'src> AnalyzerListener<'src> for JavaGenerator {
 // ── Type declaration generation ─────────────────────────────────────
 
 impl JavaGenerator {
-    // TODO include from-to locations
-    fn generate_type_decl(&self, docs: &Option<&str>, name: &str, t: &XenoType) -> Option<String> {
+    fn generate_type_decl(
+        &self,
+        docs: &Option<&str>,
+        name: &str,
+        generics: Option<&[(&TokenData, Option<&TokenData>)]>,
+        t: &XenoType,
+    ) -> Option<String> {
         let lombok_decorators = collect_lombok_decorators(&t.1);
 
         match &t.0 {
-            Type::Struct(fields) => {
-                Some(self.generate_class(docs, name, fields, &lombok_decorators))
-            }
+            Type::Struct(fields) => Some(self.generate_class(
+                docs,
+                name,
+                &format_generic_params(generics),
+                fields,
+                &lombok_decorators,
+            )),
             Type::Enum(variants) => Some(self.generate_enum(docs, name, variants)),
             _ => None,
         }
@@ -273,6 +293,7 @@ impl JavaGenerator {
         &self,
         docs: &Option<&str>,
         name: &str,
+        generic_params: &str,
         fields: &[KeyValExpr],
         type_lombok_decorators: &[String],
     ) -> String {
@@ -284,15 +305,24 @@ impl JavaGenerator {
         for (key, value, docs) in fields {
             let java_type = self.type_to_java(value, &mut imports);
             let nullable = is_optional(value);
+            let literal = required_literal(value);
 
             if let Some(docs) = docs {
                 push_indented_javadoc(&mut field_block, extract_documentation(docs), "    ");
             }
-            if !nullable {
+            if !nullable && literal.is_none() {
                 field_block.push_str("    @NonNull\n");
                 register_lombok_import(&mut imports, "NonNull");
             }
-            field_block.push_str(&format!("    private {java_type} {};\n", key.v));
+            if let Some(literal) = literal {
+                field_block.push_str(&format!(
+                    "    private final {java_type} {} = {};\n",
+                    key.v,
+                    literal_to_java(literal, &java_type)
+                ));
+            } else {
+                field_block.push_str(&format!("    private {java_type} {};\n", key.v));
+            }
         }
 
         for annotation in &class_annotations {
@@ -317,7 +347,7 @@ impl JavaGenerator {
         for annotation in &class_annotations {
             out.push_str(&format!("@{annotation}\n"));
         }
-        out.push_str(&format!("public class {name} {{\n"));
+        out.push_str(&format!("public class {name}{generic_params} {{\n"));
         out.push_str(&field_block);
         out.push_str("}\n");
         out
@@ -410,17 +440,13 @@ impl JavaGenerator {
 
     fn type_to_java(&self, ty: &SimpleType, imports: &mut BTreeSet<String>) -> String {
         match ty {
-            SimpleType::Identifier(identifier, arguments)
-            | SimpleType::OptionalIdentifier(identifier, arguments) => {
-                self.named_type_to_java(identifier.v, arguments.as_deref(), imports)
-            }
-            SimpleType::Array(identifier, arguments)
-            | SimpleType::OptionalArray(identifier, arguments) => {
-                imports.insert("java.util.List".to_string());
-                format!(
-                    "List<{}>",
-                    self.named_type_to_java(identifier.v, arguments.as_deref(), imports)
-                )
+            SimpleType::Identifier(_, _)
+            | SimpleType::OptionalIdentifier(_, _)
+            | SimpleType::Array(_, _)
+            | SimpleType::OptionalArray(_, _) => {
+                let owned = simple_to_owned_type(ty);
+                let resolved = self.type_hierarchy.resolve_transparent_aliases(&owned);
+                self.owned_type_to_java(&resolved, imports)
             }
             SimpleType::Literal(Literal::String(_, _))
             | SimpleType::OptionalLiteral(Literal::String(_, _)) => "String".to_string(),
@@ -433,23 +459,61 @@ impl JavaGenerator {
         }
     }
 
-    fn named_type_to_java(
+    fn owned_type_to_java(&self, ty: &OwnedType, imports: &mut BTreeSet<String>) -> String {
+        match ty {
+            OwnedType::Array(inner) => {
+                imports.insert("java.util.List".to_string());
+                format!("List<{}>", self.owned_type_to_java(inner, imports))
+            }
+            OwnedType::Generic { name, .. } => name.clone(),
+            OwnedType::Named { name, arguments }
+            | OwnedType::Qualified {
+                name, arguments, ..
+            } => self.named_owned_type_to_java(name, arguments, imports),
+        }
+    }
+
+    fn named_owned_type_to_java(
         &self,
         name: &str,
-        arguments: Option<&[SimpleType]>,
+        arguments: &[OwnedType],
         imports: &mut BTreeSet<String>,
     ) -> String {
+        if name == "array" {
+            imports.insert("java.util.List".to_string());
+            let element = arguments
+                .first()
+                .map(|argument| self.owned_type_to_java(argument, imports))
+                .unwrap_or_else(|| "Object".to_string());
+            return format!("List<{element}>");
+        }
+        if name == "dict" {
+            imports.insert("java.util.Map".to_string());
+            return match arguments {
+                [] => "Map<String, Object>".to_string(),
+                _ => format!(
+                    "Map<{}>",
+                    arguments
+                        .iter()
+                        .map(|argument| self.owned_type_to_java(argument, imports))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            };
+        }
+
         let base = builtin_to_java(name, imports);
-        match arguments {
-            None => base,
-            Some(arguments) => format!(
+        if arguments.is_empty() || base != name {
+            base
+        } else {
+            format!(
                 "{base}<{}>",
                 arguments
                     .iter()
-                    .map(|argument| self.type_to_java(argument, imports))
+                    .map(|argument| self.owned_type_to_java(argument, imports))
                     .collect::<Vec<_>>()
                     .join(", ")
-            ),
+            )
         }
     }
 }
@@ -466,7 +530,9 @@ fn builtin_to_java(name: &str, imports: &mut BTreeSet<String>) -> String {
             "String".to_string()
         }
         "bool" => "Boolean".to_string(),
-        "i4" | "i8" | "i16" | "i32" | "u4" | "u8" | "u16" => "Integer".to_string(),
+        "i4" | "i8" | "u4" => "Byte".to_string(),
+        "i16" | "u8" => "Short".to_string(),
+        "i32" | "u16" => "Integer".to_string(),
         "i64" | "u32" => "Long".to_string(),
         "u64" | "u128" | "i128" | "bigint" | "integer" => {
             imports.insert("java.math.BigInteger".to_string());
@@ -554,6 +620,66 @@ fn is_optional(ty: &SimpleType) -> bool {
     )
 }
 
+fn required_literal<'src>(ty: &'src SimpleType<'src>) -> Option<&'src Literal<'src>> {
+    match ty {
+        SimpleType::Literal(literal) => Some(literal),
+        _ => None,
+    }
+}
+
+fn literal_to_java(literal: &Literal, java_type: &str) -> String {
+    match literal {
+        Literal::String(value, _) => java_string_literal(value),
+        Literal::Boolean(value, _) => value.to_string(),
+        Literal::Int(value, _) if java_type == "Long" => format!("{value}L"),
+        Literal::Int(value, _) if java_type == "BigInteger" => {
+            format!("new BigInteger(\"{value}\")")
+        }
+        Literal::Int(value, _) => value.to_string(),
+        Literal::Float(value, _) if java_type == "Float" => format!("{value}F"),
+        Literal::Float(value, _) if java_type == "BigDecimal" => {
+            format!("new BigDecimal(\"{value}\")")
+        }
+        Literal::Float(value, _) => format!("{value}D"),
+    }
+}
+
+fn java_string_literal(value: &str) -> String {
+    let mut output = String::from("\"");
+    for character in value.chars() {
+        match character {
+            '\\' => output.push_str("\\\\"),
+            '"' => output.push_str("\\\""),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            '\u{0008}' => output.push_str("\\b"),
+            '\u{000C}' => output.push_str("\\f"),
+            control if control.is_control() => {
+                output.push_str(&format!("\\u{:04X}", control as u32));
+            }
+            character => output.push(character),
+        }
+    }
+    output.push('"');
+    output
+}
+
+fn format_generic_params(generics: Option<&[(&TokenData, Option<&TokenData>)]>) -> String {
+    let Some(generics) = generics.filter(|generics| !generics.is_empty()) else {
+        return String::new();
+    };
+
+    format!(
+        "<{}>",
+        generics
+            .iter()
+            .map(|(name, _constraint)| name.v)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
 fn push_javadoc(out: &mut String, docs: &Option<&str>) {
     if let Some(doc) = docs {
         out.push_str("/**\n");
@@ -585,6 +711,7 @@ fn package_to_path(package: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xenomorph_common::semantic::{GenericParameterInfo, TypeDeclarationInfo, BUILTIN_TYPES};
 
     fn imports() -> BTreeSet<String> {
         BTreeSet::new()
@@ -617,7 +744,7 @@ mod tests {
         );
 
         let output = JavaGenerator::new()
-            .generate_type_decl(&Some("A user-facing profile."), "Profile", &ty)
+            .generate_type_decl(&Some("A user-facing profile."), "Profile", None, &ty)
             .expect("structs generate Java classes");
 
         assert!(output.contains(" * A user-facing profile."));
@@ -630,7 +757,10 @@ mod tests {
         let mut i = imports();
         assert_eq!(builtin_to_java("string", &mut i), "String");
         assert_eq!(builtin_to_java("bool", &mut i), "Boolean");
-        assert_eq!(builtin_to_java("u8", &mut i), "Integer");
+        assert_eq!(builtin_to_java("i8", &mut i), "Byte");
+        assert_eq!(builtin_to_java("u8", &mut i), "Short");
+        assert_eq!(builtin_to_java("i16", &mut i), "Short");
+        assert_eq!(builtin_to_java("u16", &mut i), "Integer");
         assert_eq!(builtin_to_java("i64", &mut i), "Long");
         assert_eq!(builtin_to_java("u64", &mut i), "BigInteger");
         assert_eq!(builtin_to_java("f32", &mut i), "Float");
@@ -641,6 +771,166 @@ mod tests {
         assert_eq!(builtin_to_java("MyType", &mut i), "MyType");
         assert!(i.contains("java.math.BigInteger"));
         assert!(i.contains("java.util.UUID"));
+    }
+
+    #[test]
+    fn test_generic_aliases_are_expanded_in_generic_classes() {
+        let mut generator = generator_with_builtins();
+        generator.type_hierarchy.insert_declaration(
+            "test",
+            "UserName",
+            TypeDeclarationInfo {
+                generic_params: vec![generic("T")],
+                parents: vec![OwnedType::named("T")],
+                transparent_alias: true,
+            },
+        );
+
+        let type_parameter = token("T");
+        let constraint = token("HasLength");
+        let field_name = token("name");
+        let alias_name = token("UserName");
+        let argument = token("T");
+        let generics = [(&type_parameter, Some(&constraint))];
+        let ty = (
+            Type::Struct(vec![(
+                &field_name,
+                SimpleType::Identifier(
+                    &alias_name,
+                    Some(vec![SimpleType::Identifier(&argument, None)]),
+                ),
+                None,
+            )]),
+            vec![],
+        );
+
+        let output = generator
+            .generate_type_decl(&None, "User", Some(&generics), &ty)
+            .expect("structs generate Java classes");
+
+        assert!(output.contains("public class User<T> {"));
+        assert!(output.contains("    private T name;"));
+        assert!(!output.contains("UserName<T>"));
+    }
+
+    #[test]
+    fn test_array_aliases_are_expanded_recursively() {
+        let mut generator = generator_with_builtins();
+        generator.type_hierarchy.insert_declaration(
+            "test",
+            "Positive",
+            TypeDeclarationInfo {
+                generic_params: vec![generic("T")],
+                parents: vec![OwnedType::named("T")],
+                transparent_alias: true,
+            },
+        );
+        generator.type_hierarchy.insert_declaration(
+            "test",
+            "NonEmpty",
+            TypeDeclarationInfo {
+                generic_params: vec![generic("T")],
+                parents: vec![OwnedType::Array(Box::new(OwnedType::Named {
+                    name: "Positive".to_string(),
+                    arguments: vec![OwnedType::named("T")],
+                }))],
+                transparent_alias: true,
+            },
+        );
+
+        let field_name = token("values");
+        let alias_name = token("NonEmpty");
+        let argument = token("u8");
+        let ty = (
+            Type::Struct(vec![(
+                &field_name,
+                SimpleType::Identifier(
+                    &alias_name,
+                    Some(vec![SimpleType::Identifier(&argument, None)]),
+                ),
+                None,
+            )]),
+            vec![],
+        );
+
+        let output = generator
+            .generate_type_decl(&None, "Store", None, &ty)
+            .expect("structs generate Java classes");
+
+        assert!(output.contains("import java.util.List;"));
+        assert!(output.contains("    private List<Short> values;"));
+    }
+
+    #[test]
+    fn test_concrete_generic_classes_keep_type_arguments() {
+        let mut generator = generator_with_builtins();
+        generator.type_hierarchy.insert_declaration(
+            "test",
+            "Box",
+            TypeDeclarationInfo {
+                generic_params: vec![generic("T")],
+                parents: vec![OwnedType::named("dict")],
+                transparent_alias: false,
+            },
+        );
+
+        let field_name = token("box");
+        let box_name = token("Box");
+        let argument = token("string");
+        let ty = (
+            Type::Struct(vec![(
+                &field_name,
+                SimpleType::Identifier(
+                    &box_name,
+                    Some(vec![SimpleType::Identifier(&argument, None)]),
+                ),
+                None,
+            )]),
+            vec![],
+        );
+
+        let output = generator
+            .generate_type_decl(&None, "Holder", None, &ty)
+            .expect("structs generate Java classes");
+
+        assert!(output.contains("    private Box<String> box;"));
+    }
+
+    #[test]
+    fn test_required_literals_are_initialized_final_fields() {
+        let field_name = token("Ty");
+        let literal_token = token("\"#nv\\\"Store\"");
+        let ty = (
+            Type::Struct(vec![(
+                &field_name,
+                SimpleType::Literal(Literal::String("#nv\"Store".to_string(), &literal_token)),
+                None,
+            )]),
+            vec![],
+        );
+
+        let output = JavaGenerator::new()
+            .generate_type_decl(&None, "Store", None, &ty)
+            .expect("structs generate Java classes");
+
+        assert!(output.contains("    private final String Ty = \"#nv\\\"Store\";"));
+        assert!(!output.contains("@NonNull"));
+    }
+
+    #[test]
+    fn test_parameterized_dict_maps_directly_to_java_map() {
+        let generator = generator_with_builtins();
+        let dict = OwnedType::Named {
+            name: "dict".to_string(),
+            arguments: vec![OwnedType::named("string"), OwnedType::named("u8")],
+        };
+        let mut i = imports();
+
+        assert_eq!(
+            generator.owned_type_to_java(&dict, &mut i),
+            "Map<String, Short>"
+        );
+        assert!(i.contains("java.util.Map"));
     }
 
     #[test]
@@ -699,5 +989,31 @@ mod tests {
         assert!(xenomorph_common::semantic::BUILTIN_TYPES
             .iter()
             .all(|semantic_type| !semantic_type.implements(&LOMBOK_TRAIT)));
+    }
+
+    fn token(value: &'static str) -> TokenData<'static> {
+        TokenData {
+            v: value,
+            l: 0,
+            c: 0,
+        }
+    }
+
+    fn generic(name: &str) -> GenericParameterInfo {
+        GenericParameterInfo {
+            name: name.to_string(),
+            constraint: None,
+            constraint_scope: None,
+        }
+    }
+
+    fn generator_with_builtins() -> JavaGenerator {
+        let mut generator = JavaGenerator::new();
+        generator.type_hierarchy.set_current_module("test");
+        generator.type_hierarchy.register_module("test", Vec::new());
+        for semantic_type in BUILTIN_TYPES {
+            generator.type_hierarchy.insert_semantic_type(semantic_type);
+        }
+        generator
     }
 }

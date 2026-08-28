@@ -18,6 +18,9 @@ pub struct TypeDeclarationInfo {
     pub generic_params: Vec<GenericParameterInfo>,
     /// Immediate type parents. Intersections contribute multiple parents.
     pub parents: Vec<OwnedType>,
+    /// Whether this declaration is a transparent `type Alias = Parent`
+    /// declaration whose parent can be substituted at use sites.
+    pub transparent_alias: bool,
 }
 
 impl TypeDeclarationInfo {
@@ -36,6 +39,7 @@ impl TypeDeclarationInfo {
                 })
                 .collect(),
             parents: type_parents(ty),
+            transparent_alias: matches!(ty, Type::Simple(_)),
         }
     }
 }
@@ -120,6 +124,8 @@ pub struct TypeDefinition {
     pub generic_params: Vec<GenericParameterInfo>,
     pub parents: Vec<OwnedType>,
     pub traits: Vec<&'static XenoTrait>,
+    /// Source-level simple aliases are transparent to target generators.
+    pub transparent_alias: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -209,6 +215,7 @@ impl TypeHierarchy {
                 generic_params,
                 parents,
                 traits,
+                transparent_alias: false,
             },
         );
         visited.remove(&(semantic_type as *const XenoType));
@@ -241,6 +248,7 @@ impl TypeHierarchy {
                 generic_params,
                 parents: declaration.parents,
                 traits: Vec::new(),
+                transparent_alias: declaration.transparent_alias,
             },
         );
     }
@@ -272,6 +280,113 @@ impl TypeHierarchy {
         self.types
             .get(&self.resolve_key(name, self.current_module.as_deref())?)
             .map(|definition| definition.generic_params.clone())
+    }
+
+    /// Expands source-level simple aliases and substitutes their generic
+    /// parameters while retaining structs, enums, builtins, and plugin types
+    /// as named target-language types.
+    pub fn resolve_transparent_aliases(&self, candidate: &OwnedType) -> OwnedType {
+        self.resolve_transparent_aliases_inner(
+            candidate,
+            self.current_module.as_deref(),
+            &mut HashSet::new(),
+        )
+    }
+
+    fn resolve_transparent_aliases_inner(
+        &self,
+        candidate: &OwnedType,
+        context: Option<&str>,
+        resolving: &mut HashSet<TypeKey>,
+    ) -> OwnedType {
+        match candidate {
+            OwnedType::Array(inner) => OwnedType::Array(Box::new(
+                self.resolve_transparent_aliases_inner(inner, context, resolving),
+            )),
+            OwnedType::Generic { .. } => candidate.clone(),
+            OwnedType::Named { name, arguments } => {
+                let Some(key) = self.resolve_key(name, context) else {
+                    return OwnedType::Named {
+                        name: name.clone(),
+                        arguments: arguments
+                            .iter()
+                            .map(|argument| {
+                                self.resolve_transparent_aliases_inner(argument, context, resolving)
+                            })
+                            .collect(),
+                    };
+                };
+                self.resolve_named_alias(key, arguments, context, resolving)
+            }
+            OwnedType::Qualified {
+                module_path,
+                name,
+                arguments,
+            } => self.resolve_named_alias(
+                TypeKey {
+                    module_path: module_path.clone(),
+                    name: name.clone(),
+                },
+                arguments,
+                context,
+                resolving,
+            ),
+        }
+    }
+
+    fn resolve_named_alias(
+        &self,
+        key: TypeKey,
+        arguments: &[OwnedType],
+        argument_context: Option<&str>,
+        resolving: &mut HashSet<TypeKey>,
+    ) -> OwnedType {
+        let qualified_arguments = arguments
+            .iter()
+            .map(|argument| self.qualify_type(argument, argument_context))
+            .collect::<Vec<_>>();
+        let Some(definition) = self.types.get(&key) else {
+            return OwnedType::Qualified {
+                module_path: key.module_path,
+                name: key.name,
+                arguments: qualified_arguments,
+            };
+        };
+
+        if definition.transparent_alias && resolving.insert(key.clone()) {
+            let substitutions = definition
+                .generic_params
+                .iter()
+                .zip(&qualified_arguments)
+                .map(|(parameter, argument)| (parameter.name.as_str(), argument))
+                .collect::<HashMap<_, _>>();
+            let expanded = definition
+                .parents
+                .first()
+                .map(|parent| substitute_owned_type(parent, &substitutions))
+                .map(|parent| {
+                    self.resolve_transparent_aliases_inner(
+                        &parent,
+                        definition.module_path.as_deref(),
+                        resolving,
+                    )
+                });
+            resolving.remove(&key);
+            if let Some(expanded) = expanded {
+                return expanded;
+            }
+        }
+
+        OwnedType::Qualified {
+            module_path: key.module_path,
+            name: key.name,
+            arguments: qualified_arguments
+                .iter()
+                .map(|argument| {
+                    self.resolve_transparent_aliases_inner(argument, argument_context, resolving)
+                })
+                .collect(),
+        }
     }
 
     pub fn type_implements_trait(&self, candidate: &OwnedType, required: &XenoTrait) -> bool {
@@ -708,5 +823,87 @@ mod tests {
         };
 
         assert!(hierarchy.descends_from_static_type(&candidate, &ANY));
+    }
+
+    #[test]
+    fn transparent_generic_aliases_expand_recursively() {
+        let mut hierarchy = TypeHierarchy::default();
+        hierarchy.set_current_module("test");
+        hierarchy.register_module("test", Vec::new());
+        hierarchy.insert_declaration(
+            "test",
+            "Identity",
+            TypeDeclarationInfo {
+                generic_params: vec![generic("T")],
+                parents: vec![OwnedType::named("T")],
+                transparent_alias: true,
+            },
+        );
+        hierarchy.insert_declaration(
+            "test",
+            "Items",
+            TypeDeclarationInfo {
+                generic_params: vec![generic("T")],
+                parents: vec![OwnedType::Array(Box::new(OwnedType::Named {
+                    name: "Identity".to_string(),
+                    arguments: vec![OwnedType::named("T")],
+                }))],
+                transparent_alias: true,
+            },
+        );
+
+        let resolved = hierarchy.resolve_transparent_aliases(&OwnedType::Named {
+            name: "Items".to_string(),
+            arguments: vec![OwnedType::named("u8")],
+        });
+
+        assert_eq!(
+            resolved,
+            OwnedType::Array(Box::new(OwnedType::Named {
+                name: "u8".to_string(),
+                arguments: Vec::new(),
+            }))
+        );
+    }
+
+    #[test]
+    fn concrete_generic_declarations_are_not_expanded() {
+        let mut hierarchy = TypeHierarchy::default();
+        hierarchy.set_current_module("test");
+        hierarchy.register_module("test", Vec::new());
+        hierarchy.insert_declaration(
+            "test",
+            "Box",
+            TypeDeclarationInfo {
+                generic_params: vec![generic("T")],
+                parents: vec![OwnedType::named("dict")],
+                transparent_alias: false,
+            },
+        );
+
+        let resolved = hierarchy.resolve_transparent_aliases(&OwnedType::Named {
+            name: "Box".to_string(),
+            arguments: vec![OwnedType::named("string")],
+        });
+
+        assert_eq!(
+            resolved,
+            OwnedType::Qualified {
+                module_path: Some("test".to_string()),
+                name: "Box".to_string(),
+                arguments: vec![OwnedType::Named {
+                    name: "string".to_string(),
+                    arguments: Vec::new(),
+                }],
+            }
+        );
+    }
+
+    fn generic(name: &str) -> GenericParameterInfo {
+        GenericParameterInfo {
+            name: name.to_string(),
+            constraint: None,
+            constraint_scope: None,
+        }
     }
 }
