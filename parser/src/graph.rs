@@ -1,8 +1,19 @@
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
+use std::path::Path;
 use xenomorph_common::module::{types::ModuleDiagnostic, XenoRegistry};
 use xenomorph_common::XenoDiagSeverity;
+
+fn path_for_output(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    if let Some(path) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{path}");
+    }
+    path.strip_prefix(r"\\?\")
+        .unwrap_or(path.as_ref())
+        .to_string()
+}
 
 pub fn run_graph(args: &[String]) {
     let json = match args {
@@ -123,7 +134,7 @@ impl ModuleGraph {
 
                 ModuleGraphNode {
                     path: module_path.clone(),
-                    absolute_path: module.borrow_abs_path().to_string_lossy().into_owned(),
+                    absolute_path: path_for_output(module.borrow_abs_path()),
                     entry: module_path == &registry.entry,
                     declarations: module.borrow_declarations().len(),
                     diagnostics,
@@ -149,7 +160,7 @@ impl ModuleGraph {
 
         Self {
             schema_version: 1,
-            workspace_root: registry.root.to_string_lossy().into_owned(),
+            workspace_root: path_for_output(&registry.root),
             entry: registry.entry.clone(),
             module_count: modules.len(),
             import_count: imports.len(),
@@ -256,5 +267,17 @@ mod tests {
         assert_eq!(value["modules"][0]["absolutePath"], "/workspace/index.xen");
         assert_eq!(value["imports"][0]["importer"], "index");
         assert_eq!(value["imports"][0]["imported"], "models/user");
+    }
+
+    #[test]
+    fn output_paths_remove_windows_verbatim_prefixes() {
+        assert_eq!(
+            path_for_output(Path::new(r"\\?\C:\workspace\index.xen")),
+            r"C:\workspace\index.xen"
+        );
+        assert_eq!(
+            path_for_output(Path::new(r"\\?\UNC\server\share\index.xen")),
+            r"\\server\share\index.xen"
+        );
     }
 }

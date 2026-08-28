@@ -112,7 +112,7 @@ export function runModuleGraph(workspaceUri: Uri): Promise<ModuleGraph> {
                 }
                 settled = true;
                 cleanUp();
-                resolve(result);
+                resolve(normalizeModuleGraphPaths(result));
             } catch (error) {
                 fail(
                     new Error(
@@ -122,6 +122,27 @@ export function runModuleGraph(workspaceUri: Uri): Promise<ModuleGraph> {
             }
         });
     });
+}
+
+function normalizeModuleGraphPaths(graph: ModuleGraph): ModuleGraph {
+    return {
+        ...graph,
+        workspaceRoot: normalizeWindowsVerbatimPath(graph.workspaceRoot),
+        modules: graph.modules.map((module) => ({
+            ...module,
+            absolutePath: normalizeWindowsVerbatimPath(module.absolutePath),
+        })),
+    };
+}
+
+export function normalizeWindowsVerbatimPath(value: string): string {
+    const uncPrefix = '\\\\?\\UNC\\';
+    if (value.toUpperCase().startsWith(uncPrefix.toUpperCase())) {
+        return `\\\\${value.slice(uncPrefix.length)}`;
+    }
+
+    const prefix = '\\\\?\\';
+    return value.startsWith(prefix) ? value.slice(prefix.length) : value;
 }
 
 export function logModuleGraph(

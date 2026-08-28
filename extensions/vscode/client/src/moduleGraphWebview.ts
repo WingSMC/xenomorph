@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { Uri, ViewColumn, WebviewPanel, window, workspace } from 'vscode';
-import { ModuleGraph } from './moduleGraph';
+import { ModuleGraph, normalizeWindowsVerbatimPath } from './moduleGraph';
 
 let graphPanel: WebviewPanel | undefined;
 
@@ -39,7 +39,9 @@ async function handleMessage(message: unknown): Promise<void> {
     if (candidate.type !== 'open' || typeof candidate.path !== 'string') {
         return;
     }
-    const document = await workspace.openTextDocument(Uri.file(candidate.path));
+    const document = await workspace.openTextDocument(
+        Uri.file(normalizeWindowsVerbatimPath(candidate.path)),
+    );
     await window.showTextDocument(document, {
         viewColumn: ViewColumn.One,
         preserveFocus: true,

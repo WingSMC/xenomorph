@@ -3,9 +3,11 @@ import { arch, platform } from 'node:process';
 
 console.log(`Packaging extension for ${platform}-${arch}...`);
 
+// const target = `--target ${platform}-${arch}`
+
 const outputFileName = `xenomorph-${platform}-${arch}.vsix`;
 
-execSync(`vsce package --target ${platform}-${arch} --out ${outputFileName}`, {
+execSync(`vsce package --out ${outputFileName}`, {
     stdio: 'inherit',
 });
 
