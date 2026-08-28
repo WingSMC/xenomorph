@@ -1,8 +1,8 @@
 import parser/p1;
-type TestTuple = [UserName, UserAge, email, bool];
+type TestTuple = [UserName<string>, UserAge, email, bool];
 
 type UserType = {
-    name: UserName,
+    name: UserName<string>,
     age: UserAge,
     email: email,
     isActive: bool,

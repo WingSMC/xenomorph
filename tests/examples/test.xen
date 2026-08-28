@@ -1,26 +1,6 @@
 import parser/p1;
 
-type Color = {
-    r: u8,
-    g: u8,
-    b: u8,
-};
 
-/**
-User name type with a minimum length of 8 characters.
-*/
-type UserName<T: HasLength> = T @minlen(8);
-/**
-User age type with a minimum value of 13.
-*/
-type UserAge = u8 @min(13);
-type User<T: HasLength> = {
-    _id: i64,
-    name: UserName<T>,
-    age: UserAge,
-    favouriteColor: Color,
-    constField: 12325413256 as bigint,
-};
 
 /**
 Specialized user type with the name as a string.

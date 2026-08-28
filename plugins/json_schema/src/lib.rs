@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -11,6 +11,7 @@ use xenomorph_common::parser::{
 use xenomorph_common::plugins::XenoPlugin;
 use xenomorph_common::semantic::{AnalyzerListener, ScopeInfo};
 use xenomorph_common::utils::extract_documentation;
+use xenomorph_common::TokenData;
 
 // ── Plugin registration ─────────────────────────────────────────────
 
@@ -60,6 +61,24 @@ struct JsonSchemaGenerator {
     output_dir: Option<PathBuf>,
     /// Imported types keyed by module path, for resolving `$ref` targets.
     imported_types: HashMap<String, Vec<String>>,
+    /// Types declared in the current module. Local names take precedence over
+    /// same-named declarations in imported modules.
+    own_types: HashSet<String>,
+}
+
+struct SchemaContext<'ast, 'src> {
+    declarations: HashMap<&'src str, &'ast Declaration<'src>>,
+    substitutions: Vec<HashMap<String, Value>>,
+    resolving_specializations: HashSet<String>,
+}
+
+impl SchemaContext<'_, '_> {
+    fn substitution(&self, name: &str) -> Option<&Value> {
+        self.substitutions
+            .iter()
+            .rev()
+            .find_map(|substitutions| substitutions.get(name))
+    }
 }
 
 fn create_generator(plugin_configs: &PluginConfigs) -> Box<dyn for<'a> AnalyzerListener<'a>> {
@@ -82,6 +101,7 @@ impl JsonSchemaGenerator {
             module_path: String::new(),
             output_dir: None,
             imported_types: HashMap::new(),
+            own_types: HashSet::new(),
         }
     }
 
@@ -98,76 +118,179 @@ impl JsonSchemaGenerator {
     /// Builds a `$ref` value pointing at a named type, resolving cross-module
     /// references to a relative `.schema.json` file path.
     fn ref_for(&self, name: &str) -> Value {
-        match self.provider_of(name) {
-            Some(provider) => {
+        match self
+            .own_types
+            .contains(name)
+            .then_some(None)
+            .unwrap_or_else(|| self.provider_of(name).map(Some))
+        {
+            Some(Some(provider)) => {
                 let rel = schema_ref_path(&self.module_path, provider);
                 json!({ "$ref": format!("{rel}#/$defs/{name}") })
             }
-            None => json!({ "$ref": format!("#/$defs/{name}") }),
+            Some(None) | None => json!({ "$ref": format!("#/$defs/{name}") }),
         }
     }
 
-    fn type_decl_to_schema(&self, docs: &Option<&str>, name: &str, t: &XenoType) -> Value {
-        let mut schema = self.anonym_type_to_schema(t);
+    fn ref_with_arguments(&self, name: &str, arguments: Vec<Value>) -> Value {
+        let mut schema = self.ref_for(name);
+        if let Value::Object(map) = &mut schema {
+            map.insert(
+                "x-xenomorph-generic-arguments".to_string(),
+                Value::Array(arguments),
+            );
+        }
+        schema
+    }
+
+    fn type_decl_to_schema(
+        &self,
+        docs: &Option<&str>,
+        name: &str,
+        generics: Option<&[(&TokenData<'_>, Option<&TokenData<'_>>)]>,
+        t: &XenoType,
+        context: &mut SchemaContext<'_, '_>,
+    ) -> Value {
+        let generic_parameters = generics.unwrap_or(&[]);
+        let mut generic_defs = Map::new();
+        let mut parameter_refs = HashMap::new();
+
+        for (parameter, constraint) in generic_parameters {
+            generic_defs.insert(
+                parameter.v.to_string(),
+                self.generic_parameter_schema(
+                    parameter.v,
+                    constraint.map(|constraint| constraint.v),
+                    context,
+                ),
+            );
+            parameter_refs.insert(
+                parameter.v.to_string(),
+                json!({
+                    "$ref": format!(
+                        "#/$defs/{}/$defs/{}",
+                        escape_json_pointer_token(name),
+                        escape_json_pointer_token(parameter.v)
+                    )
+                }),
+            );
+        }
+
+        if !parameter_refs.is_empty() {
+            context.substitutions.push(parameter_refs);
+        }
+        let mut schema = self.anonym_type_to_schema(t, context);
+        if !generic_parameters.is_empty() {
+            context.substitutions.pop();
+        }
 
         if let Value::Object(map) = &mut schema {
             map.insert("title".to_string(), json!(name));
             if let Some(doc) = docs {
                 map.insert("description".to_string(), json!(doc.trim()));
             }
+            if !generic_defs.is_empty() {
+                map.insert("$defs".to_string(), Value::Object(generic_defs));
+                map.insert(
+                    "x-xenomorph-generic-parameters".to_string(),
+                    Value::Array(
+                        generic_parameters
+                            .iter()
+                            .map(|(parameter, constraint)| {
+                                let mut metadata = Map::new();
+                                metadata.insert("name".to_string(), json!(parameter.v));
+                                if let Some(constraint) = constraint {
+                                    metadata.insert("constraint".to_string(), json!(constraint.v));
+                                }
+                                Value::Object(metadata)
+                            })
+                            .collect(),
+                    ),
+                );
+            }
         }
         schema
     }
 
-    fn anonym_type_to_schema(&self, ty: &XenoType) -> Value {
-        let mut base = self.type_to_schema(&ty.0);
+    fn generic_parameter_schema(
+        &self,
+        name: &str,
+        constraint: Option<&str>,
+        context: &mut SchemaContext<'_, '_>,
+    ) -> Value {
+        let mut schema = constraint
+            .and_then(trait_constraint_to_schema)
+            .or_else(|| constraint.and_then(builtin_to_schema))
+            .or_else(|| {
+                constraint
+                    .filter(|constraint| {
+                        self.own_types.contains(*constraint)
+                            || self.provider_of(constraint).is_some()
+                    })
+                    .map(|constraint| self.named_type_to_schema(constraint, None, context))
+            })
+            .unwrap_or_else(|| json!({}));
+
+        if let Value::Object(map) = &mut schema {
+            map.insert("x-xenomorph-generic-parameter".to_string(), json!(name));
+            if let Some(constraint) = constraint {
+                map.insert("x-xenomorph-constraint".to_string(), json!(constraint));
+            }
+        }
+        schema
+    }
+
+    fn anonym_type_to_schema(&self, ty: &XenoType, context: &mut SchemaContext<'_, '_>) -> Value {
+        let mut base = self.type_to_schema(&ty.0, context);
         apply_annotations(&mut base, &ty.1);
         base
     }
 
-    fn type_to_schema(&self, ty: &Type) -> Value {
+    fn type_to_schema(&self, ty: &Type, context: &mut SchemaContext<'_, '_>) -> Value {
         match ty {
-            Type::Simple(simple) => self.simple_type_to_schema(simple),
-            Type::Tuple(items) => self.list_to_schema(items),
-            Type::Set(items) => self.set_to_schema(items),
-            Type::Struct(fields) => self.struct_to_schema(fields),
-            Type::Enum(variants) => self.enum_to_schema(variants),
+            Type::Simple(simple) => self.simple_type_to_schema(simple, context),
+            Type::Tuple(items) => self.list_to_schema(items, context),
+            Type::Set(items) => self.set_to_schema(items, context),
+            Type::Struct(fields) => self.struct_to_schema(fields, context),
+            Type::Enum(variants) => self.enum_to_schema(variants, context),
             Type::Sum(items) => json!({
                 "anyOf": items
                     .iter()
-                    .map(|item| self.simple_type_to_schema(item))
+                    .map(|item| self.simple_type_to_schema(item, context))
                     .collect::<Vec<_>>()
             }),
             Type::Intersection(items) => json!({
                 "allOf": items
                     .iter()
-                    .map(|item| self.simple_type_to_schema(item))
+                    .map(|item| self.simple_type_to_schema(item, context))
                     .collect::<Vec<_>>()
             }),
         }
     }
 
-    fn simple_type_to_schema(&self, ty: &SimpleType) -> Value {
+    fn simple_type_to_schema(&self, ty: &SimpleType, context: &mut SchemaContext<'_, '_>) -> Value {
         let (base, optional) = match ty {
             SimpleType::Literal(literal) => (literal_to_schema(literal), false),
             SimpleType::OptionalLiteral(literal) => (literal_to_schema(literal), true),
-            SimpleType::Identifier(identifier, _) => {
-                (self.identifier_to_schema(identifier.v), false)
-            }
-            SimpleType::OptionalIdentifier(identifier, _) => {
-                (self.identifier_to_schema(identifier.v), true)
-            }
-            SimpleType::Array(identifier, _) => (
+            SimpleType::Identifier(identifier, arguments) => (
+                self.named_type_to_schema(identifier.v, arguments.as_deref(), context),
+                false,
+            ),
+            SimpleType::OptionalIdentifier(identifier, arguments) => (
+                self.named_type_to_schema(identifier.v, arguments.as_deref(), context),
+                true,
+            ),
+            SimpleType::Array(identifier, arguments) => (
                 json!({
                     "type": "array",
-                    "items": self.identifier_to_schema(identifier.v),
+                    "items": self.named_type_to_schema(identifier.v, arguments.as_deref(), context),
                 }),
                 false,
             ),
-            SimpleType::OptionalArray(identifier, _) => (
+            SimpleType::OptionalArray(identifier, arguments) => (
                 json!({
                     "type": "array",
-                    "items": self.identifier_to_schema(identifier.v),
+                    "items": self.named_type_to_schema(identifier.v, arguments.as_deref(), context),
                 }),
                 true,
             ),
@@ -180,6 +303,60 @@ impl JsonSchemaGenerator {
         }
     }
 
+    fn named_type_to_schema(
+        &self,
+        name: &str,
+        arguments: Option<&[SimpleType<'_>]>,
+        context: &mut SchemaContext<'_, '_>,
+    ) -> Value {
+        if arguments.is_none() {
+            if let Some(substitution) = context.substitution(name) {
+                return substitution.clone();
+            }
+        }
+
+        let Some(arguments) = arguments.filter(|arguments| !arguments.is_empty()) else {
+            return self.identifier_to_schema(name);
+        };
+        let argument_schemas = arguments
+            .iter()
+            .map(|argument| self.simple_type_to_schema(argument, context))
+            .collect::<Vec<_>>();
+
+        if let Some(Declaration::Type {
+            generics: Some(parameters),
+            ty,
+            ..
+        }) = context.declarations.get(name).copied()
+        {
+            if parameters.len() == argument_schemas.len() {
+                let specialization_key = format!(
+                    "{name}:{}",
+                    serde_json::to_string(&argument_schemas).unwrap_or_default()
+                );
+                if context
+                    .resolving_specializations
+                    .insert(specialization_key.clone())
+                {
+                    let substitutions = parameters
+                        .iter()
+                        .zip(argument_schemas)
+                        .map(|((parameter, _), argument)| (parameter.v.to_string(), argument))
+                        .collect();
+                    context.substitutions.push(substitutions);
+                    let schema = self.anonym_type_to_schema(ty, context);
+                    context.substitutions.pop();
+                    context
+                        .resolving_specializations
+                        .remove(&specialization_key);
+                    return schema;
+                }
+            }
+        }
+
+        self.ref_with_arguments(name, argument_schemas)
+    }
+
     fn identifier_to_schema(&self, name: &str) -> Value {
         match builtin_to_schema(name) {
             Some(schema) => schema,
@@ -187,10 +364,10 @@ impl JsonSchemaGenerator {
         }
     }
 
-    fn list_to_schema(&self, inner: &[SimpleType]) -> Value {
+    fn list_to_schema(&self, inner: &[SimpleType], context: &mut SchemaContext<'_, '_>) -> Value {
         let items: Vec<Value> = inner
             .iter()
-            .map(|item| self.simple_type_to_schema(item))
+            .map(|item| self.simple_type_to_schema(item, context))
             .collect();
         let count = items.len();
         json!({
@@ -201,10 +378,10 @@ impl JsonSchemaGenerator {
         })
     }
 
-    fn set_to_schema(&self, inner: &[SimpleType]) -> Value {
+    fn set_to_schema(&self, inner: &[SimpleType], context: &mut SchemaContext<'_, '_>) -> Value {
         let schemas: Vec<Value> = inner
             .iter()
-            .map(|item| self.simple_type_to_schema(item))
+            .map(|item| self.simple_type_to_schema(item, context))
             .collect();
         let items = combine_type_schemas(schemas);
         json!({
@@ -214,12 +391,16 @@ impl JsonSchemaGenerator {
         })
     }
 
-    fn struct_to_schema(&self, fields: &[KeyValExpr]) -> Value {
+    fn struct_to_schema(
+        &self,
+        fields: &[KeyValExpr],
+        context: &mut SchemaContext<'_, '_>,
+    ) -> Value {
         let mut properties = Map::new();
         let mut required: Vec<Value> = Vec::new();
 
         for (key, value, docs) in fields {
-            let schema = with_description(self.simple_type_to_schema(value), *docs);
+            let schema = with_description(self.simple_type_to_schema(value, context), *docs);
             properties.insert(key.v.to_string(), schema);
             if !is_optional(value) {
                 required.push(json!(key.v));
@@ -236,7 +417,11 @@ impl JsonSchemaGenerator {
         Value::Object(obj)
     }
 
-    fn enum_to_schema(&self, variants: &[KeyValExpr]) -> Value {
+    fn enum_to_schema(
+        &self,
+        variants: &[KeyValExpr],
+        context: &mut SchemaContext<'_, '_>,
+    ) -> Value {
         let all_numeric = variants.iter().all(|(_, value, _)| {
             matches!(
                 value,
@@ -277,7 +462,7 @@ impl JsonSchemaGenerator {
                             "type": "object",
                             "properties": {
                                 "kind": { "const": key.v },
-                                "value": self.simple_type_to_schema(value),
+                                "value": self.simple_type_to_schema(value, context),
                             },
                             "required": ["kind", "value"],
                             "additionalProperties": false,
@@ -296,6 +481,7 @@ impl<'src> AnalyzerListener<'src> for JsonSchemaGenerator {
         self.abs_path = scope.abs_path.clone();
         self.module_path = scope.module_path.clone();
         self.imported_types = scope.imported_types.clone();
+        self.own_types = scope.own_types.iter().cloned().collect();
         self.defs.clear();
     }
 
@@ -304,12 +490,34 @@ impl<'src> AnalyzerListener<'src> for JsonSchemaGenerator {
         ast: &[Declaration<'src>],
         _errors: &mut Vec<xenomorph_common::XenoDiagnostic<'src>>,
     ) {
+        let declarations = ast
+            .iter()
+            .filter_map(|declaration| match declaration {
+                Declaration::Type { name, .. } => Some((name.v, declaration)),
+                Declaration::Import { .. } | Declaration::Custom { .. } => None,
+            })
+            .collect::<HashMap<_, _>>();
+        self.own_types = declarations
+            .keys()
+            .map(|name| (*name).to_string())
+            .collect();
+        let mut context = SchemaContext {
+            declarations,
+            substitutions: Vec::new(),
+            resolving_specializations: HashSet::new(),
+        };
+
         for decl in ast {
             if let Declaration::Type {
-                docs, name, ty: t, ..
+                docs,
+                name,
+                generics,
+                ty: t,
+                ..
             } = decl
             {
-                let schema = self.type_decl_to_schema(docs, name.v, t);
+                let schema =
+                    self.type_decl_to_schema(docs, name.v, generics.as_deref(), t, &mut context);
                 self.defs.insert(name.v.to_string(), schema);
             }
         }
@@ -356,6 +564,23 @@ fn combine_type_schemas(mut schemas: Vec<Value>) -> Value {
         0 => json!({}),
         1 => schemas.pop().unwrap(),
         _ => json!({ "anyOf": schemas }),
+    }
+}
+
+fn trait_constraint_to_schema(name: &str) -> Option<Value> {
+    match name {
+        "Numeric" | "NumberLiteral" => Some(json!({ "type": "number" })),
+        "IntegerLiteral" => Some(json!({ "type": "integer" })),
+        "StringLiteral" => Some(json!({ "type": "string" })),
+        "BoolLiteral" => Some(json!({ "type": "boolean" })),
+        "HasLength" => Some(json!({
+            "anyOf": [
+                { "type": "string" },
+                { "type": "array" },
+                { "type": "object" },
+            ]
+        })),
+        _ => None,
     }
 }
 
@@ -603,10 +828,69 @@ fn module_path_parts(module_path: &str) -> Vec<&str> {
         .collect()
 }
 
+fn escape_json_pointer_token(token: &str) -> String {
+    token.replace('~', "~0").replace('/', "~1")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xenomorph_common::parser::{IntLiteral, IntegerRepresentation, IntegerSize};
+    use xenomorph_common::{
+        lexer::Lexer,
+        parser::{IntLiteral, IntegerRepresentation, IntegerSize, Parser},
+    };
+
+    fn empty_context<'ast, 'src>() -> SchemaContext<'ast, 'src> {
+        SchemaContext {
+            declarations: HashMap::new(),
+            substitutions: Vec::new(),
+            resolving_specializations: HashSet::new(),
+        }
+    }
+
+    fn parse(source: &str) -> Vec<Declaration<'_>> {
+        let tokens = Box::leak(Box::new(
+            Lexer::tokenize(Box::leak(source.to_string().into_boxed_str()))
+                .expect("JSON Schema fixture should lex"),
+        ));
+        let (ast, diagnostics) = Parser::parse(tokens);
+        assert!(
+            diagnostics.is_empty(),
+            "unexpected diagnostics: {diagnostics:#?}"
+        );
+        ast
+    }
+
+    fn generate_defs(source: &str) -> Map<String, Value> {
+        let ast = parse(source);
+        let mut generator = JsonSchemaGenerator::new();
+        generator.on_before_ast(&ast, &mut Vec::new());
+        generator.defs
+    }
+
+    fn assert_local_refs_resolve(document: &Value, value: &Value) {
+        match value {
+            Value::Object(map) => {
+                if let Some(reference) = map.get("$ref").and_then(Value::as_str) {
+                    if let Some(pointer) = reference.strip_prefix('#') {
+                        assert!(
+                            document.pointer(pointer).is_some(),
+                            "unresolved local JSON Schema reference: {reference}"
+                        );
+                    }
+                }
+                for value in map.values() {
+                    assert_local_refs_resolve(document, value);
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    assert_local_refs_resolve(document, value);
+                }
+            }
+            _ => {}
+        }
+    }
 
     #[test]
     fn test_type_and_field_docs_are_preserved() {
@@ -637,7 +921,9 @@ mod tests {
         let schema = JsonSchemaGenerator::new().type_decl_to_schema(
             &Some("A user-facing profile."),
             "Profile",
+            None,
             &ty,
+            &mut empty_context(),
         );
 
         assert_eq!(schema["title"], json!("Profile"));
@@ -675,7 +961,7 @@ mod tests {
             Some(&docs),
         )];
 
-        let schema = JsonSchemaGenerator::new().enum_to_schema(&variants);
+        let schema = JsonSchemaGenerator::new().enum_to_schema(&variants, &mut empty_context());
 
         assert_eq!(schema["oneOf"][0]["const"], json!(1));
         assert_eq!(
@@ -807,9 +1093,65 @@ mod tests {
             }],
         );
 
-        let schema = JsonSchemaGenerator::new().anonym_type_to_schema(&ty);
+        let schema = JsonSchemaGenerator::new().anonym_type_to_schema(&ty, &mut empty_context());
 
         assert_eq!(schema, json!({ "type": "string", "pattern": "^[A-Z]+$" }));
+    }
+
+    #[test]
+    fn generic_parameters_are_defined_and_all_local_refs_resolve() {
+        let defs = generate_defs(
+            "type Gt0<T: Numeric> = T @min(1); type BigInt<T: Numeric> = Gt0<T>[] @minlen(1);",
+        );
+        let document = json!({ "$defs": defs });
+
+        assert_eq!(
+            document["$defs"]["Gt0"]["$ref"],
+            json!("#/$defs/Gt0/$defs/T")
+        );
+        assert_eq!(document["$defs"]["Gt0"]["$defs"]["T"]["type"], "number");
+        assert_eq!(document["$defs"]["Gt0"]["minimum"], 1);
+        assert_eq!(
+            document["$defs"]["BigInt"]["items"]["$ref"],
+            json!("#/$defs/BigInt/$defs/T")
+        );
+        assert_eq!(document["$defs"]["BigInt"]["items"]["minimum"], 1);
+        assert_eq!(document["$defs"]["BigInt"]["minItems"], 1);
+        assert_local_refs_resolve(&document, &document);
+    }
+
+    #[test]
+    fn concrete_generic_aliases_are_specialized_recursively() {
+        let defs = generate_defs(
+            "type Gt0<T: Numeric> = T @min(1); type BigInt<T: Numeric> = Gt0<T>[] @minlen(1); type PositiveBytes = BigInt<u8>;",
+        );
+
+        assert_eq!(
+            defs["PositiveBytes"],
+            json!({
+                "type": "array",
+                "items": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 255,
+                },
+                "minItems": 1,
+                "title": "PositiveBytes",
+            })
+        );
+    }
+
+    #[test]
+    fn generic_struct_specialization_substitutes_nested_aliases() {
+        let defs = generate_defs(
+            "type UserName<T: HasLength> = T @minlen(8); type User<T: HasLength> = { name: UserName<T> }; type SpecializedUser = User<string>;",
+        );
+
+        assert_eq!(
+            defs["SpecializedUser"]["properties"]["name"],
+            json!({ "type": "string", "minLength": 8 })
+        );
+        assert_eq!(defs["SpecializedUser"]["type"], "object");
     }
 
     #[test]
