@@ -22,7 +22,9 @@ semantic analysis.
 ## LSP
 
 `xenomorph_lsp` communicates over standard input/output and can be launched by
-the VS Code extension when the executable is available on `PATH`.
+the VS Code extension when the executable is available on `PATH`. It provides
+Rust-derived semantic tokens for context-aware syntax highlighting, alongside
+diagnostics, completion, hover, formatting, navigation, and rename support.
 
 ## Development
 

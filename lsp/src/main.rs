@@ -20,6 +20,7 @@ use xenomorph_lsp_common::types::{
 
 mod formatter;
 mod hover;
+mod semantic_tokens;
 
 struct HoverTarget {
     name: String,
@@ -860,6 +861,16 @@ impl LanguageServer for Backend {
                     prepare_provider: Some(true),
                     work_done_progress_options: Default::default(),
                 })),
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(
+                        SemanticTokensOptions {
+                            work_done_progress_options: Default::default(),
+                            legend: semantic_tokens::legend(),
+                            range: None,
+                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                        },
+                    ),
+                ),
                 ..Default::default()
             },
             ..Default::default()
@@ -946,6 +957,22 @@ impl LanguageServer for Backend {
         Ok(self
             .user_type_hover(&target, current_module)
             .or_else(|| self.builtin_hover(&target)))
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
+        let module_path = self.uri_to_module_path(&params.text_document.uri);
+        let tokens = self.registry.with_module(
+            module_path.as_deref().unwrap_or(""),
+            |tokens, ast, module| SemanticTokens {
+                result_id: None,
+                data: semantic_tokens::encode(module.borrow_source(), tokens, ast),
+            },
+        );
+
+        Ok(tokens.map(SemanticTokensResult::Tokens))
     }
 
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {

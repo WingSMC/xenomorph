@@ -3,6 +3,11 @@
 Language support for Xenomorph (`.xen`) files, including syntax highlighting,
 snippets, diagnostics, formatting, parsing tools, and AST visualization.
 
+Syntax highlighting is supplied by `xenomorph_lsp` semantic tokens generated
+from the Rust lexer and parser. The bundled TextMate grammar only provides a
+small comment fallback, so language syntax does not need to be maintained in
+both Rust and regular expressions.
+
 ## Requirements
 
 The extension runs the globally installed executables directly from `PATH`:

@@ -8,6 +8,7 @@
         "install:deps": "cd ./extensions/vscode/client && ni && cd ../../..",
         "install:once": "npm install -g pnpm @antfu/ni && nr install:deps && nr install:coverage",
         "run:parser": "cargo run --release --package xenomorph_parser",
+        "lint": "cargo clippy --all-targets --no-deps -- -D warnings",
         "test": "nr test:xeno && nr test:extensions",
         "test:coverage": "cargo llvm-cov",
         "test:coverage:html": "cargo llvm-cov --html --output-dir coverage && echo 'Report: coverage/html/index.html'",
