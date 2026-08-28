@@ -8,14 +8,14 @@ type User = {
     name: string,
     age: number,
     favoriteColor: Color,
-} @Entity @Schema;
+} @Entity @Schema @Lombok(Getter, Setter, XSlf4j);
 
-type ActionEntry = [?date, Action];
+type ActionEntry = [?date, Action<User>];
 type ActionActions = ActionEntry[] @minlen(1) @maxlen(10);
-type Action<T : ActionActions> = {
+type Action<T> = {
     actions: ?T,
 };
 
 
 
-type Admin = & User & ActionHolder;
+type Admin = & User & Action<User>;

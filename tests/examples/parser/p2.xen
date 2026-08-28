@@ -1,6 +1,6 @@
 import parser/p1;
 
-type UserName = string /^[A-Z][a-z]+$/ @minlen(3) @maxlen(50);
+type UserName = string @match(/^[A-Z][a-z]+$/) @minlen(3) @maxlen(50);
 type UserAge = u8 @min(0) @max(150);
 type UserType = {
     name: UserName,
@@ -9,4 +9,4 @@ type UserType = {
     isActive: bool,
 };
 
-type UserList = User[] @minlen(1) @maxlen(1000);
+type UserList = UserType[] @minlen(1) @maxlen(1000);

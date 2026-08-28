@@ -1,5 +1,7 @@
 use std::{fmt, path::PathBuf};
 
+use crate::semantic::TypeDeclarationInfo;
+
 /// Error severity level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorPhase {
@@ -47,9 +49,6 @@ pub struct DeclarationInfo {
     pub column: u32,
     /// Length of the declaration name.
     pub name_len: u32,
-    // TODO / For struct declarations, the fields of the struct.
-    // TODO figure this out
-    // pub fields: Option<Vec<(TokenData<'_>, SimpleType<'_>)>>,
-    // pub parents: &
-    // pub ty,
+    /// Semantic metadata collected before validation starts.
+    pub semantic: TypeDeclarationInfo,
 }

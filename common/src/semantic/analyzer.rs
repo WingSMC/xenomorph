@@ -10,7 +10,8 @@ use crate::{
     plugins::XenoPlugin,
     semantic::{
         annotation_validator::AnnotationValidator, if_validator::IfChainValidator,
-        name_validator::NameValidator, BUILTIN_ANNOTATIONS, BUILTIN_TYPES,
+        name_validator::NameValidator, GenericParameterInfo, OwnedType, TypeHierarchy,
+        BUILTIN_ANNOTATIONS, BUILTIN_TRAITS, BUILTIN_TYPES,
     },
     TokenData, XenoDiagnostic,
 };
@@ -31,22 +32,78 @@ pub struct ScopeInfo {
     pub builtin_types: HashSet<String>,
     /// All known annotation names (builtins + plugins, flat set).
     pub known_annotations: HashSet<String>,
+    /// Canonical runtime hierarchy for builtin, plugin, local, and imported types.
+    pub type_hierarchy: TypeHierarchy,
+    /// Typed definitions for built-in and plugin annotations.
+    pub annotations: HashMap<String, &'static crate::semantic::XenoAnnotation>,
 }
 
 impl ScopeInfo {
     /// Returns true if `name` is a known type (own, imported, or builtin).
     pub fn has_type(&self, name: &str) -> bool {
-        self.builtin_types.contains(name)
-            || self.own_types.iter().any(|n| n == name)
-            || self
-                .imported_types
-                .values()
-                .any(|names| names.iter().any(|n| n == name))
+        self.type_hierarchy.has_type(name)
+            && (self.builtin_types.contains(name)
+                || self.own_types.iter().any(|n| n == name)
+                || self
+                    .imported_types
+                    .values()
+                    .any(|names| names.iter().any(|n| n == name)))
+    }
+
+    /// Returns true for either a visible type or a globally registered trait.
+    pub fn has_constraint(&self, name: &str) -> bool {
+        self.has_type(name) || self.type_hierarchy.has_trait(name)
+    }
+
+    pub fn is_static_type(&self, name: &str) -> bool {
+        self.type_hierarchy
+            .get_type(name)
+            .is_some_and(|definition| definition.module_path.is_none())
     }
 
     /// Returns true if `name` is a known annotation.
     pub fn has_annotation(&self, name: &str) -> bool {
         self.known_annotations.contains(name)
+    }
+
+    pub fn find_annotation(&self, name: &str) -> Option<&'static crate::semantic::XenoAnnotation> {
+        self.annotations.get(name).copied()
+    }
+
+    pub fn generic_parameters(&self, name: &str) -> Option<Vec<GenericParameterInfo>> {
+        self.type_hierarchy.generic_parameters(name)
+    }
+
+    pub fn type_implements_trait(
+        &self,
+        candidate: &OwnedType,
+        required: &crate::semantic::XenoTrait,
+    ) -> bool {
+        self.type_hierarchy
+            .type_implements_trait(candidate, required)
+    }
+
+    pub fn is_type_compatible(&self, candidate: &OwnedType, target: &str) -> bool {
+        self.type_hierarchy.is_type_compatible(candidate, target)
+    }
+
+    pub fn descends_from_static_type(
+        &self,
+        candidate: &OwnedType,
+        target: &'static crate::semantic::XenoType,
+    ) -> bool {
+        self.type_hierarchy
+            .descends_from_static_type(candidate, target)
+    }
+
+    pub fn satisfies_constraint(
+        &self,
+        candidate: &OwnedType,
+        constraint: &str,
+        constraint_scope: Option<&str>,
+    ) -> bool {
+        self.type_hierarchy
+            .satisfies_constraint(candidate, constraint, constraint_scope)
     }
 
     /// Returns the module path that provides a given type name, if it's imported.
@@ -223,33 +280,79 @@ impl Analyzer {
         plugins: &[&'static XenoPlugin<'static>],
         plugin_configs: &PluginConfigs,
     ) -> Vec<XenoDiagnostic<'src>> {
-        // ── Build ScopeInfo ──
+        // ── Pass 1: collect every type and trait before validation ──
         let mut builtin_types: HashSet<String> = HashSet::new();
         let mut known_annotations: HashSet<String> = HashSet::new();
+        let mut type_hierarchy = TypeHierarchy::default();
+        let mut annotations = HashMap::new();
 
         // Builtins
         for t in BUILTIN_TYPES {
             builtin_types.insert(t.name.to_string());
+            type_hierarchy.insert_semantic_type(t);
+        }
+        for xeno_trait in BUILTIN_TRAITS {
+            type_hierarchy.insert_trait(xeno_trait);
         }
         for a in BUILTIN_ANNOTATIONS {
             known_annotations.insert(a.name.to_string());
+            annotations.insert(a.name.to_string(), *a);
+            for parameter in a.params {
+                match parameter.constraint {
+                    crate::semantic::XenoConstraint::Type(required) => {
+                        type_hierarchy.insert_semantic_type(required)
+                    }
+                    crate::semantic::XenoConstraint::Trait(required) => {
+                        type_hierarchy.insert_trait(required)
+                    }
+                }
+            }
         }
 
         // Plugin-provided names
         for plugin in plugins {
             if let Some(provide) = plugin.provide_types {
-                for pc in provide() {
-                    builtin_types.insert(pc.label.to_string());
+                for semantic_type in provide() {
+                    builtin_types.insert(semantic_type.name.to_string());
+                    type_hierarchy.insert_semantic_type(semantic_type);
                 }
             }
             if let Some(provide) = plugin.provide_annotations {
-                for pc in provide() {
-                    known_annotations.insert(pc.label.to_string());
+                for annotation in provide() {
+                    known_annotations.insert(annotation.name.to_string());
+                    annotations.insert(annotation.name.to_string(), *annotation);
+                    for parameter in annotation.params {
+                        match parameter.constraint {
+                            crate::semantic::XenoConstraint::Type(required) => {
+                                type_hierarchy.insert_semantic_type(required)
+                            }
+                            crate::semantic::XenoConstraint::Trait(required) => {
+                                type_hierarchy.insert_trait(required)
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        // Own declarations
+        // Module declarations were indexed when each ModuleData was created.
+        // Qualified keys let the hierarchy retain every cached declaration,
+        // including duplicate simple names. Per-module import scopes resolve
+        // each declaration's own parent graph without exposing transitive or
+        // unrelated names through ScopeInfo::has_type.
+        let module_path_str = module_data.borrow_module_path().to_string();
+        type_hierarchy.set_current_module(module_path_str.clone());
+        for (module_path, module) in cache {
+            type_hierarchy.register_module(module_path.clone(), module.borrow_imports().to_vec());
+            for declaration in module.borrow_declarations().values() {
+                type_hierarchy.insert_declaration(
+                    module_path.clone(),
+                    declaration.name.clone(),
+                    declaration.semantic.clone(),
+                );
+            }
+        }
+
         let own_types: Vec<String> = module_data
             .borrow_declarations()
             .keys()
@@ -257,7 +360,6 @@ impl Analyzer {
             .collect();
 
         // Imported declarations grouped by module (skip self-imports)
-        let module_path_str = module_data.borrow_module_path().to_string();
         let mut imported_types: HashMap<String, Vec<String>> = HashMap::new();
         for import in imports {
             if import == &module_path_str {
@@ -280,9 +382,11 @@ impl Analyzer {
             imported_types,
             builtin_types,
             known_annotations,
+            type_hierarchy,
+            annotations,
         };
 
-        // ── Create listeners ──
+        // ── Pass 2: validate and generate with the completed hierarchy ──
         let mut listeners: Vec<Box<dyn AnalyzerListener<'src>>> = Vec::new();
         for f in &self.listener_factories {
             let listener: Box<dyn AnalyzerListener<'src>> = f(plugin_configs);
@@ -519,7 +623,17 @@ fn walk_simple_type<'src>(
     for l in ls.iter_mut() {
         l.on_simple_type(ty, errors);
     }
-    if let SimpleType::Array(ident) | SimpleType::OptionalArray(ident) = ty {
+    let arguments = match ty {
+        SimpleType::Identifier(_, arguments)
+        | SimpleType::OptionalIdentifier(_, arguments)
+        | SimpleType::Array(_, arguments)
+        | SimpleType::OptionalArray(_, arguments) => arguments,
+        SimpleType::Literal(_) | SimpleType::OptionalLiteral(_) => return,
+    };
+    for argument in arguments.as_deref().unwrap_or(&[]) {
+        walk_simple_type(ls, argument, errors);
+    }
+    if let SimpleType::Array(ident, _) | SimpleType::OptionalArray(ident, _) = ty {
         for l in ls.iter_mut() {
             l.on_array(ident, errors);
             l.on_after_array(ident, errors);
@@ -592,5 +706,81 @@ impl XenoDefNode<'_> {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::semantic::{TypeDeclarationInfo, HAS_LENGTH, NUMERIC};
+
+    fn scope_with_declarations(
+        type_declarations: HashMap<String, TypeDeclarationInfo>,
+    ) -> ScopeInfo {
+        let own_types = type_declarations.keys().cloned().collect();
+        let mut type_hierarchy = TypeHierarchy::default();
+        type_hierarchy.set_current_module("test");
+        type_hierarchy.register_module("test", Vec::new());
+        for semantic_type in BUILTIN_TYPES {
+            type_hierarchy.insert_semantic_type(semantic_type);
+        }
+        for (name, declaration) in type_declarations {
+            type_hierarchy.insert_declaration("test", name, declaration);
+        }
+        ScopeInfo {
+            module_path: "test".to_string(),
+            abs_path: PathBuf::new(),
+            own_types,
+            imported_types: HashMap::new(),
+            builtin_types: BUILTIN_TYPES
+                .iter()
+                .map(|semantic_type| semantic_type.name.to_string())
+                .collect(),
+            known_annotations: HashSet::new(),
+            type_hierarchy,
+            annotations: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn user_types_inherit_traits_through_specialized_parent_chains() {
+        let generic = GenericParameterInfo {
+            name: "T".to_string(),
+            constraint: None,
+            constraint_scope: None,
+        };
+        let mut declarations = HashMap::new();
+        declarations.insert(
+            "Wrapped".to_string(),
+            TypeDeclarationInfo {
+                generic_params: vec![generic.clone()],
+                parents: vec![OwnedType::named("T")],
+            },
+        );
+        declarations.insert(
+            "Outer".to_string(),
+            TypeDeclarationInfo {
+                generic_params: vec![generic],
+                parents: vec![OwnedType::Named {
+                    name: "Wrapped".to_string(),
+                    arguments: vec![OwnedType::named("T")],
+                }],
+            },
+        );
+        let scope = scope_with_declarations(declarations);
+
+        let outer_string = OwnedType::Named {
+            name: "Outer".to_string(),
+            arguments: vec![OwnedType::named("string")],
+        };
+        let outer_integer = OwnedType::Named {
+            name: "Outer".to_string(),
+            arguments: vec![OwnedType::named("u8")],
+        };
+
+        assert!(scope.type_implements_trait(&outer_string, &HAS_LENGTH));
+        assert!(!scope.type_implements_trait(&outer_string, &NUMERIC));
+        assert!(scope.type_implements_trait(&outer_integer, &NUMERIC));
+        assert!(!scope.type_implements_trait(&outer_integer, &HAS_LENGTH));
     }
 }

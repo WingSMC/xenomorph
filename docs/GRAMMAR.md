@@ -55,6 +55,7 @@ Validators are executed in the order they are written in most contexts, but the 
 ### String
 
 - `/regex/`
+- `match(<regex>)` requires a string or a type derived from `string` to match the regular expression
 - `minlen(<number>)`
 - `maxlen(<number>)`
 - `len(<number>)`

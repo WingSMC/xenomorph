@@ -152,18 +152,20 @@ impl JsonSchemaGenerator {
             SimpleType::OptionalLiteral(literal) => {
                 (json!({ "const": literal_to_json(literal) }), true)
             }
-            SimpleType::Identifier(identifier) => (self.identifier_to_schema(identifier.v), false),
-            SimpleType::OptionalIdentifier(identifier) => {
+            SimpleType::Identifier(identifier, _) => {
+                (self.identifier_to_schema(identifier.v), false)
+            }
+            SimpleType::OptionalIdentifier(identifier, _) => {
                 (self.identifier_to_schema(identifier.v), true)
             }
-            SimpleType::Array(identifier) => (
+            SimpleType::Array(identifier, _) => (
                 json!({
                     "type": "array",
                     "items": self.identifier_to_schema(identifier.v),
                 }),
                 false,
             ),
-            SimpleType::OptionalArray(identifier) => (
+            SimpleType::OptionalArray(identifier, _) => (
                 json!({
                     "type": "array",
                     "items": self.identifier_to_schema(identifier.v),
@@ -388,6 +390,11 @@ fn apply_annotations(schema: &mut Value, annotations: &[Annotation]) {
             }
             "minlen" => insert_number(map, if is_array { "minItems" } else { "minLength" }, number),
             "maxlen" => insert_number(map, if is_array { "maxItems" } else { "maxLength" }, number),
+            "match" => {
+                if let Some(pattern) = first_regex_arg(&annotation.params) {
+                    map.insert("pattern".to_string(), json!(pattern));
+                }
+            }
             _ => {}
         }
     }
@@ -409,6 +416,13 @@ fn first_number_arg(args: &[Expr]) -> Option<Value> {
         }
     }
     None
+}
+
+fn first_regex_arg(args: &[Expr]) -> Option<String> {
+    args.iter().find_map(|arg| match arg {
+        Expr::Regex(token) => Some(regex_source(token.v)),
+        _ => None,
+    })
 }
 
 fn schema_type_is(schema: &Value, expected: &str) -> bool {
@@ -503,7 +517,6 @@ fn literal_to_json(lit: &Literal) -> Value {
 }
 
 /// Extracts the pattern body from a regex literal like `/foo/i`.
-#[cfg(test)]
 fn regex_source(raw: &str) -> String {
     let trimmed = raw.trim();
     if let Some(stripped) = trimmed.strip_prefix('/') {
@@ -518,8 +531,8 @@ fn is_optional(ty: &SimpleType) -> bool {
     matches!(
         ty,
         SimpleType::OptionalLiteral(_)
-            | SimpleType::OptionalIdentifier(_)
-            | SimpleType::OptionalArray(_)
+            | SimpleType::OptionalIdentifier(_, _)
+            | SimpleType::OptionalArray(_, _)
     )
 }
 
@@ -601,7 +614,7 @@ mod tests {
         let ty = (
             Type::Struct(vec![(
                 &key,
-                SimpleType::Identifier(&field_type),
+                SimpleType::Identifier(&field_type, None),
                 Some(&field_docs),
             )]),
             vec![],
@@ -703,6 +716,36 @@ mod tests {
     fn test_regex_source_extraction() {
         assert_eq!(regex_source("/foo.*/i"), "foo.*");
         assert_eq!(regex_source("/^a$/"), "^a$");
+    }
+
+    #[test]
+    fn test_match_annotation_becomes_pattern() {
+        let string_type = xenomorph_common::TokenData {
+            v: "string",
+            l: 0,
+            c: 0,
+        };
+        let match_name = xenomorph_common::TokenData {
+            v: "match",
+            l: 0,
+            c: 7,
+        };
+        let regex = xenomorph_common::TokenData {
+            v: "/^[A-Z]+$/",
+            l: 0,
+            c: 13,
+        };
+        let ty = (
+            Type::Simple(SimpleType::Identifier(&string_type, None)),
+            vec![Annotation {
+                ident: &match_name,
+                params: vec![Expr::Regex(&regex)],
+            }],
+        );
+
+        let schema = JsonSchemaGenerator::new().anonym_type_to_schema(&ty);
+
+        assert_eq!(schema, json!({ "type": "string", "pattern": "^[A-Z]+$" }));
     }
 
     #[test]

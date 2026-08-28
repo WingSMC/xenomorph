@@ -7,13 +7,145 @@ use xenomorph_common::{
     lexer::{Token, TokenVariant},
     module::{types::DeclarationInfo, XenoRegistry},
     parser::Declaration,
+    semantic::{XenoAnnotation, XenoConstraint, XenoParent, XenoTrait, XenoTraitKind, XenoType},
     TokenData,
 };
 use xenomorph_lsp_common::types::{
-    create_completion_item, BUILTIN_ANNOTATION_COMPLETIONS, BUILTIN_TYPE_COMPLETIONS,
+    create_annotation_completion_item, create_completion_item, create_type_completion_item,
+    BUILTIN_ANNOTATION_COMPLETIONS, BUILTIN_TYPE_COMPLETIONS,
 };
 
 mod formatter;
+mod hover;
+
+struct HoverTarget {
+    name: String,
+    type_arguments: Vec<String>,
+    range: Range,
+}
+
+#[derive(Clone, Copy)]
+enum CompletionFrame<'src> {
+    Annotation {
+        name: &'src str,
+        parameter_index: usize,
+    },
+    Parenthesis,
+    Bracket,
+    Curly,
+    Angle,
+}
+
+fn token_starts_before(token: &Token<'_>, position: Position) -> bool {
+    token.1.l < position.line || (token.1.l == position.line && token.1.c < position.character)
+}
+
+fn annotation_argument_context<'src>(
+    tokens: &'src [Token<'src>],
+    position: Position,
+) -> Option<(&'src str, usize)> {
+    let mut frames = Vec::new();
+    for (index, token) in tokens.iter().enumerate() {
+        if !token_starts_before(token, position) {
+            break;
+        }
+
+        match token.0 {
+            TokenVariant::LParen => {
+                let annotation_name = index
+                    .checked_sub(1)
+                    .and_then(|index| tokens.get(index))
+                    .filter(|token| token.0 == TokenVariant::Identifier)
+                    .and_then(|name| {
+                        index
+                            .checked_sub(2)
+                            .and_then(|index| tokens.get(index))
+                            .filter(|token| token.0 == TokenVariant::At)
+                            .map(|_| name.1.v)
+                    });
+                frames.push(match annotation_name {
+                    Some(name) => CompletionFrame::Annotation {
+                        name,
+                        parameter_index: 0,
+                    },
+                    None => CompletionFrame::Parenthesis,
+                });
+            }
+            TokenVariant::LBracket => frames.push(CompletionFrame::Bracket),
+            TokenVariant::LCurly => frames.push(CompletionFrame::Curly),
+            TokenVariant::Lt => frames.push(CompletionFrame::Angle),
+            TokenVariant::RParen => pop_frame(&mut frames, |frame| {
+                matches!(
+                    frame,
+                    CompletionFrame::Annotation { .. } | CompletionFrame::Parenthesis
+                )
+            }),
+            TokenVariant::RBracket => pop_frame(&mut frames, |frame| {
+                matches!(frame, CompletionFrame::Bracket)
+            }),
+            TokenVariant::RCurly => {
+                pop_frame(&mut frames, |frame| matches!(frame, CompletionFrame::Curly))
+            }
+            TokenVariant::Gt => {
+                pop_frame(&mut frames, |frame| matches!(frame, CompletionFrame::Angle))
+            }
+            TokenVariant::Comma => {
+                if let Some(CompletionFrame::Annotation {
+                    parameter_index, ..
+                }) = frames.last_mut()
+                {
+                    *parameter_index += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    frames.iter().rev().find_map(|frame| match frame {
+        CompletionFrame::Annotation {
+            name,
+            parameter_index,
+        } => Some((*name, *parameter_index)),
+        _ => None,
+    })
+}
+
+fn generic_constraint_context(tokens: &[Token<'_>], position: Position) -> bool {
+    let mut angle_depth = 0usize;
+    let mut constraint_at_depth = None;
+    for token in tokens {
+        if !token_starts_before(token, position) {
+            break;
+        }
+        match token.0 {
+            TokenVariant::Lt => angle_depth += 1,
+            TokenVariant::Gt => {
+                if constraint_at_depth == Some(angle_depth) {
+                    constraint_at_depth = None;
+                }
+                angle_depth = angle_depth.saturating_sub(1);
+            }
+            TokenVariant::Colon if angle_depth > 0 => constraint_at_depth = Some(angle_depth),
+            TokenVariant::Comma if constraint_at_depth == Some(angle_depth) => {
+                constraint_at_depth = None
+            }
+            _ => {}
+        }
+    }
+    constraint_at_depth == Some(angle_depth) && angle_depth > 0
+}
+
+fn pop_frame(frames: &mut Vec<CompletionFrame<'_>>, matches: impl Fn(CompletionFrame<'_>) -> bool) {
+    if let Some(index) = frames.iter().rposition(|frame| matches(*frame)) {
+        frames.truncate(index);
+    }
+}
+
+fn deduplicate_completions(mut items: Vec<CompletionItem>) -> Vec<CompletionItem> {
+    let mut seen = std::collections::HashSet::new();
+    items.retain(|item| seen.insert(item.label.clone()));
+    items
+}
 
 struct Backend {
     client: Client,
@@ -60,7 +192,7 @@ impl Backend {
             .iter()
             .filter_map(|p| p.provide_types.map(|f| f()))
             .flatten()
-            .map(|pc| create_completion_item(pc.label, pc.detail, CompletionItemKind::CLASS))
+            .map(|semantic_type| create_type_completion_item(semantic_type))
             .chain(BUILTIN_TYPE_COMPLETIONS.iter().cloned())
     }
 
@@ -70,8 +202,190 @@ impl Backend {
             .iter()
             .filter_map(|p| p.provide_annotations.map(|f| f()))
             .flatten()
-            .map(|pc| create_completion_item(pc.label, pc.detail, CompletionItemKind::FUNCTION))
+            .map(|annotation| create_annotation_completion_item(annotation))
             .chain(BUILTIN_ANNOTATION_COMPLETIONS.iter().cloned())
+    }
+
+    fn find_annotation(&self, name: &str) -> Option<&'static XenoAnnotation> {
+        self.registry
+            .plugins
+            .iter()
+            .filter_map(|plugin| plugin.provide_annotations.map(|provide| provide()))
+            .flatten()
+            .copied()
+            .chain(
+                xenomorph_common::semantic::BUILTIN_ANNOTATIONS
+                    .iter()
+                    .copied(),
+            )
+            .find(|annotation| annotation.name == name)
+    }
+
+    fn semantic_types(&self) -> impl Iterator<Item = &'static XenoType> + '_ {
+        self.registry
+            .plugins
+            .iter()
+            .filter_map(|plugin| plugin.provide_types.map(|provide| provide()))
+            .flatten()
+            .copied()
+            .chain(xenomorph_common::semantic::BUILTIN_TYPES.iter().copied())
+    }
+
+    fn semantic_traits(&self) -> Vec<&'static XenoTrait> {
+        fn collect_trait(
+            xeno_trait: &'static XenoTrait,
+            traits: &mut Vec<&'static XenoTrait>,
+            seen: &mut std::collections::HashSet<&'static str>,
+        ) {
+            if !seen.insert(xeno_trait.name) {
+                return;
+            }
+            traits.push(xeno_trait);
+            for parent in xeno_trait.parents.unwrap_or(&[]) {
+                collect_trait(parent, traits, seen);
+            }
+        }
+
+        let mut traits = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for xeno_trait in xenomorph_common::semantic::BUILTIN_TRAITS {
+            collect_trait(xeno_trait, &mut traits, &mut seen);
+        }
+        for semantic_type in self.semantic_types() {
+            for parent in semantic_type.parents.unwrap_or(&[]) {
+                if let XenoParent::Trait(xeno_trait) = parent {
+                    collect_trait(xeno_trait, &mut traits, &mut seen);
+                }
+            }
+            for parameter in semantic_type.generic_params.unwrap_or(&[]) {
+                if let Some(XenoConstraint::Trait(xeno_trait)) = parameter.constraint {
+                    collect_trait(xeno_trait, &mut traits, &mut seen);
+                }
+            }
+        }
+        for annotation in self
+            .registry
+            .plugins
+            .iter()
+            .filter_map(|plugin| plugin.provide_annotations.map(|provide| provide()))
+            .flatten()
+            .copied()
+            .chain(
+                xenomorph_common::semantic::BUILTIN_ANNOTATIONS
+                    .iter()
+                    .copied(),
+            )
+        {
+            for parameter in annotation.params {
+                if let XenoConstraint::Trait(required) = parameter.constraint {
+                    collect_trait(required, &mut traits, &mut seen);
+                }
+            }
+        }
+        traits
+    }
+
+    fn literal_completions(&self, required: &XenoTrait) -> Vec<CompletionItem> {
+        let accepts = |name: &str| {
+            required.kind == XenoTraitKind::Literal
+                || self
+                    .semantic_types()
+                    .find(|candidate| candidate.name == name)
+                    .is_some_and(|candidate| candidate.implements(required))
+        };
+        let mut items = Vec::new();
+        if accepts("integer") || accepts("number") {
+            items.push(create_completion_item(
+                "0",
+                Some("Integer literal"),
+                CompletionItemKind::VALUE,
+            ));
+        }
+        if accepts("number") {
+            items.push(create_completion_item(
+                "0.0",
+                Some("Number literal"),
+                CompletionItemKind::VALUE,
+            ));
+        }
+        if accepts("string") {
+            let mut item = create_completion_item(
+                "string literal",
+                Some("String literal"),
+                CompletionItemKind::VALUE,
+            );
+            item.insert_text = Some("\"${1:value}\"".to_string());
+            item.insert_text_format = Some(InsertTextFormat::SNIPPET);
+            items.push(item);
+        }
+        if accepts("bool") {
+            items.push(create_completion_item(
+                "true",
+                Some("Boolean literal"),
+                CompletionItemKind::VALUE,
+            ));
+            items.push(create_completion_item(
+                "false",
+                Some("Boolean literal"),
+                CompletionItemKind::VALUE,
+            ));
+        }
+        items
+    }
+
+    fn regex_literal_completion() -> CompletionItem {
+        let mut item = create_completion_item(
+            "regex literal",
+            Some("Regular-expression literal"),
+            CompletionItemKind::VALUE,
+        );
+        item.insert_text = Some("/${1:pattern}/".to_string());
+        item.insert_text_format = Some(InsertTextFormat::SNIPPET);
+        item
+    }
+
+    fn completions_for_constraint(
+        &self,
+        required: XenoConstraint,
+        module_path: Option<&str>,
+    ) -> Vec<CompletionItem> {
+        let all_types = || {
+            let mut types: Vec<_> = self.get_builtin_types().collect();
+            if let Some(module_path) = module_path {
+                types.extend(self.get_module_completions(module_path));
+            }
+            deduplicate_completions(types)
+        };
+
+        let XenoConstraint::Trait(required) = required else {
+            return all_types();
+        };
+
+        match required.kind {
+            XenoTraitKind::Semantic => {
+                let allowed: std::collections::HashSet<_> = self
+                    .semantic_types()
+                    .filter(|semantic_type| semantic_type.implements(required))
+                    .map(|semantic_type| semantic_type.name)
+                    .collect();
+                all_types()
+                    .into_iter()
+                    .filter(|item| allowed.contains(item.label.as_str()))
+                    .collect()
+            }
+            XenoTraitKind::Literal | XenoTraitKind::LiteralType => {
+                self.literal_completions(required)
+            }
+            XenoTraitKind::RegexLiteral => vec![Self::regex_literal_completion()],
+            XenoTraitKind::Identifier | XenoTraitKind::Type => all_types(),
+            XenoTraitKind::Annotation => self.get_builtin_annotations().collect(),
+            XenoTraitKind::Expression => {
+                let mut items = all_types();
+                items.extend(self.get_builtin_annotations());
+                items.extend(self.literal_completions(&xenomorph_common::semantic::LITERAL));
+                deduplicate_completions(items)
+            }
+        }
     }
 
     /// Returns completion items for all declarations visible from the given module
@@ -219,6 +533,18 @@ impl Backend {
     ) -> Vec<CompletionItem> {
         let mut items = Vec::new();
 
+        if let Some((annotation_name, parameter_index)) =
+            annotation_argument_context(tokens, position)
+        {
+            if let Some(parameter) = self
+                .find_annotation(annotation_name)
+                .and_then(|annotation| annotation.parameter_at(parameter_index))
+            {
+                return self.completions_for_constraint(parameter.constraint, module_path);
+            }
+            return items;
+        }
+
         let add_top_level_snippets = |items: &mut Vec<CompletionItem>| {
             items.push(CompletionItem {
                 label: "type".to_string(),
@@ -243,10 +569,20 @@ impl Backend {
             if let Some(mp) = module_path {
                 types.extend(self.get_module_completions(mp));
             }
-            let mut seen = std::collections::HashSet::new();
-            types.retain(|item| seen.insert(item.label.clone()));
-            types
+            deduplicate_completions(types)
         };
+
+        if generic_constraint_context(tokens, position) {
+            items.extend(all_types());
+            items.extend(self.semantic_traits().into_iter().map(|xeno_trait| {
+                create_completion_item(
+                    xeno_trait.name,
+                    xeno_trait.documentation,
+                    CompletionItemKind::INTERFACE,
+                )
+            }));
+            return deduplicate_completions(items);
+        }
 
         if let Some(current_token) = Self::find_token_before_or_at_position(tokens, position) {
             let client = self.client.clone();
@@ -344,77 +680,92 @@ impl Backend {
 
     // ── Hover ───────────────────────────────────────────────────────
 
-    fn get_hover_for_location(
+    fn hover_target_at_location(
         &self,
         tokens: &[Token],
         ast: &[Declaration],
         position: Position,
-        module_path: Option<&str>,
-    ) -> Option<Hover> {
+    ) -> Option<HoverTarget> {
         let token = Self::find_token_at_position(tokens, position)?;
 
         if token.0 != TokenVariant::Identifier {
             return None;
         }
 
-        let searched_name = token.1.v;
+        Some(HoverTarget {
+            name: token.1.v.to_string(),
+            type_arguments: hover::type_arguments_at_token(ast, &token.1).unwrap_or_default(),
+            range: token.1.to_editor_range(),
+        })
+    }
 
-        // 1. Check local AST declarations
-        for decl in ast {
-            if let Declaration::Type { name, docs, .. } = decl {
-                if name.v == searched_name {
-                    let contents = format!("**{}**\n\n{}", name.v, docs.unwrap_or(""));
-                    return Some(Hover {
-                        contents: HoverContents::Markup(MarkupContent {
-                            kind: MarkupKind::Markdown,
-                            value: contents,
-                        }),
-                        range: Some(token.1.to_editor_range()),
-                    });
-                }
-            }
-        }
+    fn type_declaration_preview(
+        &self,
+        info: &DeclarationInfo,
+        type_arguments: &[String],
+    ) -> Option<String> {
+        self.registry
+            .with_module(&info.module_path, |_, ast, _| {
+                ast.iter().find_map(|declaration| match declaration {
+                    Declaration::Type { name, .. } if name.v == info.name => {
+                        hover::format_type_declaration(declaration, type_arguments)
+                    }
+                    _ => None,
+                })
+            })
+            .flatten()
+    }
 
-        // 2. Check builtins
-        let builtin_info = self
-            .get_builtin_types()
-            .find(|item| item.label == searched_name)
-            .or_else(|| {
-                self.get_builtin_annotations()
-                    .find(|item| item.label == searched_name)
-            });
-
-        if let Some(i) = builtin_info {
-            let value = match i.documentation {
-                Some(Documentation::MarkupContent(content)) => content.value,
-                Some(Documentation::String(value)) => value,
-                None => format!("**{}**\n\n{}", i.label, i.detail.unwrap_or_default()),
-            };
-
-            return Some(Hover {
-                contents: HoverContents::Markup(MarkupContent {
-                    kind: MarkupKind::Markdown,
-                    value,
-                }),
-                range: Some(token.1.to_editor_range()),
-            });
-        }
-
-        // 3. Check cross-module declarations via the registry
-        let current_module = module_path.unwrap_or("");
+    fn user_type_hover(&self, target: &HoverTarget, current_module: &str) -> Option<Hover> {
         let info = self
             .registry
-            .find_declaration(current_module, searched_name)?;
-        let docs = info.docs.as_deref().unwrap_or("");
+            .find_declaration(current_module, &target.name)?;
+        let preview = self.type_declaration_preview(&info, &target.type_arguments)?;
+        let mut contents = format!("**{}**", target.name);
+        if info.module_path != current_module {
+            contents.push_str(&format!(" *(from {})*", info.module_path));
+        }
+        if let Some(docs) = info.docs.as_deref().filter(|docs| !docs.is_empty()) {
+            contents.push_str("\n\n");
+            contents.push_str(docs);
+        }
+        contents.push_str("\n\n```xenomorph\n");
+        contents.push_str(&preview);
+        contents.push_str("\n```");
+
         Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
-                value: format!(
-                    "**{}** *(from {})*\n\n{}",
-                    info.name, info.module_path, docs
-                ),
+                value: contents,
             }),
-            range: Some(token.1.to_editor_range()),
+            range: Some(target.range),
+        })
+    }
+
+    fn builtin_hover(&self, target: &HoverTarget) -> Option<Hover> {
+        let builtin_info = self
+            .get_builtin_types()
+            .find(|item| item.label == target.name)
+            .or_else(|| {
+                self.get_builtin_annotations()
+                    .find(|item| item.label == target.name)
+            })?;
+
+        let value = match builtin_info.documentation {
+            Some(Documentation::MarkupContent(content)) => content.value,
+            Some(Documentation::String(value)) => value,
+            None => format!(
+                "**{}**\n\n{}",
+                builtin_info.label,
+                builtin_info.detail.unwrap_or_default()
+            ),
+        };
+        Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value,
+            }),
+            range: Some(target.range),
         })
     }
 
@@ -457,6 +808,8 @@ impl LanguageServer for Backend {
                         ".".to_string(),
                         ":".to_string(),
                         "@".to_string(),
+                        "(".to_string(),
+                        ",".to_string(),
                         "{".to_string(),
                         "/".to_string(),
                         " ".to_string(),
@@ -546,13 +899,20 @@ impl LanguageServer for Backend {
         let position = params.text_document_position_params.position;
         let module_path = self.uri_to_module_path(&uri);
 
-        let hover =
-            self.registry
-                .with_module(module_path.as_deref().unwrap_or(""), |tokens, ast, _| {
-                    self.get_hover_for_location(tokens, ast, position, module_path.as_deref())
-                });
+        let current_module = module_path.as_deref().unwrap_or("");
+        let target = self
+            .registry
+            .with_module(current_module, |tokens, ast, _| {
+                self.hover_target_at_location(tokens, ast, position)
+            })
+            .flatten();
+        let Some(target) = target else {
+            return Ok(None);
+        };
 
-        Ok(hover.flatten())
+        Ok(self
+            .user_type_hover(&target, current_module)
+            .or_else(|| self.builtin_hover(&target)))
     }
 
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
@@ -881,4 +1241,71 @@ async fn main() {
     Server::new(tokio::io::stdin(), tokio::io::stdout(), socket)
         .serve(service)
         .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xenomorph_common::lexer::Lexer;
+
+    fn context_at_end(source: &str) -> Option<(String, usize)> {
+        let tokens = Lexer::tokenize(source).expect("completion fixture should lex");
+        annotation_argument_context(
+            &tokens,
+            Position {
+                line: 0,
+                character: source.len() as u32,
+            },
+        )
+        .map(|(name, index)| (name.to_string(), index))
+    }
+
+    #[test]
+    fn annotation_context_tracks_variadic_parameter_index() {
+        assert_eq!(
+            context_at_end("@Lombok(Data, "),
+            Some(("Lombok".to_string(), 1))
+        );
+    }
+
+    #[test]
+    fn annotation_context_ignores_nested_expression_commas() {
+        assert_eq!(
+            context_at_end("@Outer(@Inner(first, second), "),
+            Some(("Outer".to_string(), 1))
+        );
+        assert_eq!(
+            context_at_end("@Outer(@Inner(first, "),
+            Some(("Inner".to_string(), 1))
+        );
+    }
+
+    #[test]
+    fn generic_constraint_context_only_matches_colons_inside_angle_parameters() {
+        let generic = "type Box<T: Number";
+        let generic_tokens = Lexer::tokenize(generic).expect("generic fixture should lex");
+        assert!(generic_constraint_context(
+            &generic_tokens,
+            Position::new(0, generic.len() as u32)
+        ));
+
+        let field = "type Box = { value: Number";
+        let field_tokens = Lexer::tokenize(field).expect("field fixture should lex");
+        assert!(!generic_constraint_context(
+            &field_tokens,
+            Position::new(0, field.len() as u32)
+        ));
+    }
+
+    #[test]
+    fn match_argument_completion_inserts_regex_literal() {
+        let completion = Backend::regex_literal_completion();
+
+        assert_eq!(completion.label, "regex literal");
+        assert_eq!(completion.insert_text.as_deref(), Some("/${1:pattern}/"));
+        assert_eq!(
+            completion.insert_text_format,
+            Some(InsertTextFormat::SNIPPET)
+        );
+    }
 }

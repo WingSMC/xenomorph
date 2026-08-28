@@ -1,19 +1,12 @@
 use crate::{
     config::{Config, PluginConfigs},
-    semantic::AnalyzerListener,
+    semantic::{AnalyzerListener, XenoAnnotation, XenoType},
 };
 use libloading::{Library, Symbol};
 use std::{
     path::{Path, PathBuf},
     sync::OnceLock,
 };
-
-#[derive(Debug, Clone)]
-pub struct PluginCompletion {
-    pub label: &'static str,
-    pub detail: Option<&'static str>,
-    pub documentation: Option<&'static str>,
-}
 
 /// A factory function that creates a fresh listener instance for each analysis run.
 pub type ListenerFactory =
@@ -25,8 +18,8 @@ pub struct XenoPlugin<'a> {
     pub version: &'a str,
 
     pub initialize: Option<fn() -> ()>,
-    pub provide_types: Option<fn() -> &'static [PluginCompletion]>,
-    pub provide_annotations: Option<fn() -> &'static [PluginCompletion]>,
+    pub provide_types: Option<fn() -> &'static [&'static XenoType]>,
+    pub provide_annotations: Option<fn() -> &'static [&'static XenoAnnotation]>,
     /// Returns a JSON Schema (as a string) describing this plugin's
     /// `[plugins.<name>]` configuration section in `xenomorph.toml`.
     pub provide_config_schema: Option<fn() -> &'static str>,

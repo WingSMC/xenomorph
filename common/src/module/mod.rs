@@ -11,7 +11,7 @@ use crate::lexer::{Lexer, Token, XenoTokens};
 use crate::module::types::{DeclarationInfo, ErrorPhase, ModuleDiagnostic, ModulePath};
 use crate::parser::{Declaration, Parser, XenoAst};
 use crate::plugins::XenoPlugin;
-use crate::semantic::Analyzer;
+use crate::semantic::{Analyzer, TypeDeclarationInfo};
 use crate::utils::calculate_hash;
 use crate::XenoDiagSeverity;
 
@@ -659,7 +659,13 @@ impl XenoRegistry {
                 Ok(ast
                     .iter()
                     .filter_map(|d| match d {
-                        Declaration::Type { docs, name, .. } => Some((
+                        Declaration::Type {
+                            docs,
+                            name,
+                            generics,
+                            ty,
+                            ..
+                        } => Some((
                             name.v,
                             DeclarationInfo {
                                 name: name.v.to_string(),
@@ -669,6 +675,7 @@ impl XenoRegistry {
                                 line: name.l,
                                 column: name.c,
                                 name_len: name.v.len() as u32,
+                                semantic: TypeDeclarationInfo::from_ast(generics.as_deref(), &ty.0),
                             },
                         )),
                         _ => None,
@@ -699,8 +706,13 @@ impl XenoRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::{ErrorPhase, ModuleDiagnostic};
-    use crate::{module::XenoRegistry, XenoDiagSeverity};
+    use std::{collections::HashMap, path::PathBuf};
+
+    use super::{ErrorPhase, ModuleData, ModuleDiagnostic};
+    use crate::{
+        config::PluginConfigs, module::XenoRegistry, semantic::Analyzer, utils::calculate_hash,
+        XenoDiagSeverity,
+    };
 
     fn diagnostic(severity: XenoDiagSeverity) -> ModuleDiagnostic {
         ModuleDiagnostic {
@@ -727,5 +739,178 @@ mod tests {
         let diagnostics = vec![diagnostic(XenoDiagSeverity::Err)];
 
         assert!(XenoRegistry::has_fatal_diagnostics(&diagnostics));
+    }
+
+    fn parsed_module(module_path: &str, source: &str) -> ModuleData {
+        XenoRegistry::_create_module_data(
+            &module_path.to_string(),
+            PathBuf::from(format!("{module_path}.xen")),
+            source.to_string(),
+            calculate_hash(&source),
+        )
+        .expect("semantic test source should parse")
+    }
+
+    fn analyze(cache: &HashMap<String, ModuleData>, module_path: &str) -> Vec<String> {
+        let module = cache.get(module_path).expect("module should be cached");
+        let imports = module.borrow_imports().to_vec();
+        Analyzer::new(false, &[])
+            .run(
+                module.borrow_ast(),
+                module,
+                &imports,
+                cache,
+                &[],
+                &PluginConfigs::new(),
+            )
+            .into_iter()
+            .filter(|diagnostic| diagnostic.severity == XenoDiagSeverity::Err)
+            .map(|diagnostic| diagnostic.message)
+            .collect()
+    }
+
+    #[test]
+    fn semantic_pass_allows_local_forward_references() {
+        let source = "type Before = Later; type Later = string;";
+        let mut cache = HashMap::new();
+        cache.insert("test".to_string(), parsed_module("test", source));
+
+        assert!(analyze(&cache, "test").is_empty());
+    }
+
+    #[test]
+    fn semantic_pass_embeds_imported_types_in_trait_hierarchy() {
+        let mut cache = HashMap::new();
+        cache.insert(
+            "base".to_string(),
+            parsed_module("base", "type Imported = string;"),
+        );
+        cache.insert(
+            "test".to_string(),
+            parsed_module(
+                "test",
+                "import base; type UsesImported = Imported @minlen(1);",
+            ),
+        );
+
+        assert!(analyze(&cache, "test").is_empty());
+    }
+
+    #[test]
+    fn generic_constraints_accept_trait_names_and_follow_parentage() {
+        let source = "type Before = Box<u8>; type Box<T: NumberLiteral> = T; type Identity<T> = T; type Forward<T: NumberLiteral> = Box<T>; type Nested<T: NumberLiteral> = Box<Identity<T>>; type Float = Box<f32>; type Bad = Box<string>;";
+        let mut cache = HashMap::new();
+        cache.insert("test".to_string(), parsed_module("test", source));
+
+        let errors = analyze(&cache, "test");
+        assert_eq!(errors.len(), 1, "unexpected errors: {errors:#?}");
+        assert!(errors[0].contains("does not satisfy constraint 'NumberLiteral'"));
+        assert!(errors[0].contains("string"));
+    }
+
+    #[test]
+    fn hierarchy_preserves_duplicate_names_from_loaded_modules() {
+        let mut cache = HashMap::new();
+        cache.insert(
+            "text".to_string(),
+            parsed_module("text", "type Shared = string;"),
+        );
+        cache.insert(
+            "numeric".to_string(),
+            parsed_module("numeric", "type Shared = u8;"),
+        );
+        cache.insert(
+            "test".to_string(),
+            parsed_module("test", "import text; type Local = Shared @minlen(1);"),
+        );
+
+        assert!(analyze(&cache, "test").is_empty());
+    }
+
+    #[test]
+    fn imported_types_resolve_parents_through_their_own_imports() {
+        let mut cache = HashMap::new();
+        cache.insert(
+            "base".to_string(),
+            parsed_module("base", "type Text = string;"),
+        );
+        cache.insert(
+            "middle".to_string(),
+            parsed_module("middle", "import base; type Imported = Text;"),
+        );
+        cache.insert(
+            "test".to_string(),
+            parsed_module(
+                "test",
+                "import middle; type UsesImported = Imported @minlen(1);",
+            ),
+        );
+
+        assert!(analyze(&cache, "test").is_empty());
+    }
+
+    #[test]
+    fn imported_generics_resolve_arguments_in_the_calling_module() {
+        let mut cache = HashMap::new();
+        cache.insert(
+            "containers".to_string(),
+            parsed_module(
+                "containers",
+                "type Box<T: NumberLiteral> = T; type Local = string;",
+            ),
+        );
+        cache.insert(
+            "test".to_string(),
+            parsed_module(
+                "test",
+                "import containers; type Local = u8; type Good = Box<Local>;",
+            ),
+        );
+
+        assert!(analyze(&cache, "test").is_empty());
+    }
+
+    #[test]
+    fn match_accepts_string_and_string_descendants() {
+        let source = "type Email = string @match(/.*@.*\\.com/) @minlen(10); type BuiltinDescendant = uuid @match(/^[0-9a-f-]+$/); type UserDescendant = Email @match(/^alias$/);";
+        let mut cache = HashMap::new();
+        cache.insert("test".to_string(), parsed_module("test", source));
+
+        assert!(analyze(&cache, "test").is_empty());
+    }
+
+    #[test]
+    fn match_rejects_types_that_do_not_descend_from_string() {
+        let source = "type Number = u8 @match(/^[0-9]+$/); type Bytes = binary @match(/.*/); type Date = date @match(/^2026-/);";
+        let mut cache = HashMap::new();
+        cache.insert("test".to_string(), parsed_module("test", source));
+
+        let errors = analyze(&cache, "test");
+        assert_eq!(errors.len(), 3, "unexpected errors: {errors:#?}");
+        assert!(errors
+            .iter()
+            .all(|error| error.contains("Annotation '@match' is not applicable")));
+        assert!(errors
+            .iter()
+            .all(|error| error.contains("Required type(s): string")));
+    }
+
+    #[test]
+    fn match_requires_exactly_one_regex_literal() {
+        let source = "type Missing = string @match(); type StringArg = string @match(\"pattern\"); type Multiple = string @match(/a/, /b/);";
+        let mut cache = HashMap::new();
+        cache.insert("test".to_string(), parsed_module("test", source));
+
+        let errors = analyze(&cache, "test");
+        assert_eq!(errors.len(), 3, "unexpected errors: {errors:#?}");
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("expects 1 argument(s), got 0")));
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("expects RegexLiteral, got string literal")));
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("expects 1 argument(s), got 2")));
     }
 }

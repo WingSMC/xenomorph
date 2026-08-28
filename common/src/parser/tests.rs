@@ -74,12 +74,13 @@ fn parses_documentation_and_generics() {
             docs,
             name,
             generics: Some(generics),
-            ty: (Type::Simple(SimpleType::Identifier(identifier)), _),
+            ty: (Type::Simple(SimpleType::Identifier(identifier, arguments)), _),
             ..
         } => {
             assert_eq!(*docs, Some(source::TYPE_DOCS));
             assert_eq!(name.v, source::TYPE_NAME);
             assert_eq!(identifier.v, "T");
+            assert!(arguments.is_none());
             assert_eq!(generics.len(), 2);
             assert_eq!(generics[0].0.v, "T");
             assert!(generics[0].1.is_none());
@@ -103,19 +104,19 @@ fn parses_every_simple_type_and_literal_case() {
     assert_eq!(ast.len(), 10);
     assert!(matches!(
         type_declaration(&ast[0]).1,
-        Type::Simple(SimpleType::Identifier(_))
+        Type::Simple(SimpleType::Identifier(_, _))
     ));
     assert!(matches!(
         type_declaration(&ast[1]).1,
-        Type::Simple(SimpleType::OptionalIdentifier(_))
+        Type::Simple(SimpleType::OptionalIdentifier(_, _))
     ));
     assert!(matches!(
         type_declaration(&ast[2]).1,
-        Type::Simple(SimpleType::Array(_))
+        Type::Simple(SimpleType::Array(_, _))
     ));
     assert!(matches!(
         type_declaration(&ast[3]).1,
-        Type::Simple(SimpleType::OptionalArray(_))
+        Type::Simple(SimpleType::OptionalArray(_, _))
     ));
     assert!(matches!(
         type_declaration(&ast[4]).1,
@@ -152,13 +153,40 @@ fn postfix_arrays_do_not_conflict_with_tuples() {
     assert_no_errors(&diagnostics);
     assert!(matches!(
         type_declaration(&ast[0]).1,
-        Type::Simple(SimpleType::Array(identifier)) if identifier.v == source::IDENTIFIER
+        Type::Simple(SimpleType::Array(identifier, arguments))
+            if identifier.v == source::IDENTIFIER && arguments.is_none()
     ));
     assert!(matches!(
         type_declaration(&ast[1]).1,
-        Type::Simple(SimpleType::OptionalArray(identifier)) if identifier.v == source::IDENTIFIER
+        Type::Simple(SimpleType::OptionalArray(identifier, arguments))
+            if identifier.v == source::IDENTIFIER && arguments.is_none()
     ));
     assert!(matches!(type_declaration(&ast[2]).1, Type::Tuple(items) if items.len() == 1));
+}
+
+#[test]
+fn parses_nested_generic_specializations_as_simple_types() {
+    let text = "type Box<T> = T; type Example = Box<dict<string, Box<u8>>>; type Fields = { value: Box<string>, values: Box<u8>[], };";
+    let tokens = Lexer::tokenize(text).expect("generic specializations must lex");
+    let (ast, diagnostics) = parse(&tokens);
+
+    assert_no_errors(&diagnostics);
+    assert_eq!(ast.len(), 3);
+    assert!(matches!(
+        type_declaration(&ast[1]).1,
+        Type::Simple(SimpleType::Identifier(name, Some(arguments)))
+            if name.v == "Box"
+                && matches!(&arguments[0], SimpleType::Identifier(name, Some(arguments))
+                    if name.v == "dict" && arguments.len() == 2)
+    ));
+    assert!(matches!(
+        type_declaration(&ast[2]).1,
+        Type::Struct(fields)
+            if matches!(&fields[0].1, SimpleType::Identifier(name, Some(arguments))
+                    if name.v == "Box" && arguments.len() == 1)
+                && matches!(&fields[1].1, SimpleType::Array(name, Some(arguments))
+                    if name.v == "Box" && arguments.len() == 1)
+    ));
 }
 
 #[test]

@@ -11,27 +11,31 @@ type BrightColor = {
 
 type Action = {};
 type ActionEntry = [date, Action];
+type AsdActions = ActionEntry[] @minlen(1) @maxlen(10);
+type Asd = {
+    actions: AsdActions,
+};
 
 /**
 * This is a comment for the Action type
 */
-type Admin = User & {
-    actions: ActionEntry[] @minlen(1) @maxlen(10),
-};
+type Admin = & User & Asd;
 
+type UserId = string @MongoId @SQLPrimary(u64);
+type UserName = string @matches(/^[A-Z]{3,5}_[0-9]{1,3}$/) @minlen(5) @maxlen(20);
+type UserAge = u8 @min(0) @max(150);
 type User = {
     // by default it will use string for other targets
     // if it is generating a mongo orm it will use string
     // if it is an SQL ORM it will use u64
-    _id:
-    | string
-    | @MongoId
-    | @SQLPrimary(u64),
-    name: string /^[A-Z]{3,5}_[0-9]{1,3}$/ @minlen(5) @maxlen(20),
-    age: u8 @min(13) @max(127) @if(@lt(18), $adultContent +false),
+    _id: UserId,
+    name: UserName,
+    age: UserAge ,
     utype: UserType,
     // if tests the languageFilter boolean value implicitly
     // so a validator expression is not needed
-    languageFilter: bool @if($languageFilter, $age+@min(16)) @else($age +@min(12)),
+    languageFilter: bool ,
     adultContent: bool,
-};
+}
+@if(@lt(age, 18),  @eq(adultContent, false))
+@if(languageFilter, @min(age, 16)) @else(@min(age, 12));

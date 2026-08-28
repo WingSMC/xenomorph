@@ -176,12 +176,12 @@ pub enum SimpleType<'src> {
     OptionalLiteral(Literal<'src>),
 
     /** name of a type */
-    Identifier(&'src TokenData<'src>),
-    OptionalIdentifier(&'src TokenData<'src>),
+    Identifier(&'src TokenData<'src>, Option<Vec<SimpleType<'src>>>),
+    OptionalIdentifier(&'src TokenData<'src>, Option<Vec<SimpleType<'src>>>),
 
     /** Postfix array syntax, e.g. uint32[] */
-    Array(&'src TokenData<'src>),
-    OptionalArray(&'src TokenData<'src>),
+    Array(&'src TokenData<'src>, Option<Vec<SimpleType<'src>>>),
+    OptionalArray(&'src TokenData<'src>, Option<Vec<SimpleType<'src>>>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -440,10 +440,14 @@ impl<'src> SimpleType<'src> {
     pub fn get_last_token(&self) -> &'src TokenData<'src> {
         match self {
             SimpleType::Literal(l) | SimpleType::OptionalLiteral(l) => l.get_last_token(),
-            SimpleType::Identifier(d)
-            | SimpleType::OptionalIdentifier(d)
-            | SimpleType::Array(d)
-            | SimpleType::OptionalArray(d) => d,
+            SimpleType::Identifier(d, arguments)
+            | SimpleType::OptionalIdentifier(d, arguments)
+            | SimpleType::Array(d, arguments)
+            | SimpleType::OptionalArray(d, arguments) => arguments
+                .as_deref()
+                .and_then(|arguments| arguments.last())
+                .map(SimpleType::get_last_token)
+                .unwrap_or(d),
         }
     }
 
@@ -455,20 +459,36 @@ impl<'src> SimpleType<'src> {
             TokenVariant::Identifier => {
                 parser.step_forward();
 
-                if parser.skip_if(TokenVariant::LBracket) {
-                    parser.expect_at_current(TokenVariant::RBracket)?;
+                let arguments = if parser.peek_is(TokenVariant::Lt) {
+                    Some(parser.parse_list(
+                        TokenVariant::Lt,
+                        TokenVariant::Comma,
+                        Some(TokenVariant::Gt),
+                        SimpleType::parse,
+                    )?)
+                } else {
+                    None
+                };
 
-                    if is_optional {
-                        return Some(SimpleType::OptionalArray(&t.1));
+                let is_array = if parser.skip_if(TokenVariant::LBracket) {
+                    parser.expect_at_current(TokenVariant::RBracket)?;
+                    true
+                } else {
+                    false
+                };
+
+                if is_array {
+                    return if is_optional {
+                        Some(SimpleType::OptionalArray(&t.1, arguments))
                     } else {
-                        return Some(SimpleType::Array(&t.1));
-                    }
+                        Some(SimpleType::Array(&t.1, arguments))
+                    };
                 }
 
                 if is_optional {
-                    Some(SimpleType::OptionalIdentifier(&t.1))
+                    Some(SimpleType::OptionalIdentifier(&t.1, arguments))
                 } else {
-                    Some(SimpleType::Identifier(&t.1))
+                    Some(SimpleType::Identifier(&t.1, arguments))
                 }
             }
 

@@ -6,8 +6,11 @@ use xenomorph_common::config::{ConfigValue, PluginConfigs};
 use xenomorph_common::parser::{
     Annotation, Declaration, Expr, KeyValExpr, Literal, SimpleType, Type, XenoType,
 };
-use xenomorph_common::plugins::{PluginCompletion, XenoPlugin};
-use xenomorph_common::semantic::{AnalyzerListener, ScopeInfo};
+use xenomorph_common::plugins::XenoPlugin;
+use xenomorph_common::semantic::{
+    AnalyzerListener, ScopeInfo, XenoAnnotation, XenoAnnotationKind, XenoConstraint, XenoParam,
+    XenoParent, XenoTrait, XenoTraitKind, XenoType as SemanticType, ANY_TARGET_PARAM,
+};
 use xenomorph_common::utils::extract_documentation;
 
 // ── Plugin registration ─────────────────────────────────────────────
@@ -18,25 +21,88 @@ static PLUGIN: XenoPlugin = XenoPlugin {
     name: NAME,
     version: VERSION,
     initialize: None,
-    provide_types: None,
+    provide_types: Some(provide_types),
     provide_annotations: Some(provide_annotations),
     provide_config_schema: Some(provide_config_schema),
     register_generator: Some(create_generator),
     register_analyzer: None,
 };
 
-/// The `@Lombok(...)` annotation lets authors attach Lombok decorators to a
-/// type or field, e.g. `@Lombok(Data)` or `@Lombok(ToString, EqualsAndHashCode)`.
-static LOMBOK_COMPLETION: &[PluginCompletion] = &[PluginCompletion {
-    label: "Lombok",
-    detail: Some("Java Lombok decorators"),
-    documentation: Some(
-        "Attaches Lombok class/field decorators to the generated Java DTO, e.g. `@Lombok(Data)`.",
-    ),
-}];
+static LOMBOK_TRAIT: XenoTrait = XenoTrait {
+    name: "LombokDecorator",
+    documentation: Some("Implemented only by supported Java Lombok decorator names."),
+    kind: XenoTraitKind::Semantic,
+    parents: None,
+};
 
-fn provide_annotations() -> &'static [PluginCompletion] {
-    LOMBOK_COMPLETION
+static LOMBOK_PARENT: &[XenoParent] = &[XenoParent::Trait(&LOMBOK_TRAIT)];
+
+macro_rules! lombok_type {
+    ($constant:ident, $name:literal) => {
+        static $constant: SemanticType = SemanticType {
+            name: $name,
+            documentation: Some(concat!("Java Lombok `@", $name, "` decorator.")),
+            generic_params: None,
+            parents: Some(LOMBOK_PARENT),
+        };
+    };
+}
+
+lombok_type!(ACCESSORS, "Accessors");
+lombok_type!(ALL_ARGS_CONSTRUCTOR, "AllArgsConstructor");
+lombok_type!(BUILDER, "Builder");
+lombok_type!(DATA, "Data");
+lombok_type!(EQUALS_AND_HASH_CODE, "EqualsAndHashCode");
+lombok_type!(GETTER, "Getter");
+lombok_type!(NON_NULL, "NonNull");
+lombok_type!(NO_ARGS_CONSTRUCTOR, "NoArgsConstructor");
+lombok_type!(REQUIRED_ARGS_CONSTRUCTOR, "RequiredArgsConstructor");
+lombok_type!(SETTER, "Setter");
+lombok_type!(SINGULAR, "Singular");
+lombok_type!(TO_STRING, "ToString");
+lombok_type!(VALUE, "Value");
+lombok_type!(WITH, "With");
+
+static LOMBOK_TYPES: &[&SemanticType] = &[
+    &ACCESSORS,
+    &ALL_ARGS_CONSTRUCTOR,
+    &BUILDER,
+    &DATA,
+    &EQUALS_AND_HASH_CODE,
+    &GETTER,
+    &NO_ARGS_CONSTRUCTOR,
+    &NON_NULL,
+    &REQUIRED_ARGS_CONSTRUCTOR,
+    &SETTER,
+    &SINGULAR,
+    &TO_STRING,
+    &VALUE,
+    &WITH,
+];
+
+static LOMBOK_PARAM: XenoParam = XenoParam {
+    name: "decorator",
+    constraint: XenoConstraint::Trait(&LOMBOK_TRAIT),
+};
+
+static LOMBOK_ANNOTATION: XenoAnnotation = XenoAnnotation {
+    name: "Lombok",
+    documentation: Some(
+        "Attaches one or more supported Lombok decorators to the generated Java DTO, e.g. `@Lombok(Data, Builder)`.",
+    ),
+    kind: XenoAnnotationKind::Meta,
+    params: &[&ANY_TARGET_PARAM, &LOMBOK_PARAM],
+    variadic: true,
+};
+
+static LOMBOK_ANNOTATIONS: &[&XenoAnnotation] = &[&LOMBOK_ANNOTATION];
+
+fn provide_types() -> &'static [&'static SemanticType] {
+    LOMBOK_TYPES
+}
+
+fn provide_annotations() -> &'static [&'static XenoAnnotation] {
+    LOMBOK_ANNOTATIONS
 }
 
 fn provide_config_schema() -> &'static str {
@@ -344,12 +410,17 @@ impl JavaGenerator {
 
     fn type_to_java(&self, ty: &SimpleType, imports: &mut BTreeSet<String>) -> String {
         match ty {
-            SimpleType::Identifier(identifier) | SimpleType::OptionalIdentifier(identifier) => {
-                builtin_to_java(identifier.v, imports)
+            SimpleType::Identifier(identifier, arguments)
+            | SimpleType::OptionalIdentifier(identifier, arguments) => {
+                self.named_type_to_java(identifier.v, arguments.as_deref(), imports)
             }
-            SimpleType::Array(identifier) | SimpleType::OptionalArray(identifier) => {
+            SimpleType::Array(identifier, arguments)
+            | SimpleType::OptionalArray(identifier, arguments) => {
                 imports.insert("java.util.List".to_string());
-                format!("List<{}>", builtin_to_java(identifier.v, imports))
+                format!(
+                    "List<{}>",
+                    self.named_type_to_java(identifier.v, arguments.as_deref(), imports)
+                )
             }
             SimpleType::Literal(Literal::String(_, _))
             | SimpleType::OptionalLiteral(Literal::String(_, _)) => "String".to_string(),
@@ -359,6 +430,26 @@ impl JavaGenerator {
             | SimpleType::OptionalLiteral(Literal::Int(_, _)) => "Integer".to_string(),
             SimpleType::Literal(Literal::Float(_, _))
             | SimpleType::OptionalLiteral(Literal::Float(_, _)) => "Double".to_string(),
+        }
+    }
+
+    fn named_type_to_java(
+        &self,
+        name: &str,
+        arguments: Option<&[SimpleType]>,
+        imports: &mut BTreeSet<String>,
+    ) -> String {
+        let base = builtin_to_java(name, imports);
+        match arguments {
+            None => base,
+            Some(arguments) => format!(
+                "{base}<{}>",
+                arguments
+                    .iter()
+                    .map(|argument| self.type_to_java(argument, imports))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         }
     }
 }
@@ -438,7 +529,7 @@ fn collect_lombok_decorators(annotations: &[Annotation]) -> Vec<String> {
 /// Renders a single `@Lombok(...)` argument as a Java decorator name.
 fn decorator_name(arg: &Expr) -> Option<String> {
     match arg {
-        Expr::Type(Type::Simple(SimpleType::Identifier(identifier))) => {
+        Expr::Type(Type::Simple(SimpleType::Identifier(identifier, _))) => {
             Some(identifier.v.to_string())
         }
         _ => None,
@@ -458,8 +549,8 @@ fn is_optional(ty: &SimpleType) -> bool {
     matches!(
         ty,
         SimpleType::OptionalLiteral(_)
-            | SimpleType::OptionalIdentifier(_)
-            | SimpleType::OptionalArray(_)
+            | SimpleType::OptionalIdentifier(_, _)
+            | SimpleType::OptionalArray(_, _)
     )
 }
 
@@ -519,7 +610,7 @@ mod tests {
         let ty = (
             Type::Struct(vec![(
                 &key,
-                SimpleType::Identifier(&field_type),
+                SimpleType::Identifier(&field_type, None),
                 Some(&field_docs),
             )]),
             vec![],
@@ -598,5 +689,15 @@ mod tests {
         register_lombok_import(&mut i, "NonNull");
         assert!(i.contains("lombok.ToString"));
         assert!(i.contains("lombok.NonNull"));
+    }
+
+    #[test]
+    fn lombok_types_own_the_lombok_trait() {
+        assert!(LOMBOK_TYPES
+            .iter()
+            .all(|semantic_type| semantic_type.implements(&LOMBOK_TRAIT)));
+        assert!(xenomorph_common::semantic::BUILTIN_TYPES
+            .iter()
+            .all(|semantic_type| !semantic_type.implements(&LOMBOK_TRAIT)));
     }
 }

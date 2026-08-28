@@ -1,15 +1,199 @@
 use std::collections::HashSet;
 
-pub struct GenericParam {
-    pub name: &'static str,
-    pub parent: Option<&'static [&'static XenoType]>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XenoTraitKind {
+    /// A trait implemented by semantic types and inherited through parents.
+    Semantic,
+    /// A trait implemented by every annotation argument expression.
+    Expression,
+    /// A trait implemented by literal annotation arguments.
+    Literal,
+    /// A semantic type constraint that only literal arguments may satisfy.
+    LiteralType,
+    /// A trait implemented only by regular-expression literal arguments.
+    RegexLiteral,
+    /// A trait implemented by bare identifier arguments.
+    Identifier,
+    /// A trait implemented by references to known types.
+    Type,
+    /// A trait implemented by nested annotation arguments.
+    Annotation,
 }
 
+#[derive(Debug)]
+pub struct XenoTrait {
+    pub name: &'static str,
+    pub documentation: Option<&'static str>,
+    pub kind: XenoTraitKind,
+    pub parents: Option<&'static [&'static XenoTrait]>,
+}
+
+impl XenoTrait {
+    /// Returns whether this trait is, or transitively inherits from, `target`.
+    pub fn is_or_inherits(&self, target: &XenoTrait) -> bool {
+        self.is_or_inherits_inner(target, &mut HashSet::new())
+    }
+
+    fn is_or_inherits_inner(
+        &self,
+        target: &XenoTrait,
+        visited: &mut HashSet<*const XenoTrait>,
+    ) -> bool {
+        if std::ptr::eq(self, target) || self.name == target.name {
+            return true;
+        }
+        if !visited.insert(self as *const XenoTrait) {
+            return false;
+        }
+
+        self.parents
+            .unwrap_or(&[])
+            .iter()
+            .any(|parent| parent.is_or_inherits_inner(target, visited))
+    }
+}
+
+pub static NUMERIC: XenoTrait = XenoTrait {
+    name: "Numeric",
+    documentation: Some("Implemented by numeric value types."),
+    kind: XenoTraitKind::Semantic,
+    parents: None,
+};
+
+pub static HAS_LENGTH: XenoTrait = XenoTrait {
+    name: "HasLength",
+    documentation: Some("Implemented by values whose elements or characters can be counted."),
+    kind: XenoTraitKind::Semantic,
+    parents: None,
+};
+
+pub static EXPRESSION: XenoTrait = XenoTrait {
+    name: "Expression",
+    documentation: Some("Implemented by every annotation argument expression."),
+    kind: XenoTraitKind::Expression,
+    parents: None,
+};
+
+pub static LITERAL: XenoTrait = XenoTrait {
+    name: "Literal",
+    documentation: Some("Implemented by literal annotation arguments."),
+    kind: XenoTraitKind::Literal,
+    parents: Some(&[&EXPRESSION]),
+};
+
+pub static NUMBER_LITERAL: XenoTrait = XenoTrait {
+    name: "NumberLiteral",
+    documentation: Some("Implemented by integer and floating-point literals."),
+    kind: XenoTraitKind::LiteralType,
+    parents: Some(&[&LITERAL]),
+};
+
+pub static INTEGER_LITERAL: XenoTrait = XenoTrait {
+    name: "IntegerLiteral",
+    documentation: Some("Implemented by integer literals."),
+    kind: XenoTraitKind::LiteralType,
+    parents: Some(&[&NUMBER_LITERAL]),
+};
+
+pub static STRING_LITERAL: XenoTrait = XenoTrait {
+    name: "StringLiteral",
+    documentation: Some("Implemented by string literals."),
+    kind: XenoTraitKind::LiteralType,
+    parents: Some(&[&LITERAL]),
+};
+
+pub static REGEX_LITERAL: XenoTrait = XenoTrait {
+    name: "RegexLiteral",
+    documentation: Some("Implemented by regular-expression literals."),
+    kind: XenoTraitKind::RegexLiteral,
+    parents: Some(&[&LITERAL]),
+};
+
+pub static BOOL_LITERAL: XenoTrait = XenoTrait {
+    name: "BoolLiteral",
+    documentation: Some("Implemented by boolean literals."),
+    kind: XenoTraitKind::LiteralType,
+    parents: Some(&[&LITERAL]),
+};
+
+pub static IDENTIFIER: XenoTrait = XenoTrait {
+    name: "Identifier",
+    documentation: Some("Implemented by bare identifier arguments."),
+    kind: XenoTraitKind::Identifier,
+    parents: Some(&[&EXPRESSION]),
+};
+
+pub static TYPE_REFERENCE: XenoTrait = XenoTrait {
+    name: "Type",
+    documentation: Some("Implemented by references to known types."),
+    kind: XenoTraitKind::Type,
+    parents: Some(&[&IDENTIFIER]),
+};
+
+pub static ANNOTATION: XenoTrait = XenoTrait {
+    name: "Annotation",
+    documentation: Some("Implemented by nested annotation arguments."),
+    kind: XenoTraitKind::Annotation,
+    parents: Some(&[&EXPRESSION]),
+};
+
+#[derive(Debug)]
+pub struct GenericParam {
+    pub name: &'static str,
+    pub constraint: Option<XenoConstraint>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum XenoConstraint {
+    Type(&'static XenoType),
+    Trait(&'static XenoTrait),
+}
+
+impl XenoConstraint {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Type(required) => required.name,
+            Self::Trait(required) => required.name,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct XenoType {
     pub name: &'static str,
     pub documentation: Option<&'static str>,
     pub generic_params: Option<&'static [&'static GenericParam]>,
-    pub parents: Option<&'static [&'static XenoType]>,
+    pub parents: Option<&'static [XenoParent]>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum XenoParent {
+    Type(&'static XenoType),
+    Trait(&'static XenoTrait),
+}
+
+impl XenoType {
+    pub fn implements(&self, xeno_trait: &XenoTrait) -> bool {
+        self.implements_inner(xeno_trait, &mut HashSet::new())
+    }
+
+    fn implements_inner(
+        &self,
+        xeno_trait: &XenoTrait,
+        visited: &mut HashSet<*const XenoType>,
+    ) -> bool {
+        if !visited.insert(self as *const XenoType) {
+            return false;
+        }
+
+        self.parents
+            .unwrap_or(&[])
+            .iter()
+            .any(|parent| match parent {
+                XenoParent::Trait(parent_trait) => parent_trait.is_or_inherits(xeno_trait),
+                XenoParent::Type(parent_type) => parent_type.implements_inner(xeno_trait, visited),
+            })
+    }
 }
 
 pub fn is_type_compatible(
@@ -34,23 +218,30 @@ pub fn is_type_compatible(
         return false;
     }
 
-    if let Some(parents) = candidate.parents {
-        if parents
-            .iter()
-            .any(|parent| is_type_compatible(parent, target, visited))
-        {
-            return true;
-        }
-    }
-
-    false
+    candidate.parents.unwrap_or(&[]).iter().any(|parent| {
+        matches!(parent, XenoParent::Type(parent_type) if is_type_compatible(parent_type, target, visited))
+    })
 }
 
-static ANY_PARENT: &[&XenoType] = &[&ANY];
-static NUM_PARENT: &[&XenoType] = &[&NUMBER];
-static INT_PARENT: &[&XenoType] = &[&INTEGER];
-static STR_PARENT: &[&XenoType] = &[&STRING];
-static IP_PARENT: &[&XenoType] = &[&IP];
+static ANY_PARENT: &[XenoParent] = &[XenoParent::Type(&ANY)];
+static BOOL_PARENT: &[XenoParent] = &[XenoParent::Type(&ANY), XenoParent::Trait(&BOOL_LITERAL)];
+static NUMBER_PARENT: &[XenoParent] = &[
+    XenoParent::Type(&ANY),
+    XenoParent::Trait(&NUMERIC),
+    XenoParent::Trait(&NUMBER_LITERAL),
+];
+static INTEGER_PARENT: &[XenoParent] = &[
+    XenoParent::Type(&NUMBER),
+    XenoParent::Trait(&INTEGER_LITERAL),
+];
+static STR_PARENT: &[XenoParent] = &[XenoParent::Type(&STRING)];
+static STRING_PARENT: &[XenoParent] = &[
+    XenoParent::Type(&ANY),
+    XenoParent::Trait(&HAS_LENGTH),
+    XenoParent::Trait(&STRING_LITERAL),
+];
+static IP_PARENT: &[XenoParent] = &[XenoParent::Type(&IP)];
+static LENGTH_PARENT: &[XenoParent] = &[XenoParent::Type(&ANY), XenoParent::Trait(&HAS_LENGTH)];
 
 static TYPE: XenoType = XenoType {
     name: "TYPE",
@@ -59,7 +250,7 @@ static TYPE: XenoType = XenoType {
     parents: None,
 };
 
-static ANY: XenoType = XenoType {
+pub static ANY: XenoType = XenoType {
     name: "any",
     documentation: Some(
         "The any type represents a value of any type. It is used for dynamic typing and can hold values of any type, including primitive types, complex types, and even other any types.",
@@ -74,14 +265,14 @@ static BOOL: XenoType = XenoType {
         "The boolean type represents a value that can be either true (1) or false (0).",
     ),
     generic_params: None,
-    parents: Some(ANY_PARENT),
+    parents: Some(BOOL_PARENT),
 };
 
 static NUMBER: XenoType = XenoType {
     name: "number",
     documentation: Some("The number type represents a numeric value."),
     generic_params: None,
-    parents: Some(ANY_PARENT),
+    parents: Some(NUMBER_PARENT),
 };
 
 static INTEGER: XenoType = XenoType {
@@ -90,112 +281,112 @@ static INTEGER: XenoType = XenoType {
         "The integer type represents a whole number. Generalizes i128, u128 and bigint.",
     ),
     generic_params: None,
-    parents: Some(NUM_PARENT),
+    parents: Some(INTEGER_PARENT),
 };
 
 static I4: XenoType = XenoType {
     name: "i4",
     documentation: Some("The i4 type represents a 4-bit integer."),
     generic_params: None,
-    parents: Some(&[&I8]),
+    parents: Some(&[XenoParent::Type(&I8)]),
 };
 
 static I8: XenoType = XenoType {
     name: "i8",
     documentation: Some("The i8 type represents an 8-bit integer."),
     generic_params: None,
-    parents: Some(&[&I16]),
+    parents: Some(&[XenoParent::Type(&I16)]),
 };
 
 static I16: XenoType = XenoType {
     name: "i16",
     documentation: Some("The i16 type represents a 16-bit integer."),
     generic_params: None,
-    parents: Some(&[&I32]),
+    parents: Some(&[XenoParent::Type(&I32)]),
 };
 
 static I32: XenoType = XenoType {
     name: "i32",
     documentation: Some("The i32 type represents a 32-bit integer."),
     generic_params: None,
-    parents: Some(&[&I64]),
+    parents: Some(&[XenoParent::Type(&I64)]),
 };
 
 static I64: XenoType = XenoType {
     name: "i64",
     documentation: Some("The i64 type represents a 64-bit integer."),
     generic_params: None,
-    parents: Some(&[&I128]),
+    parents: Some(&[XenoParent::Type(&I128)]),
 };
 
 static I128: XenoType = XenoType {
     name: "i128",
     documentation: Some("The i128 type represents a 128-bit integer."),
     generic_params: None,
-    parents: Some(INT_PARENT),
+    parents: Some(&[XenoParent::Type(&INTEGER)]),
 };
 
 static U4: XenoType = XenoType {
     name: "u4",
     documentation: Some("The u4 type represents a 4-bit unsigned integer."),
     generic_params: None,
-    parents: Some(&[&U8]),
+    parents: Some(&[XenoParent::Type(&U8)]),
 };
 
 static U8: XenoType = XenoType {
     name: "u8",
     documentation: Some("The u8 type represents an 8-bit unsigned integer."),
     generic_params: None,
-    parents: Some(&[&U16]),
+    parents: Some(&[XenoParent::Type(&U16)]),
 };
 
 static U16: XenoType = XenoType {
     name: "u16",
     documentation: Some("The u16 type represents a 16-bit unsigned integer."),
     generic_params: None,
-    parents: Some(&[&U32]),
+    parents: Some(&[XenoParent::Type(&U32)]),
 };
 
 static U32: XenoType = XenoType {
     name: "u32",
     documentation: Some("The u32 type represents a 32-bit unsigned integer."),
     generic_params: None,
-    parents: Some(&[&U64]),
+    parents: Some(&[XenoParent::Type(&U64)]),
 };
 
 static U64: XenoType = XenoType {
     name: "u64",
     documentation: Some("The u64 type represents a 64-bit unsigned integer."),
     generic_params: None,
-    parents: Some(&[&U128]),
+    parents: Some(&[XenoParent::Type(&U128)]),
 };
 
 static U128: XenoType = XenoType {
     name: "u128",
     documentation: Some("The u128 type represents a 128-bit unsigned integer."),
     generic_params: None,
-    parents: Some(INT_PARENT),
+    parents: Some(&[XenoParent::Type(&INTEGER)]),
 };
 
 static F32: XenoType = XenoType {
     name: "f32",
     documentation: Some("The f32 type represents a 32-bit floating point number."),
     generic_params: None,
-    parents: Some(&[&F64]),
+    parents: Some(&[XenoParent::Type(&F64)]),
 };
 
 static F64: XenoType = XenoType {
     name: "f64",
     documentation: Some("The f64 type represents a 64-bit floating point number."),
     generic_params: None,
-    parents: Some(NUM_PARENT),
+    parents: Some(&[XenoParent::Type(&NUMBER)]),
 };
 
 static BIGINT: XenoType = XenoType {
     name: "bigint",
     documentation: Some("The bigint type represents an arbitrary size integer."),
     generic_params: None,
-    parents: Some(INT_PARENT),
+    parents: Some(&[XenoParent::Type(&INTEGER)]),
 };
 
 static DECIMAL: XenoType = XenoType {
@@ -204,7 +395,7 @@ static DECIMAL: XenoType = XenoType {
         "The decimal type represents a fixed-point decimal number with arbitrary precision.",
     ),
     generic_params: None,
-    parents: Some(NUM_PARENT),
+    parents: Some(&[XenoParent::Type(&NUMBER)]),
 };
 
 static DATE: XenoType = XenoType {
@@ -232,11 +423,11 @@ static DURATION: XenoType = XenoType {
     parents: Some(ANY_PARENT),
 };
 
-static STRING: XenoType = XenoType {
+pub static STRING: XenoType = XenoType {
     name: "string",
     documentation: Some("The string type represents a sequence of characters."),
     generic_params: None,
-    parents: Some(ANY_PARENT),
+    parents: Some(STRING_PARENT),
 };
 
 static CHAR: XenoType = XenoType {
@@ -322,7 +513,7 @@ static BINARY: XenoType = XenoType {
         "The binary type represents a sequence of bytes, typically used for storing and transmitting raw data.",
     ),
     generic_params: None,
-    parents: Some(ANY_PARENT),
+    parents: Some(LENGTH_PARENT),
 };
 
 static JSON: XenoType = XenoType {
@@ -394,10 +585,30 @@ static DICT: XenoType = XenoType {
         "The dict type represents a collection of key-value pairs, where each key is unique and maps to a corresponding value.",
     ),
     generic_params: Some(&[
-        &GenericParam { name: "K", parent: None },
-        &GenericParam { name: "V", parent: None },
+        &GenericParam {
+            name: "K",
+            constraint: None,
+        },
+        &GenericParam {
+            name: "V",
+            constraint: None,
+        },
     ]),
-    parents: Some(ANY_PARENT),
+    parents: Some(LENGTH_PARENT),
+};
+
+static ARRAY_ELEMENT: GenericParam = GenericParam {
+    name: "T",
+    constraint: None,
+};
+
+static ARRAY: XenoType = XenoType {
+    name: "array",
+    documentation: Some(
+        "The array type represents an ordered, variable-length collection. Postfix `T[]` is its shorthand.",
+    ),
+    generic_params: Some(&[&ARRAY_ELEMENT]),
+    parents: Some(LENGTH_PARENT),
 };
 
 #[rustfmt::skip]
@@ -445,7 +656,58 @@ pub static BUILTIN_TYPES: &[&XenoType] = &[
     &TSV,
     &SEMVER,
     &DICT,
+    &ARRAY,
 ];
 
-pub static NUMBER_TYPES: &[&XenoType] = &[&NUMBER];
-pub static LENGTH_TYPES: &[&XenoType] = &[&STRING, &BINARY, &DICT];
+pub static BUILTIN_TRAITS: &[&XenoTrait] = &[
+    &NUMERIC,
+    &HAS_LENGTH,
+    &EXPRESSION,
+    &LITERAL,
+    &NUMBER_LITERAL,
+    &INTEGER_LITERAL,
+    &STRING_LITERAL,
+    &REGEX_LITERAL,
+    &BOOL_LITERAL,
+    &IDENTIFIER,
+    &TYPE_REFERENCE,
+    &ANNOTATION,
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn semantic_traits_follow_multiple_parent_levels() {
+        assert!(STRING.implements(&HAS_LENGTH));
+        assert!(ARRAY.implements(&HAS_LENGTH));
+        assert!(BINARY.implements(&HAS_LENGTH));
+        assert!(DICT.implements(&HAS_LENGTH));
+        assert!(UUID.implements(&HAS_LENGTH));
+        assert!(U8.implements(&NUMERIC));
+        assert!(U8.implements(&NUMBER_LITERAL));
+        assert!(U8.implements(&INTEGER_LITERAL));
+        assert!(U8.implements(&LITERAL));
+        assert!(U8.implements(&EXPRESSION));
+        assert!(F32.implements(&NUMBER_LITERAL));
+        assert!(BOOL.implements(&BOOL_LITERAL));
+        assert!(STRING.implements(&STRING_LITERAL));
+        assert!(!BOOL.implements(&HAS_LENGTH));
+        assert!(!F32.implements(&INTEGER_LITERAL));
+    }
+
+    #[test]
+    fn traits_follow_transitive_parentage() {
+        assert!(STRING_LITERAL.is_or_inherits(&LITERAL));
+        assert!(STRING_LITERAL.is_or_inherits(&EXPRESSION));
+        assert!(REGEX_LITERAL.is_or_inherits(&LITERAL));
+        assert!(REGEX_LITERAL.is_or_inherits(&EXPRESSION));
+        assert!(INTEGER_LITERAL.is_or_inherits(&NUMBER_LITERAL));
+        assert!(INTEGER_LITERAL.is_or_inherits(&LITERAL));
+        assert!(TYPE_REFERENCE.is_or_inherits(&IDENTIFIER));
+        assert!(TYPE_REFERENCE.is_or_inherits(&EXPRESSION));
+        assert!(!STRING_LITERAL.is_or_inherits(&NUMBER_LITERAL));
+        assert!(!LITERAL.is_or_inherits(&STRING_LITERAL));
+    }
+}

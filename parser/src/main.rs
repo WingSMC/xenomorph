@@ -342,10 +342,62 @@ fn simple_type_node(ty: &SimpleType<'_>) -> AstNode {
     match ty {
         SimpleType::Literal(literal) => literal_node("Literal", literal),
         SimpleType::OptionalLiteral(literal) => literal_node("OptionalLiteral", literal),
-        SimpleType::Identifier(token) => token_node("IdentifierType", token),
-        SimpleType::OptionalIdentifier(token) => token_node("OptionalIdentifierType", token),
-        SimpleType::Array(token) => token_node("ArrayType", token),
-        SimpleType::OptionalArray(token) => token_node("OptionalArrayType", token),
+        SimpleType::Identifier(token, arguments) => node(
+            "IdentifierType",
+            Some(token.v.to_string()),
+            Some(InspectRange {
+                start: token_range(token).start,
+                end: token_range(ty.get_last_token()).end,
+            }),
+            arguments
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .map(simple_type_node)
+                .collect(),
+        ),
+        SimpleType::OptionalIdentifier(token, arguments) => node(
+            "OptionalIdentifierType",
+            Some(token.v.to_string()),
+            Some(InspectRange {
+                start: token_range(token).start,
+                end: token_range(ty.get_last_token()).end,
+            }),
+            arguments
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .map(simple_type_node)
+                .collect(),
+        ),
+        SimpleType::Array(token, arguments) => node(
+            "ArrayType",
+            Some(token.v.to_string()),
+            Some(InspectRange {
+                start: token_range(token).start,
+                end: token_range(ty.get_last_token()).end,
+            }),
+            arguments
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .map(simple_type_node)
+                .collect(),
+        ),
+        SimpleType::OptionalArray(token, arguments) => node(
+            "OptionalArrayType",
+            Some(token.v.to_string()),
+            Some(InspectRange {
+                start: token_range(token).start,
+                end: token_range(ty.get_last_token()).end,
+            }),
+            arguments
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .map(simple_type_node)
+                .collect(),
+        ),
     }
 }
 

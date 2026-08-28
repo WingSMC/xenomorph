@@ -9,6 +9,7 @@ use xenomorph_common::parser::{
 use xenomorph_common::plugins::XenoPlugin;
 use xenomorph_common::semantic::{AnalyzerListener, ScopeInfo};
 use xenomorph_common::utils::extract_documentation;
+use xenomorph_common::TokenData;
 
 // ── Plugin registration ─────────────────────────────────────────────
 
@@ -111,9 +112,13 @@ impl<'src> AnalyzerListener<'src> for TsGenerator {
         for decl in ast {
             match decl {
                 Declaration::Type {
-                    docs, name, ty: t, ..
+                    docs,
+                    name,
+                    generics,
+                    ty: t,
+                    ..
                 } => {
-                    generate_type_decl(&mut self.out, docs, name.v, t);
+                    generate_type_decl(&mut self.out, docs, name.v, generics.as_deref(), t);
                 }
                 _ => {}
             }
@@ -146,8 +151,15 @@ impl<'src> AnalyzerListener<'src> for TsGenerator {
 
 // ── Type declaration generation ─────────────────────────────────────
 
-fn generate_type_decl(out: &mut String, docs: &Option<&str>, name: &str, t: &XenoType) {
+fn generate_type_decl(
+    out: &mut String,
+    docs: &Option<&str>,
+    name: &str,
+    generics: Option<&[(&TokenData, Option<&TokenData>)]>,
+    t: &XenoType,
+) {
     let annotations: Vec<String> = t.1.iter().map(format_annotation).collect();
+    let generic_params = format_generic_params(generics);
 
     // JSDoc
     if docs.is_some() || !annotations.is_empty() {
@@ -164,7 +176,7 @@ fn generate_type_decl(out: &mut String, docs: &Option<&str>, name: &str, t: &Xen
     }
 
     if let Type::Struct(fields) = &t.0 {
-        generate_interface(out, name, fields);
+        generate_interface(out, name, &generic_params, fields);
         return;
     }
 
@@ -188,13 +200,13 @@ fn generate_type_decl(out: &mut String, docs: &Option<&str>, name: &str, t: &Xen
     }
 
     let ts = type_to_ts(&t.0);
-    out.push_str(&format!("export type {name} = {ts};\n\n"));
+    out.push_str(&format!("export type {name}{generic_params} = {ts};\n\n"));
 }
 
 // ── Interface (struct) generation ───────────────────────────────────
 
-fn generate_interface(out: &mut String, name: &str, fields: &[KeyValExpr]) {
-    out.push_str(&format!("export interface {name} {{\n"));
+fn generate_interface(out: &mut String, name: &str, generic_params: &str, fields: &[KeyValExpr]) {
+    out.push_str(&format!("export interface {name}{generic_params} {{\n"));
     for (key, value, docs) in fields {
         let ts_type = simple_type_to_ts(value);
         let optional = is_optional(value);
@@ -308,16 +320,48 @@ fn simple_type_to_ts(ty: &SimpleType) -> String {
         SimpleType::Literal(literal) | SimpleType::OptionalLiteral(literal) => {
             literal_to_ts(literal)
         }
-        SimpleType::Identifier(identifier) | SimpleType::OptionalIdentifier(identifier) => {
-            builtin_to_ts(identifier.v).to_string()
+        SimpleType::Identifier(identifier, arguments)
+        | SimpleType::OptionalIdentifier(identifier, arguments) => {
+            named_type_to_ts(identifier.v, arguments.as_deref())
         }
-        SimpleType::Array(identifier) | SimpleType::OptionalArray(identifier) => {
-            format!("{}[]", builtin_to_ts(identifier.v))
+        SimpleType::Array(identifier, arguments)
+        | SimpleType::OptionalArray(identifier, arguments) => {
+            format!("{}[]", named_type_to_ts(identifier.v, arguments.as_deref()))
         }
     }
 }
 
+fn named_type_to_ts(name: &str, arguments: Option<&[SimpleType]>) -> String {
+    let base = builtin_to_ts(name);
+    match arguments {
+        None => base.to_string(),
+        Some(arguments) => format!(
+            "{base}<{}>",
+            arguments
+                .iter()
+                .map(simple_type_to_ts)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────
+
+fn format_generic_params(generics: Option<&[(&TokenData, Option<&TokenData>)]>) -> String {
+    let Some(generics) = generics.filter(|generics| !generics.is_empty()) else {
+        return String::new();
+    };
+
+    format!(
+        "<{}>",
+        generics
+            .iter()
+            .map(|(name, _constraint)| name.v)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
 
 fn builtin_to_ts(name: &str) -> &str {
     match name {
@@ -367,8 +411,8 @@ fn is_optional(ty: &SimpleType) -> bool {
     matches!(
         ty,
         SimpleType::OptionalLiteral(_)
-            | SimpleType::OptionalIdentifier(_)
-            | SimpleType::OptionalArray(_)
+            | SimpleType::OptionalIdentifier(_, _)
+            | SimpleType::OptionalArray(_, _)
     )
 }
 
@@ -457,18 +501,108 @@ mod tests {
         let ty = (
             Type::Struct(vec![(
                 &key,
-                SimpleType::Identifier(&field_type),
+                SimpleType::Identifier(&field_type, None),
                 Some(&field_docs),
             )]),
             vec![],
         );
         let mut out = String::new();
 
-        generate_type_decl(&mut out, &Some("A user-facing profile."), "Profile", &ty);
+        generate_type_decl(
+            &mut out,
+            &Some("A user-facing profile."),
+            "Profile",
+            None,
+            &ty,
+        );
 
         assert!(out.contains(" * A user-facing profile."));
         assert!(out.contains("   * Name shown to users."));
         assert!(out.contains("  displayName: string;"));
+    }
+
+    #[test]
+    fn test_type_alias_includes_generic_parameters() {
+        let type_parameter = xenomorph_common::TokenData { v: "T", l: 0, c: 0 };
+        let constraint = xenomorph_common::TokenData {
+            v: "HasLength",
+            l: 0,
+            c: 0,
+        };
+        let aliased_type = xenomorph_common::TokenData { v: "T", l: 0, c: 0 };
+        let generics = [(&type_parameter, Some(&constraint))];
+        let ty = (
+            Type::Simple(SimpleType::Identifier(&aliased_type, None)),
+            vec![],
+        );
+        let mut out = String::new();
+
+        generate_type_decl(&mut out, &None, "UserName", Some(&generics), &ty);
+
+        assert_eq!(out, "export type UserName<T> = T;\n\n");
+    }
+
+    #[test]
+    fn test_interface_includes_multiple_generic_parameters() {
+        let first_parameter = xenomorph_common::TokenData { v: "T", l: 0, c: 0 };
+        let second_parameter = xenomorph_common::TokenData { v: "U", l: 0, c: 0 };
+        let field_name = xenomorph_common::TokenData {
+            v: "value",
+            l: 0,
+            c: 0,
+        };
+        let field_type = xenomorph_common::TokenData { v: "T", l: 0, c: 0 };
+        let generics = [(&first_parameter, None), (&second_parameter, None)];
+        let ty = (
+            Type::Struct(vec![(
+                &field_name,
+                SimpleType::Identifier(&field_type, None),
+                None,
+            )]),
+            vec![],
+        );
+        let mut out = String::new();
+
+        generate_type_decl(&mut out, &None, "Container", Some(&generics), &ty);
+
+        assert_eq!(
+            out,
+            "export interface Container<T, U> {\n  value: T;\n}\n\n"
+        );
+    }
+
+    #[test]
+    fn test_match_annotation_is_preserved_in_jsdoc() {
+        let string_type = xenomorph_common::TokenData {
+            v: "string",
+            l: 0,
+            c: 0,
+        };
+        let match_name = xenomorph_common::TokenData {
+            v: "match",
+            l: 0,
+            c: 7,
+        };
+        let regex = xenomorph_common::TokenData {
+            v: "/^[A-Z]+$/",
+            l: 0,
+            c: 13,
+        };
+        let ty = (
+            Type::Simple(SimpleType::Identifier(&string_type, None)),
+            vec![Annotation {
+                ident: &match_name,
+                params: vec![Expr::Regex(&regex)],
+            }],
+        );
+        let mut out = String::new();
+
+        generate_type_decl(&mut out, &None, "Uppercase", None, &ty);
+
+        assert_eq!(
+            out,
+            "/**\n * @match(/^[A-Z]+$/)\n */\nexport type Uppercase = string;\n\n"
+        );
     }
 
     #[test]

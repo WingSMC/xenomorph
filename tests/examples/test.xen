@@ -5,11 +5,21 @@ type Color = {
 };
 
 /**
-Asd
+User name type with a minimum length of 8 characters.
 */
-type User = {
+type UserName<T: HasLength> = T @minlen(8);
+/**
+User age type with a minimum value of 13.
+*/
+type UserAge = u8 @min(13);
+type User<T: HasLength> = {
     _id: i64,
-    name: string @minlen(8),
-    age: u8 @min(13),
+    name: UserName<T>,
+    age: UserAge,
     favouriteColor: Color,
 };
+
+/**
+Specialized user type with the name as a string.
+*/
+type SpecializedUser = User<string>;
