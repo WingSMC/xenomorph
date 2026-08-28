@@ -5,7 +5,10 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 use xenomorph_common::{
     lexer::{Token, TokenVariant},
-    module::{types::DeclarationInfo, XenoRegistry},
+    module::{
+        types::{DeclarationInfo, ModuleDiagnostic},
+        XenoRegistry,
+    },
     parser::Declaration,
     semantic::{XenoAnnotation, XenoConstraint, XenoParent, XenoTrait, XenoTraitKind, XenoType},
     TokenData,
@@ -173,6 +176,36 @@ impl<'src> EditorPosition for TokenData<'src> {
             },
         }
     }
+}
+
+fn diagnostics_for_module(errors: &[ModuleDiagnostic], module_path: &str) -> Vec<Diagnostic> {
+    errors
+        .iter()
+        .filter(|error| error.module_path == module_path)
+        .filter_map(|error| {
+            let (line, col, len) = error.location?;
+            Some(Diagnostic {
+                range: Range {
+                    start: Position {
+                        line,
+                        character: col,
+                    },
+                    end: Position {
+                        line,
+                        character: col + len,
+                    },
+                },
+                severity: Some(match error.severity {
+                    xenomorph_common::XenoDiagSeverity::Err => DiagnosticSeverity::ERROR,
+                    xenomorph_common::XenoDiagSeverity::Warn => DiagnosticSeverity::WARNING,
+                    xenomorph_common::XenoDiagSeverity::Info => DiagnosticSeverity::INFORMATION,
+                }),
+                message: error.message.clone(),
+                source: Some("xenomorph".to_string()),
+                ..Default::default()
+            })
+        })
+        .collect()
 }
 
 impl Backend {
@@ -481,44 +514,44 @@ impl Backend {
     // ── Document validation ─────────────────────────────────────────
 
     /// Reloads the module in the registry from the given source text,
-    /// then publishes diagnostics.
+    /// then revalidates and publishes diagnostics for all of its importers.
     async fn validate_document(&self, uri: &Url, source: String) {
         let file_path = match uri.to_file_path() {
             Ok(p) => p,
             Err(_) => return,
         };
+        let Some(module_path) = self.registry.abs_path_to_module_path(&file_path) else {
+            return;
+        };
 
         let errors = self.registry.load_module_from_source(&file_path, source);
+        self.publish_module_diagnostics(uri.clone(), &module_path, &errors)
+            .await;
 
-        let diagnostics: Vec<Diagnostic> = errors
-            .iter()
-            .filter_map(|err| {
-                let (line, col, len) = err.location?;
-                Some(Diagnostic {
-                    range: Range {
-                        start: Position {
-                            line,
-                            character: col,
-                        },
-                        end: Position {
-                            line,
-                            character: col + len,
-                        },
-                    },
-                    severity: Some(match err.severity {
-                        xenomorph_common::XenoDiagSeverity::Err => DiagnosticSeverity::ERROR,
-                        xenomorph_common::XenoDiagSeverity::Warn => DiagnosticSeverity::WARNING,
-                        xenomorph_common::XenoDiagSeverity::Info => DiagnosticSeverity::INFORMATION,
-                    }),
-                    message: err.message.clone(),
-                    source: Some("xenomorph".to_string()),
-                    ..Default::default()
-                })
-            })
-            .collect();
+        for importer in self.registry.revalidate_importers(&module_path) {
+            let Some(abs_path) = self.registry.with_module(&importer, |_, _, module| {
+                module.borrow_abs_path().to_path_buf()
+            }) else {
+                continue;
+            };
+            let Ok(importer_uri) = Url::from_file_path(abs_path) else {
+                continue;
+            };
+            let importer_errors = self.registry.get_all_errors_for(&importer);
+            self.publish_module_diagnostics(importer_uri, &importer, &importer_errors)
+                .await;
+        }
+    }
 
+    async fn publish_module_diagnostics(
+        &self,
+        uri: Url,
+        module_path: &str,
+        errors: &[ModuleDiagnostic],
+    ) {
+        let diagnostics = diagnostics_for_module(errors, module_path);
         self.client
-            .publish_diagnostics(uri.clone(), diagnostics, None)
+            .publish_diagnostics(uri, diagnostics, None)
             .await;
     }
 
@@ -1247,6 +1280,8 @@ async fn main() {
 mod tests {
     use super::*;
     use xenomorph_common::lexer::Lexer;
+    use xenomorph_common::module::types::ErrorPhase;
+    use xenomorph_common::XenoDiagSeverity;
 
     fn context_at_end(source: &str) -> Option<(String, usize)> {
         let tokens = Lexer::tokenize(source).expect("completion fixture should lex");
@@ -1307,5 +1342,32 @@ mod tests {
             completion.insert_text_format,
             Some(InsertTextFormat::SNIPPET)
         );
+    }
+
+    #[test]
+    fn diagnostics_are_only_published_for_their_own_module() {
+        let errors = vec![
+            ModuleDiagnostic {
+                module_path: "parser/p1".to_string(),
+                message: "p1 error".to_string(),
+                location: Some((1, 2, 3)),
+                phase: ErrorPhase::Parser,
+                severity: XenoDiagSeverity::Err,
+            },
+            ModuleDiagnostic {
+                module_path: "parser/p2".to_string(),
+                message: "p2 error".to_string(),
+                location: Some((4, 5, 6)),
+                phase: ErrorPhase::Analyzer,
+                severity: XenoDiagSeverity::Err,
+            },
+        ];
+
+        let diagnostics = diagnostics_for_module(&errors, "parser/p2");
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].message, "p2 error");
+        assert_eq!(diagnostics[0].range.start, Position::new(4, 5));
+        assert_eq!(diagnostics[0].range.end, Position::new(4, 11));
     }
 }

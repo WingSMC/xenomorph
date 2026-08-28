@@ -1,5 +1,5 @@
 use ouroboros::self_referencing;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
@@ -302,6 +302,9 @@ impl XenoRegistry {
         let md = match Self::_create_module_data(&module_path, abs_path, source, hash) {
             Ok(r) => r,
             Err(e) => {
+                // Do not leave declarations from the previous version visible
+                // when the replacement source cannot be lexed.
+                self.module_cache.write().unwrap().remove(&module_path);
                 errors.extend(e);
                 return errors;
             }
@@ -387,6 +390,129 @@ impl XenoRegistry {
         errors.extend(import_errors);
 
         errors
+    }
+
+    /// Re-runs module and semantic validation for every cached module that
+    /// directly or transitively imports `changed_module`.
+    ///
+    /// Importers are returned in dependency order (nearest first). A visited
+    /// set prevents circular imports from revalidating a module more than once.
+    pub fn revalidate_importers(&self, changed_module: &str) -> Vec<ModulePath> {
+        let importers = {
+            let cache = self.module_cache.read().unwrap();
+            Self::transitive_importers(&cache, changed_module)
+        };
+
+        importers
+            .into_iter()
+            .filter(|module_path| self.revalidate_cached_module(module_path))
+            .collect()
+    }
+
+    fn transitive_importers(
+        cache: &HashMap<ModulePath, ModuleData>,
+        changed_module: &str,
+    ) -> Vec<ModulePath> {
+        let mut reverse_imports: HashMap<ModulePath, Vec<ModulePath>> = HashMap::new();
+        for (module_path, module) in cache {
+            for import in module.borrow_imports() {
+                reverse_imports
+                    .entry(import.clone())
+                    .or_default()
+                    .push(module_path.clone());
+            }
+        }
+        for importers in reverse_imports.values_mut() {
+            importers.sort();
+            importers.dedup();
+        }
+
+        let mut visited = HashSet::from([changed_module.to_string()]);
+        let mut pending = VecDeque::from([changed_module.to_string()]);
+        let mut result = Vec::new();
+
+        while let Some(imported_module) = pending.pop_front() {
+            let Some(importers) = reverse_imports.get(&imported_module) else {
+                continue;
+            };
+            for importer in importers {
+                if visited.insert(importer.clone()) {
+                    result.push(importer.clone());
+                    pending.push_back(importer.clone());
+                }
+            }
+        }
+
+        result
+    }
+
+    fn revalidate_cached_module(&self, module_path: &str) -> bool {
+        let validation = {
+            let cache = self.module_cache.read().unwrap();
+            let Some(module) = cache.get(module_path) else {
+                return false;
+            };
+
+            let imports = module.borrow_imports().to_vec();
+            let import_errors = self.validate_imports(module, module_path);
+            let lexer_errors = module.borrow_lexer_errors().clone();
+            let parser_errors = module.borrow_parser_errors().clone();
+            let imports_have_fatal_diagnostics = imports.iter().any(|import| {
+                cache.get(import).is_some_and(|imported_module| {
+                    imported_module
+                        .borrow_lexer_errors()
+                        .iter()
+                        .chain(imported_module.borrow_parser_errors().iter())
+                        .chain(imported_module.borrow_analyzer_errors().iter())
+                        .chain(imported_module.borrow_module_errors().iter())
+                        .any(|diagnostic| diagnostic.severity == XenoDiagSeverity::Err)
+                })
+            });
+            let generation_allowed = !imports_have_fatal_diagnostics
+                && !Self::has_fatal_diagnostics(&import_errors)
+                && !Self::has_fatal_diagnostics(&lexer_errors)
+                && !Self::has_fatal_diagnostics(&parser_errors);
+
+            let analysis_only;
+            let analyzer = if generation_allowed {
+                &self.analyzer
+            } else {
+                analysis_only = Analyzer::new(false, self.plugins);
+                &analysis_only
+            };
+            let diagnostics = analyzer.run(
+                module.borrow_ast(),
+                module,
+                &imports,
+                &cache,
+                self.plugins,
+                &Config::get().plugins.config,
+            );
+            let analyzer_errors = diagnostics
+                .iter()
+                .map(|diagnostic| ModuleDiagnostic {
+                    module_path: module_path.to_string(),
+                    message: diagnostic.message.clone(),
+                    location: Some((
+                        diagnostic.location.l,
+                        diagnostic.location.c,
+                        diagnostic.location.v.len() as u32,
+                    )),
+                    phase: ErrorPhase::Analyzer,
+                    severity: diagnostic.severity,
+                })
+                .collect::<Vec<_>>();
+
+            (analyzer_errors, import_errors)
+        };
+
+        let mut cache = self.module_cache.write().unwrap();
+        let Some(module) = cache.get_mut(module_path) else {
+            return false;
+        };
+        module.with_analyzer_errors_mut(|errors| *errors = validation.0);
+        module.with_module_errors_mut(|errors| *errors = validation.1);
+        true
     }
 
     // ── Import resolution & validation ──────────────────────────────
@@ -763,6 +889,32 @@ mod tests {
             calculate_hash(&source),
         )
         .expect("semantic test source should parse")
+    }
+
+    #[test]
+    fn transitive_importers_are_deduplicated_across_cycles_and_diamonds() {
+        let mut cache = HashMap::new();
+        cache.insert(
+            "leaf".to_string(),
+            parsed_module("leaf", "type Leaf = string;"),
+        );
+        cache.insert(
+            "a".to_string(),
+            parsed_module("a", "import leaf; import top; type A = Leaf;"),
+        );
+        cache.insert(
+            "b".to_string(),
+            parsed_module("b", "import leaf; type B = Leaf;"),
+        );
+        cache.insert(
+            "top".to_string(),
+            parsed_module("top", "import a; import b; type Top = A | B;"),
+        );
+
+        assert_eq!(
+            XenoRegistry::transitive_importers(&cache, "leaf"),
+            vec!["a".to_string(), "b".to_string(), "top".to_string()]
+        );
     }
 
     fn analyze(cache: &HashMap<String, ModuleData>, module_path: &str) -> Vec<String> {

@@ -1,10 +1,13 @@
 import parser/p1;
+type TestTuple = [UserName, UserAge, email, bool];
 
 type UserType = {
     name: UserName,
     age: UserAge,
     email: email,
     isActive: bool,
+    meta: TestTuple,
 };
 
 type UserList = UserType[] @minlen(1) @maxlen(1000);
+

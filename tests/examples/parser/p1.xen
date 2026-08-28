@@ -24,7 +24,6 @@ type Admin = & User & Asd;
 type UserId = string @MongoId @SQLPrimary(u64);
 type UserName = string @match(/^[A-Z]{3,5}_[0-9]{1,3}$/) @minlen(5) @maxlen(20);
 type UserAge = u8 @min(0) @max(150);
-type UserAge = u8 @min(0) @max(150);
 type User = {
     // by default it will use string for other targets
     // if it is generating a mongo orm it will use string
