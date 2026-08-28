@@ -1,7 +1,5 @@
 import parser/p1;
 
-type UserName = string @match(/^[A-Z][a-z]+$/) @minlen(3) @maxlen(50);
-type UserAge = u8 @min(0) @max(150);
 type UserType = {
     name: UserName,
     age: UserAge,
