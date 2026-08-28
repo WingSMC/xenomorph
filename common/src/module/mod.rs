@@ -546,7 +546,7 @@ impl XenoRegistry {
         let mut errors = Vec::new();
         for decl in module.borrow_ast().iter() {
             if let Declaration::Import { path, location } = decl {
-                let segments: Vec<&str> = path.iter().copied().collect();
+                let segments = path.to_vec();
                 match self.resolve_import(&segments, None) {
                     Ok((_, abs_path)) => {
                         if !abs_path.exists() {
@@ -769,7 +769,7 @@ impl XenoRegistry {
                     .map_err(|e| {
                         vec![ModuleDiagnostic {
                             module_path: module_path.clone(),
-                            message: format!("{}", e.message),
+                            message: e.message.to_string(),
                             location: Some((e.location.l, e.location.c, e.location.v.len() as u32)),
                             phase: ErrorPhase::Lexer,
                             severity: e.severity,
@@ -787,7 +787,7 @@ impl XenoRegistry {
                     .borrow_mut()
                     .extend(diagnostics.iter().map(|e| ModuleDiagnostic {
                         module_path: module_path.clone(),
-                        message: format!("{}", e.message),
+                        message: e.message.to_string(),
                         location: Some((e.location.l, e.location.c, e.location.v.len() as u32)),
                         phase: ErrorPhase::Parser,
                         severity: e.severity,

@@ -669,16 +669,12 @@ impl XenoDefNode<'_> {
 
         for declaration in ast {
             match declaration {
-                Declaration::Type {
-                    name, docs, ty: t, ..
-                } => {
+                Declaration::Type { name, docs, .. } => {
                     let node = XenoDefNode {
                         name: name.v,
                         docs: *docs,
                         fields: None,
-                        meta: Some(Box::new(match t {
-                            _ => Some(true),
-                        })),
+                        meta: Some(Box::new(Some(true))),
                     };
                     def_tree.insert(name.v, node);
                 }

@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
     use crate::lexer::{Lexer, TokenVariant};
     use crate::test_strings::lexer as source;

@@ -14,6 +14,16 @@ pub struct Parser<'src> {
 pub type XenoAst<'src> = Vec<Declaration<'src>>;
 pub type XenoParseResult<'src> = (XenoAst<'src>, Vec<XenoDiagnostic<'src>>);
 
+impl<'src> std::iter::Iterator for Parser<'src> {
+    type Item = &'src Token<'src>;
+
+    fn next(&mut self) -> Option<&'src Token<'src>> {
+        let ind = self.current;
+        self.current += 1;
+        self.tokens.get(ind)
+    }
+}
+
 // --- Basic parser utilities / entry ---
 impl<'src> Parser<'src> {
     pub fn new(tokens: &'src XenoTokens<'src>) -> Self {
@@ -55,7 +65,7 @@ impl<'src> Parser<'src> {
             }
         }
 
-        while let Some(t) = self.next() {
+        for t in self {
             if t.0 == variant {
                 break;
             }
@@ -70,7 +80,7 @@ impl<'src> Parser<'src> {
         let ind = self.current;
         self.current += 1;
         let tok_opt = self.tokens.get(ind);
-        if let None = tok_opt {
+        if tok_opt.is_none() {
             self.diagnostics.push(XenoDiagnostic {
                 severity: XenoDiagSeverity::Err,
                 location: self
@@ -82,12 +92,6 @@ impl<'src> Parser<'src> {
             })
         };
         tok_opt
-    }
-
-    pub fn next(&mut self) -> Option<&'src Token<'src>> {
-        let ind = self.current;
-        self.current += 1;
-        self.tokens.get(ind)
     }
 
     pub fn peek(&self) -> Option<&'src Token<'src>> {

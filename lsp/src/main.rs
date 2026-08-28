@@ -1021,7 +1021,7 @@ impl LanguageServer for Backend {
                 for decl in ast.iter() {
                     if let Declaration::Import { path, .. } = decl {
                         if path.join("/") == token.1.v {
-                            let segments: Vec<&str> = path.iter().copied().collect();
+                            let segments = path.to_vec();
                             if let Ok((_, abs_path)) = self.registry.resolve_import(&segments, None)
                             {
                                 if abs_path.exists() {

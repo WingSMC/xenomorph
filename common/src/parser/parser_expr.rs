@@ -110,7 +110,9 @@ impl<'src> Annotation<'src> {
     pub fn parse_annotations(parser: &mut Parser<'src>) -> Vec<Annotation<'src>> {
         let mut annotations = Vec::new();
         while let Some((TokenVariant::At, _)) = parser.peek() {
-            Self::parse_annotation(parser).map(|a| annotations.push(a));
+            if let Some(a) = Self::parse_annotation(parser) {
+                annotations.push(a)
+            }
         }
         annotations
     }
@@ -542,7 +544,7 @@ impl<'src> SimpleType<'src> {
                 }
             }
 
-            _ => Literal::parse(parser, &t)
+            _ => Literal::parse(parser, t)
                 .map(|l| {
                     if is_optional {
                         SimpleType::OptionalLiteral(l)

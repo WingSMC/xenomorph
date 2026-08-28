@@ -1,8 +1,8 @@
 use serde::Deserialize;
-use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::OnceLock;
+use std::{collections::HashMap, path::Path};
 
 use crate::XenoDiagSeverity;
 
@@ -12,7 +12,7 @@ pub use schema::{build_rc_schema, write_rc_schema, RC_SCHEMA_RELATIVE_PATH};
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
 #[repr(Rust)]
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, Default)]
 pub struct Config {
     #[serde(default)]
     pub parser: ParserConfig,
@@ -51,7 +51,7 @@ pub struct PluginsConfig {
     pub config: PluginConfigs,
 }
 #[repr(Rust)]
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, Default)]
 pub struct DebugConfig {
     #[serde(default)]
     pub plugins: bool,
@@ -111,30 +111,10 @@ impl Config {
     }
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            parser: ParserConfig::default(),
-            plugins: PluginsConfig::default(),
-            debug: DebugConfig::default(),
-            workdir: PathBuf::default(),
-        }
-    }
-}
 impl Default for ParserConfig {
     fn default() -> Self {
         Self {
             entry: default_parser_path(),
-        }
-    }
-}
-impl Default for DebugConfig {
-    fn default() -> Self {
-        Self {
-            plugins: false,
-            tokens: false,
-            ast: false,
-            loglevel: LogLevel::default(),
         }
     }
 }
@@ -148,8 +128,8 @@ impl Default for PluginsConfig {
     }
 }
 
-fn find_workspace_root(wd: &PathBuf) -> Option<PathBuf> {
-    let mut current_dir = wd.clone();
+fn find_workspace_root(wd: &Path) -> Option<PathBuf> {
+    let mut current_dir = wd.to_path_buf();
 
     loop {
         let config_path = current_dir.join("xenomorph.toml");
@@ -190,7 +170,7 @@ fn init_config() -> Config {
                 }
                 Err(_) => {
                     eprintln!("Error: Unable to parse config file.");
-                    return Config::default_with_workdir(workdir);
+                    Config::default_with_workdir(workdir)
                 }
             }
         }

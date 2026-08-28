@@ -52,7 +52,7 @@ macro_rules! lib_filename {
 pub static PLUGINS: OnceLock<Vec<&'static XenoPlugin<'static>>> = OnceLock::new();
 impl<'a> XenoPlugin<'a> {
     pub fn get_plugins() -> &'static Vec<&'static XenoPlugin<'static>> {
-        PLUGINS.get_or_init(|| Self::load_plugins())
+        PLUGINS.get_or_init(Self::load_plugins)
     }
 
     fn plugins_directory() -> PathBuf {
@@ -99,7 +99,7 @@ impl<'a> XenoPlugin<'a> {
                 let lib_path = plugins_dir.join(lib_filename!(&plugin_name));
 
                 Self::load_plugin_library(&lib_path)
-                    .and_then(|lib| Self::create_plugin_instance(lib, &plugin_name))
+                    .and_then(|lib| Self::create_plugin_instance(lib, plugin_name))
                     .map_err(|e| Self::log_loading_error(plugin_name, &e))
                     .ok()
             })

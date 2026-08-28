@@ -180,7 +180,7 @@ pub static ELSE: XenoAnnotation = XenoAnnotation {
     variadic: false,
 };
 
-pub static BUILTIN_ANNOTATIONS: &[&'static XenoAnnotation] = &[
+pub static BUILTIN_ANNOTATIONS: &[&XenoAnnotation] = &[
     &MIN, &MAX, &GT, &LT, &LEN, &MINLEN, &MAXLEN, &MATCH, &IF, &ELSEIF, &ELSE,
 ];
 

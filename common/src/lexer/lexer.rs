@@ -32,6 +32,22 @@ pub struct Lexer<'src> {
     pub tokens: XenoTokens<'src>,
 }
 
+impl<'src> std::iter::Iterator for Lexer<'src> {
+    type Item = char;
+    fn next(&mut self) -> Option<char> {
+        let c = self.it.next();
+        if let Some(c) = c {
+            self.location.src_index += c.len_utf8();
+            self.location.column += 1;
+            if c == '\n' {
+                self.location.line += 1;
+                self.location.column = 0;
+            }
+        }
+        c
+    }
+}
+
 impl<'src> Lexer<'src> {
     fn new(src: &'src str) -> Self {
         Lexer {
@@ -44,19 +60,6 @@ impl<'src> Lexer<'src> {
                 column: 0,
             },
         }
-    }
-
-    pub fn next(&mut self) -> Option<char> {
-        let c = self.it.next();
-        if let Some(c) = c {
-            self.location.src_index += c.len_utf8();
-            self.location.column += 1;
-            if c == '\n' {
-                self.location.line += 1;
-                self.location.column = 0;
-            }
-        }
-        c
     }
 
     pub fn peek(&mut self) -> Option<&char> {
@@ -387,11 +390,11 @@ impl<'src> Lexer<'src> {
             }
         }
 
-        return Err(XenoDiagnostic {
+        Err(XenoDiagnostic {
             message: COMMENT_NOT_TERMINATED.to_string(),
             location: self.token_from(&start),
             severity: crate::XenoDiagSeverity::Err,
-        });
+        })
     }
 
     fn consume_regex(
@@ -410,10 +413,10 @@ impl<'src> Lexer<'src> {
             }
         }
 
-        return Err(XenoDiagnostic {
+        Err(XenoDiagnostic {
             message: MALFORMED_REGEX.to_string(),
             location: self.token_from(&start),
             severity: crate::XenoDiagSeverity::Err,
-        });
+        })
     }
 }
