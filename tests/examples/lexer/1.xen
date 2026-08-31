@@ -8,7 +8,7 @@ type User = {
     name: string,
     age: number,
     favoriteColor: Color,
-} @Entity @Schema @Lombok(Getter, Setter);
+} @Lombok(Getter, Setter);
 
 type ActionEntry = [?date, Action<User>];
 type ActionActions = ActionEntry[] @minlen(1) @maxlen(10);

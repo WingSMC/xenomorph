@@ -1,5 +1,4 @@
-import parser/sets/a;
-import parser/p2;
+import parser/a;
 
 type BrightChannel = u8 @min(125) @max(255);
 
@@ -28,7 +27,7 @@ type Asd = {
 */
 type Admin = & User<string> & Asd;
 
-type UserId = u64 @SQLPrimary;
+type UserId = u64;
 type UserName<T: string> = T @match(/^[A-Z]{3,5}_[0-9]{1,3}$/) @minlen(5) @maxlen(20);
 type UserAge = u8 @min(13) @max(150);
 
