@@ -1,8 +1,11 @@
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use tower_lsp::jsonrpc::Result;
+use tower_lsp::lsp_types::notification::Notification;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 use xenomorph_common::{
+    config::WorkspaceConfigWatcher,
     formatter::format_xenomorph_with_syntax,
     lexer::{Token, TokenVariant},
     module::{
@@ -152,7 +155,15 @@ fn deduplicate_completions(mut items: Vec<CompletionItem>) -> Vec<CompletionItem
 
 struct Backend {
     client: Client,
-    registry: XenoRegistry,
+    registry: Arc<XenoRegistry>,
+    config_watcher: Mutex<Option<WorkspaceConfigWatcher>>,
+}
+
+enum RestartRequested {}
+
+impl Notification for RestartRequested {
+    type Params = ();
+    const METHOD: &'static str = "xenomorph/restartRequested";
 }
 
 trait EditorPosition {
@@ -887,6 +898,58 @@ impl LanguageServer for Backend {
                 .await;
         }
 
+        let registry = Arc::clone(&self.registry);
+        let client = self.client.clone();
+        let runtime = tokio::runtime::Handle::current();
+        match WorkspaceConfigWatcher::watch(move |event| {
+            let client = client.clone();
+            match event {
+                Ok(()) => {
+                    let removed = registry.purge_module_cache();
+                    runtime.spawn(async move {
+                        client
+                            .log_message(
+                                MessageType::INFO,
+                                format!(
+                                    "Workspace config changed; purged {removed} cached module(s) and requested an LSP restart."
+                                ),
+                            )
+                            .await;
+                        client.send_notification::<RestartRequested>(()).await;
+                    });
+                }
+                Err(error) => {
+                    runtime.spawn(async move {
+                        client
+                            .log_message(
+                                MessageType::WARNING,
+                                format!("Workspace config watcher error: {error}"),
+                            )
+                            .await;
+                    });
+                }
+            }
+        }) {
+            Ok(watcher) => {
+                let config_path = watcher.config_path().display().to_string();
+                *self.config_watcher.lock().unwrap() = Some(watcher);
+                self.client
+                    .log_message(
+                        MessageType::INFO,
+                        format!("Watching workspace config: {config_path}"),
+                    )
+                    .await;
+            }
+            Err(error) => {
+                self.client
+                    .log_message(
+                        MessageType::WARNING,
+                        format!("Unable to watch workspace config: {error}"),
+                    )
+                    .await;
+            }
+        }
+
         self.client
             .log_message(MessageType::INFO, "Xenomorph Language Server initialized!")
             .await;
@@ -1297,10 +1360,12 @@ async fn main() {
             return;
         }
     };
+    let reg = Arc::new(reg);
 
     let (service, socket) = LspService::new(move |client| Backend {
         client,
-        registry: reg,
+        registry: Arc::clone(&reg),
+        config_watcher: Mutex::new(None),
     });
 
     Server::new(tokio::io::stdin(), tokio::io::stdout(), socket)

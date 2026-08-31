@@ -616,6 +616,14 @@ impl XenoRegistry {
 
     // ── Cached data access ──────────────────────────────────────────
 
+    /// Purges every loaded module and returns the number removed.
+    pub fn purge_module_cache(&self) -> usize {
+        let mut cache = self.module_cache.write().unwrap();
+        let removed = cache.len();
+        cache.clear();
+        removed
+    }
+
     /// Runs a closure with read access to a module's cached tokens and AST.
     // allow async closures
     pub fn with_module<T, F>(&self, module_path: &str, f: F) -> Option<T>
@@ -915,6 +923,27 @@ mod tests {
             XenoRegistry::transitive_importers(&cache, "leaf"),
             vec!["a".to_string(), "b".to_string(), "top".to_string()]
         );
+    }
+
+    #[test]
+    fn purging_module_cache_removes_all_modules() {
+        static EMPTY_PLUGINS: Vec<&'static crate::plugins::XenoPlugin<'static>> = Vec::new();
+
+        let mut cache = HashMap::new();
+        cache.insert(
+            "test".to_string(),
+            parsed_module("test", "type Test = string;"),
+        );
+        let registry = XenoRegistry {
+            module_cache: std::sync::RwLock::new(cache),
+            root: PathBuf::new(),
+            entry: "test".to_string(),
+            plugins: &EMPTY_PLUGINS,
+            analyzer: Analyzer::new(false, &EMPTY_PLUGINS),
+        };
+
+        assert_eq!(registry.purge_module_cache(), 1);
+        assert!(registry.module_cache.read().unwrap().is_empty());
     }
 
     fn analyze(cache: &HashMap<String, ModuleData>, module_path: &str) -> Vec<String> {

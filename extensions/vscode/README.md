@@ -20,7 +20,10 @@ The extension does not package either executable. If you use different names
 or absolute paths, configure `xenomorph.lsp.executable` and
 `xenomorph.parser.executable` in VS Code settings.
 
-After changing the LSP executable, reload the VS Code window.
+After changing the LSP executable setting, reload the VS Code window. Use
+**Xenomorph: Restart LSP Server** to restart the current executable manually.
+Changes to the workspace's discovered `xenomorph.toml` restart the language
+server automatically.
 
 ## Commands
 
@@ -36,6 +39,8 @@ Open the Command Palette with `Ctrl+Shift+P` and search for **Xenomorph**:
   module dependency graph.
 - **Xenomorph: Show Module Graph JSON** opens the CLI graph protocol as a JSON
   document.
+- **Xenomorph: Restart LSP Server** restarts the language-server process and
+  reloads workspace configuration, plugins, and modules.
 
 The commands inspect the current in-memory editor text, so saving first is not
 required.

@@ -51,6 +51,9 @@ function createServerOptions(): {
 
 let client: LanguageClient | undefined;
 let output: OutputChannel | undefined;
+let restartPromise: Promise<void> | undefined;
+
+const restartRequestedNotification = 'xenomorph/restartRequested';
 
 export function activate(context: ExtensionContext): void {
     output = window.createOutputChannel('Xenomorph');
@@ -77,6 +80,9 @@ export function activate(context: ExtensionContext): void {
         commands.registerCommand('xenomorph.showModuleGraphJson', () =>
             moduleGraphCommand('json'),
         ),
+        commands.registerCommand('xenomorph.restartLsp', () =>
+            restartLsp('manual command'),
+        ),
     );
 
     const clientOptions: LanguageClientOptions = {
@@ -94,6 +100,11 @@ export function activate(context: ExtensionContext): void {
         createServerOptions(),
         clientOptions,
     );
+    context.subscriptions.push(
+        client.onNotification(restartRequestedNotification, () => {
+            void restartLsp('workspace config changed');
+        }),
+    );
 
     void client.start().catch((error: unknown) => {
         const message = errorMessage(error);
@@ -102,6 +113,38 @@ export function activate(context: ExtensionContext): void {
             `Xenomorph LSP failed to start (${lspExecutable}). Ensure it is on PATH. ${message}`,
         );
     });
+}
+
+function restartLsp(reason: string): Promise<void> {
+    if (restartPromise) {
+        return restartPromise;
+    }
+
+    restartPromise = (async () => {
+        if (!client) {
+            void window.showInformationMessage(
+                'The Xenomorph LSP is not running.',
+            );
+            return;
+        }
+
+        output?.appendLine(`[LSP] Restarting (${reason})...`);
+        try {
+            await client.restart();
+            output?.appendLine('[LSP] Restarted successfully.');
+        } catch (error) {
+            const message = errorMessage(error);
+            output?.appendLine(`[LSP] Restart failed: ${message}`);
+            output?.show(true);
+            void window.showErrorMessage(
+                `Xenomorph LSP failed to restart. ${message}`,
+            );
+        }
+    })().finally(() => {
+        restartPromise = undefined;
+    });
+
+    return restartPromise;
 }
 
 async function moduleGraphCommand(mode: 'preview' | 'json'): Promise<void> {
@@ -243,6 +286,8 @@ export async function deactivate(): Promise<void> {
     if (!client) {
         return;
     }
+
+    await restartPromise?.catch(() => undefined);
 
     try {
         await client.stop();

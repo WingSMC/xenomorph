@@ -2,6 +2,8 @@
 
 ## [0.1.2]
 
+- Add a manual LSP restart command and automatically restart after the active
+  workspace `xenomorph.toml` changes.
 - Add module graph preview and JSON commands backed by `xeno graph --json`.
 - Use semantic tokens from the Rust lexer and parser for syntax highlighting;
   retain TextMate fallback rules for hover and completion documentation.

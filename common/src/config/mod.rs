@@ -7,7 +7,11 @@ use std::{collections::HashMap, path::Path};
 use crate::XenoDiagSeverity;
 
 pub mod schema;
+pub mod watcher;
 pub use schema::{build_rc_schema, write_rc_schema, RC_SCHEMA_RELATIVE_PATH};
+pub use watcher::WorkspaceConfigWatcher;
+
+pub const WORKSPACE_CONFIG_FILE: &str = "xenomorph.toml";
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
@@ -153,6 +157,10 @@ impl Config {
     pub fn get() -> &'static Config {
         CONFIG.get_or_init(init_config)
     }
+
+    pub fn workspace_config_path(&self) -> PathBuf {
+        self.workdir.join(WORKSPACE_CONFIG_FILE)
+    }
 }
 
 impl Default for ParserConfig {
@@ -182,13 +190,13 @@ impl Default for PluginsConfig {
     }
 }
 
-fn find_workspace_root(wd: &Path) -> Option<PathBuf> {
+pub fn find_workspace_config(wd: &Path) -> Option<PathBuf> {
     let mut current_dir = wd.to_path_buf();
 
     loop {
-        let config_path = current_dir.join("xenomorph.toml");
+        let config_path = current_dir.join(WORKSPACE_CONFIG_FILE);
         if config_path.exists() {
-            return Some(current_dir);
+            return Some(config_path);
         }
 
         if !current_dir.pop() {
@@ -206,10 +214,14 @@ fn init_config() -> Config {
         }
     };
 
-    match find_workspace_root(&current_dir) {
+    match find_workspace_config(&current_dir) {
         None => Config::default_with_workdir(current_dir),
-        Some(workdir) => {
-            let content = match fs::read_to_string(workdir.join("xenomorph.toml")) {
+        Some(config_path) => {
+            let workdir = config_path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| current_dir.clone());
+            let content = match fs::read_to_string(&config_path) {
                 Ok(content) => content,
                 Err(_) => {
                     eprintln!("Error: Unable to read config file.");
@@ -233,8 +245,13 @@ fn init_config() -> Config {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, FormatterConfig, IndentKind, LineEnding, LogLevel};
+    use super::{
+        find_workspace_config, Config, FormatterConfig, IndentKind, LineEnding, LogLevel,
+        WORKSPACE_CONFIG_FILE,
+    };
     use crate::XenoDiagSeverity;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn formatter_uses_stable_defaults() {
@@ -294,5 +311,33 @@ mod tests {
         assert!(LogLevel::Info.allows(XenoDiagSeverity::Err));
         assert!(LogLevel::Info.allows(XenoDiagSeverity::Warn));
         assert!(LogLevel::Info.allows(XenoDiagSeverity::Info));
+    }
+
+    #[test]
+    fn workspace_config_path_uses_config_workdir() {
+        let workdir = std::path::PathBuf::from("workspace");
+        let config = Config::default_with_workdir(workdir.clone());
+
+        assert_eq!(
+            config.workspace_config_path(),
+            workdir.join(WORKSPACE_CONFIG_FILE)
+        );
+    }
+
+    #[test]
+    fn workspace_config_discovery_returns_the_nearest_config_file() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("xenomorph-config-{unique}"));
+        let nested = root.join("src").join("models");
+        let config_path = root.join(WORKSPACE_CONFIG_FILE);
+        fs::create_dir_all(&nested).expect("test directory should be created");
+        fs::write(&config_path, "").expect("test config should be written");
+
+        assert_eq!(find_workspace_config(&nested), Some(config_path));
+
+        fs::remove_dir_all(root).expect("test directory should be removed");
     }
 }

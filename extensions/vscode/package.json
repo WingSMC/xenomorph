@@ -67,6 +67,12 @@
                 "title": "Show Module Graph JSON",
                 "category": "Xenomorph",
                 "icon": "$(json)"
+            },
+            {
+                "command": "xenomorph.restartLsp",
+                "title": "Restart LSP Server",
+                "category": "Xenomorph",
+                "icon": "$(refresh)"
             }
         ],
         "languages": [
