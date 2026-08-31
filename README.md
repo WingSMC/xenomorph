@@ -9,6 +9,10 @@ Xenomorph is meant to be a universal schema descriptor. It is a front-end for pl
 - [Examples](docs/EXAMPLES.md)
 - [Grammar](docs/GRAMMAR.md)
 
+## Plugin Documentation
+
+- [Java generator](plugins/java/README.md)
+
 ## Config (`xenomorph.toml`)
 
 ## Parser
