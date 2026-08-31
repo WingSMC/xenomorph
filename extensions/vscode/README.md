@@ -3,10 +3,11 @@
 Language support for Xenomorph (`.xen`) files, including syntax highlighting,
 snippets, diagnostics, formatting, parsing tools, and AST visualization.
 
-Syntax highlighting is supplied by `xenomorph_lsp` semantic tokens generated
-from the Rust lexer and parser. The bundled TextMate grammar only provides a
-small comment fallback, so language syntax does not need to be maintained in
-both Rust and regular expressions.
+Syntax highlighting in `.xen` editors is supplied by `xenomorph_lsp` semantic
+tokens generated from the Rust lexer and parser. The bundled TextMate grammar
+provides fallback highlighting while the server starts and colors Xenomorph
+code blocks embedded in hover and completion documentation, where semantic
+tokens are not available.
 
 ## Requirements
 

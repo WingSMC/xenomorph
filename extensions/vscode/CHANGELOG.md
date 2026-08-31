@@ -4,7 +4,7 @@
 
 - Add module graph preview and JSON commands backed by `xeno graph --json`.
 - Use semantic tokens from the Rust lexer and parser for syntax highlighting;
-  retain only comment fallback rules in the TextMate grammar.
+  retain TextMate fallback rules for hover and completion documentation.
 - Resolve the `xenomorph_lsp` and `xeno` executables from `PATH` instead of
   packaging a platform-specific LSP binary.
 - Add Command Palette actions for parsing, lexer/AST debugging, and interactive
