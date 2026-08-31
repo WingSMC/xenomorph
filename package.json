@@ -1,7 +1,7 @@
 {
     "name": "xenomorph",
     "scripts": {
-        "build": "nr build:xeno && nr build:extensions",
+        "build": "nr build:xeno && nr xeno:schema && nr build:extensions",
         "build:extensions": "cd ./extensions/vscode && nr build && cd ../..",
         "build:xeno": "cargo build --release",
         "install:coverage": "cargo install cargo-llvm-cov && rustup component add llvm-tools",

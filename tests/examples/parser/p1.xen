@@ -1,4 +1,4 @@
-import parser/a;
+import lexer/1;
 
 type BrightChannel = u8 @min(125) @max(255);
 
@@ -15,7 +15,10 @@ type Color = {
     b: u8,
 };
 
-type Action = {};
+type Action = {
+    command: string,
+    user: string,
+};
 type ActionEntry = [date, Action];
 type ValidatedActionEntries = ActionEntry[] @minlen(1) @maxlen(10);
 type Asd = {
@@ -25,9 +28,10 @@ type Asd = {
 /**
 * This is a comment for the Action type
 */
-type Admin = & User<string> & Asd;
+type Admin =
+    & User<string>
+    & Asd;
 
-type UserId = u64;
 type UserName<T: string> = T @match(/^[A-Z]{3,5}_[0-9]{1,3}$/) @minlen(5) @maxlen(20);
 type UserAge = u8 @min(13) @max(150);
 
@@ -42,7 +46,7 @@ type User <T: string> = {
     // by default it will use string for other targets
     // if it is generating a mongo orm it will use string
     // if it is an SQL ORM it will use u64
-    _id: UserId,
+    _id: u64,
     name: UserName<T>,
     age: UserAge ,
     utype: UserType,

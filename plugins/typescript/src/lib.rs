@@ -15,7 +15,7 @@ use xenomorph_common::{TokenData, XenoDiagSeverity, XenoDiagnostic};
 // ── Plugin registration ─────────────────────────────────────────────
 
 static NAME: &str = "typescript";
-static VERSION: &str = "0.1.0";
+static VERSION: &str = "0.1.2";
 static PLUGIN: XenoPlugin = XenoPlugin {
     name: NAME,
     version: VERSION,

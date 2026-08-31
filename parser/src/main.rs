@@ -1,6 +1,8 @@
+mod format;
 mod graph;
 mod inspector;
 
+use format::run_format;
 use graph::run_graph;
 use inspector::run_inspector;
 use xenomorph_common::config::{write_rc_schema, Config, LogLevel, RC_SCHEMA_RELATIVE_PATH};
@@ -14,6 +16,16 @@ fn main() {
         Some("schema") => generate_rc_schema(),
         Some("inspect") => run_inspector(),
         Some("graph") => run_graph(&args[1..]),
+        Some("format") => match run_format(&args[1..]) {
+            Ok(summary) => println!(
+                "✓ Formatted {} file(s); {} changed",
+                summary.files, summary.changed
+            ),
+            Err(error) => {
+                eprintln!("✗ {error}");
+                std::process::exit(1);
+            }
+        },
         _ => run_parser(),
     }
 }

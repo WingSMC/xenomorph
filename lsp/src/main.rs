@@ -1,9 +1,9 @@
-use crate::formatter::format_xenomorph;
 use std::collections::HashMap;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 use xenomorph_common::{
+    formatter::format_xenomorph_with_syntax,
     lexer::{Token, TokenVariant},
     module::{
         types::{DeclarationInfo, ModuleDiagnostic},
@@ -18,7 +18,6 @@ use xenomorph_lsp_common::types::{
     BUILTIN_ANNOTATION_COMPLETIONS, BUILTIN_TYPE_COMPLETIONS,
 };
 
-mod formatter;
 mod hover;
 mod semantic_tokens;
 
@@ -979,26 +978,32 @@ impl LanguageServer for Backend {
         let uri = params.text_document.uri;
         let module_path = self.uri_to_module_path(&uri);
 
-        let result =
-            self.registry
-                .with_module(module_path.as_deref().unwrap_or(""), |_, _, module| {
-                    let source = module.borrow_source();
-                    let formatted = format_xenomorph(source);
+        let result = self.registry.with_module(
+            module_path.as_deref().unwrap_or(""),
+            |tokens, ast, module| {
+                let source = module.borrow_source();
+                let formatted = format_xenomorph_with_syntax(
+                    source,
+                    tokens,
+                    ast,
+                    &xenomorph_common::config::Config::get().formatter,
+                );
 
-                    vec![TextEdit {
-                        range: Range {
-                            start: Position {
-                                line: 0,
-                                character: 0,
-                            },
-                            end: Position {
-                                line: source.lines().count() as u32,
-                                character: 0,
-                            },
+                vec![TextEdit {
+                    range: Range {
+                        start: Position {
+                            line: 0,
+                            character: 0,
                         },
-                        new_text: formatted,
-                    }]
-                });
+                        end: Position {
+                            line: source.lines().count() as u32,
+                            character: 0,
+                        },
+                    },
+                    new_text: formatted,
+                }]
+            },
+        );
 
         Ok(result)
     }

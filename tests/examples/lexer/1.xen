@@ -18,4 +18,6 @@ type Action<T> = {
 
 
 
-type Admin = & User & Action<User>;
+type Admin =
+    & User
+    & Action<User>;

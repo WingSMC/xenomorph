@@ -961,7 +961,7 @@ checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
 
 [[package]]
 name = "xenomorph_common"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "bigdecimal",
  "libloading",
@@ -975,14 +975,14 @@ dependencies = [
 
 [[package]]
 name = "xenomorph_java"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "xenomorph_common",
 ]
 
 [[package]]
 name = "xenomorph_json_schema"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "num-bigint 0.5.1",
  "serde_json",
@@ -991,7 +991,7 @@ dependencies = [
 
 [[package]]
 name = "xenomorph_lsp"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "tokio",
  "tower-lsp",
@@ -1001,7 +1001,7 @@ dependencies = [
 
 [[package]]
 name = "xenomorph_lsp_common"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "tower-lsp",
  "xenomorph_common",
@@ -1009,7 +1009,7 @@ dependencies = [
 
 [[package]]
 name = "xenomorph_parser"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -1018,7 +1018,7 @@ dependencies = [
 
 [[package]]
 name = "xenomorph_typescript"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "xenomorph_common",
 ]

@@ -18,6 +18,9 @@ pub struct Config {
     pub parser: ParserConfig,
 
     #[serde(default)]
+    pub formatter: FormatterConfig,
+
+    #[serde(default)]
     pub plugins: PluginsConfig,
 
     #[serde(default)]
@@ -32,6 +35,41 @@ pub struct ParserConfig {
     #[serde(default = "default_parser_path")]
     pub entry: String,
 }
+
+#[repr(Rust)]
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct FormatterConfig {
+    #[serde(default)]
+    pub indent_kind: IndentKind,
+
+    #[serde(default = "default_indent_width")]
+    pub indent_width: usize,
+
+    #[serde(default = "default_max_line_length")]
+    pub max_line_length: usize,
+
+    #[serde(default)]
+    pub line_ending: LineEnding,
+}
+
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IndentKind {
+    #[default]
+    #[serde(rename = "space", alias = "spaces")]
+    Space,
+    #[serde(rename = "tab", alias = "tabs")]
+    Tab,
+}
+
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LineEnding {
+    #[default]
+    Lf,
+    Crlf,
+    Auto,
+}
+
 /// Re-export for plugins to use without adding toml as a direct dependency.
 pub use toml::Value as ConfigValue;
 pub type PluginConfigs = HashMap<String, ConfigValue>;
@@ -88,6 +126,12 @@ impl LogLevel {
 fn default_parser_path() -> String {
     "index".to_string()
 }
+fn default_indent_width() -> usize {
+    4
+}
+fn default_max_line_length() -> usize {
+    100
+}
 fn default_plugins_path() -> String {
     "".to_string()
 }
@@ -115,6 +159,16 @@ impl Default for ParserConfig {
     fn default() -> Self {
         Self {
             entry: default_parser_path(),
+        }
+    }
+}
+impl Default for FormatterConfig {
+    fn default() -> Self {
+        Self {
+            indent_kind: IndentKind::default(),
+            indent_width: default_indent_width(),
+            max_line_length: default_max_line_length(),
+            line_ending: LineEnding::default(),
         }
     }
 }
@@ -179,8 +233,32 @@ fn init_config() -> Config {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, LogLevel};
+    use super::{Config, FormatterConfig, IndentKind, LineEnding, LogLevel};
     use crate::XenoDiagSeverity;
+
+    #[test]
+    fn formatter_uses_stable_defaults() {
+        let config: Config = toml::from_str("").expect("empty config should use defaults");
+
+        assert_eq!(config.formatter, FormatterConfig::default());
+        assert_eq!(config.formatter.indent_kind, IndentKind::Space);
+        assert_eq!(config.formatter.indent_width, 4);
+        assert_eq!(config.formatter.max_line_length, 100);
+        assert_eq!(config.formatter.line_ending, LineEnding::Lf);
+    }
+
+    #[test]
+    fn formatter_deserializes_all_options() {
+        let config: Config = toml::from_str(
+            "[formatter]\nindent_kind = \"tab\"\nindent_width = 8\nmax_line_length = 120\nline_ending = \"crlf\"\n",
+        )
+        .expect("formatter options should deserialize");
+
+        assert_eq!(config.formatter.indent_kind, IndentKind::Tab);
+        assert_eq!(config.formatter.indent_width, 8);
+        assert_eq!(config.formatter.max_line_length, 120);
+        assert_eq!(config.formatter.line_ending, LineEnding::Crlf);
+    }
 
     #[test]
     fn loglevel_defaults_to_info() {

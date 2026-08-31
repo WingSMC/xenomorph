@@ -1,7 +1,13 @@
-#:schema ./xenomorph.schema.json
+#:schema ./.xenomorph/xenomorph.schema.json
 
 [parser]
 entry = "./tests/examples/test"
+
+[formatter]
+indent_kind = "space"
+indent_width = 4
+max_line_length = 100
+line_ending = "lf"
 
 [debug]
 loglevel = "info"

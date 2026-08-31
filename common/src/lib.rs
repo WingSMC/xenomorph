@@ -1,6 +1,7 @@
 // TODO #![feature(hint_must_use)]
 
 pub mod config;
+pub mod formatter;
 pub mod lexer;
 pub mod module;
 pub mod parser;
