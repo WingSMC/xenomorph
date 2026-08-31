@@ -127,6 +127,7 @@ impl ModuleGraph {
                     .iter()
                     .chain(module.borrow_parser_errors())
                     .chain(module.borrow_analyzer_errors())
+                    .chain(module.borrow_collision_errors())
                     .chain(module.borrow_module_errors())
                 {
                     diagnostics.add(diagnostic.severity);

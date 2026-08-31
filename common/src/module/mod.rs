@@ -1,5 +1,5 @@
 use ouroboros::self_referencing;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
@@ -11,7 +11,7 @@ use crate::lexer::{Lexer, Token, XenoTokens};
 use crate::module::types::{DeclarationInfo, ErrorPhase, ModuleDiagnostic, ModulePath};
 use crate::parser::{Declaration, Parser, XenoAst};
 use crate::plugins::XenoPlugin;
-use crate::semantic::{Analyzer, TypeDeclarationInfo};
+use crate::semantic::{Analyzer, NameCollisionValidator, TypeDeclarationInfo, BUILTIN_TYPES};
 use crate::utils::calculate_hash;
 use crate::XenoDiagSeverity;
 
@@ -33,6 +33,8 @@ pub struct ModuleData {
     pub parser_errors: Vec<ModuleDiagnostic>,
     /// Semantic analyzer errors.
     pub analyzer_errors: Vec<ModuleDiagnostic>,
+    /// Cache-wide type/member/generic name collision errors.
+    pub collision_errors: Vec<ModuleDiagnostic>,
     /// Module-level errors (file not found, import resolution, etc.)
     pub module_errors: Vec<ModuleDiagnostic>,
     /// Modules that this module imports
@@ -287,7 +289,37 @@ impl XenoRegistry {
             }
         }
 
-        self._load_module_inner(module_path, abs_path, source, hash)
+        let is_root_load = import_str.is_none();
+        let initial_errors = self._load_module_inner(module_path, abs_path, source, hash);
+        if !is_root_load {
+            return initial_errors;
+        }
+
+        // Recursive loading analyzes dependencies as soon as they become
+        // available. Re-run validation after the root graph is complete so
+        // cache-wide name constraints do not depend on sibling load order.
+        self.refresh_name_collision_diagnostics();
+        let validation_errors = self.get_all_cached_errors();
+        if self.analyzer.generation_mode
+            && !Self::has_fatal_diagnostics(&initial_errors)
+            && !Self::has_fatal_diagnostics(&validation_errors)
+        {
+            self.generate_all_cached_modules();
+            self.refresh_name_collision_diagnostics();
+        }
+        let mut errors = self.get_all_cached_errors();
+        for diagnostic in initial_errors {
+            if !errors.iter().any(|existing| {
+                existing.module_path == diagnostic.module_path
+                    && existing.message == diagnostic.message
+                    && existing.location == diagnostic.location
+                    && existing.phase == diagnostic.phase
+                    && existing.severity == diagnostic.severity
+            }) {
+                errors.push(diagnostic);
+            }
+        }
+        errors
     }
 
     fn _load_module_inner(
@@ -342,7 +374,7 @@ impl XenoRegistry {
             // When an earlier phase failed, run validators without generator
             // listeners. Warnings and infos leave generation mode unchanged.
             let analysis_only;
-            let analyzer = if generation_allowed {
+            let analyzer = if generation_allowed && !self.analyzer.generation_mode {
                 &self.analyzer
             } else {
                 analysis_only = Analyzer::new(false, self.plugins);
@@ -409,6 +441,125 @@ impl XenoRegistry {
             .collect()
     }
 
+    /// Refreshes cache-wide collision diagnostics without rebuilding semantic
+    /// type hierarchies for unaffected modules.
+    pub fn refresh_name_collision_diagnostics(&self) -> Vec<ModulePath> {
+        let diagnostics = {
+            let cache = self.module_cache.read().unwrap();
+            let mut type_owners: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+            for (module_path, module) in cache.iter() {
+                for declaration in module.borrow_declarations().values() {
+                    type_owners
+                        .entry(declaration.name.clone())
+                        .or_default()
+                        .insert(module_path.clone());
+                }
+            }
+
+            let mut static_types: HashSet<String> = BUILTIN_TYPES
+                .iter()
+                .map(|semantic_type| semantic_type.name.to_string())
+                .collect();
+            for plugin in self.plugins {
+                if let Some(provide_types) = plugin.provide_types {
+                    static_types.extend(
+                        provide_types()
+                            .iter()
+                            .map(|semantic_type| semantic_type.name.to_string()),
+                    );
+                }
+            }
+
+            cache
+                .iter()
+                .map(|(module_path, module)| {
+                    let collisions =
+                        NameCollisionValidator::new(module_path, &type_owners, &static_types)
+                            .validate(module.borrow_ast());
+                    let collision_diagnostics = collisions
+                        .into_iter()
+                        .map(|diagnostic| ModuleDiagnostic {
+                            module_path: module_path.clone(),
+                            message: diagnostic.message,
+                            location: Some((
+                                diagnostic.location.l,
+                                diagnostic.location.c,
+                                diagnostic.location.v.len() as u32,
+                            )),
+                            phase: ErrorPhase::Analyzer,
+                            severity: diagnostic.severity,
+                        })
+                        .collect();
+                    (module_path.clone(), collision_diagnostics)
+                })
+                .collect::<HashMap<_, _>>()
+        };
+
+        let mut module_paths: Vec<_> = diagnostics.keys().cloned().collect();
+        module_paths.sort();
+        let mut cache = self.module_cache.write().unwrap();
+        for (module_path, collision_diagnostics) in diagnostics {
+            if let Some(module) = cache.get_mut(&module_path) {
+                module.with_collision_errors_mut(|errors| *errors = collision_diagnostics);
+            }
+        }
+        module_paths
+    }
+
+    fn generate_all_cached_modules(&self) {
+        let module_paths = {
+            let cache = self.module_cache.read().unwrap();
+            Self::dependency_order(&cache, &self.entry)
+        };
+        for module_path in module_paths {
+            self.revalidate_cached_module(&module_path);
+        }
+    }
+
+    fn dependency_order(cache: &HashMap<ModulePath, ModuleData>, entry: &str) -> Vec<ModulePath> {
+        fn visit(
+            module_path: &str,
+            cache: &HashMap<ModulePath, ModuleData>,
+            visiting: &mut HashSet<ModulePath>,
+            visited: &mut HashSet<ModulePath>,
+            result: &mut Vec<ModulePath>,
+        ) {
+            if visited.contains(module_path) || !visiting.insert(module_path.to_string()) {
+                return;
+            }
+            if let Some(module) = cache.get(module_path) {
+                for import in module.borrow_imports() {
+                    visit(import, cache, visiting, visited, result);
+                }
+            }
+            visiting.remove(module_path);
+            if visited.insert(module_path.to_string()) {
+                result.push(module_path.to_string());
+            }
+        }
+
+        let mut visiting = HashSet::new();
+        let mut visited = HashSet::new();
+        let mut result = Vec::new();
+        visit(entry, cache, &mut visiting, &mut visited, &mut result);
+        let mut remaining: Vec<_> = cache
+            .keys()
+            .filter(|module_path| !visited.contains(*module_path))
+            .cloned()
+            .collect();
+        remaining.sort();
+        for module_path in remaining {
+            visit(
+                &module_path,
+                cache,
+                &mut visiting,
+                &mut visited,
+                &mut result,
+            );
+        }
+        result
+    }
+
     fn transitive_importers(
         cache: &HashMap<ModulePath, ModuleData>,
         changed_module: &str,
@@ -464,6 +615,7 @@ impl XenoRegistry {
                         .iter()
                         .chain(imported_module.borrow_parser_errors().iter())
                         .chain(imported_module.borrow_analyzer_errors().iter())
+                        .chain(imported_module.borrow_collision_errors().iter())
                         .chain(imported_module.borrow_module_errors().iter())
                         .any(|diagnostic| diagnostic.severity == XenoDiagSeverity::Err)
                 })
@@ -643,11 +795,35 @@ impl XenoRegistry {
             all.extend(module.borrow_lexer_errors().iter().cloned());
             all.extend(module.borrow_parser_errors().iter().cloned());
             all.extend(module.borrow_analyzer_errors().iter().cloned());
+            all.extend(module.borrow_collision_errors().iter().cloned());
             all.extend(module.borrow_module_errors().iter().cloned());
             all
         } else {
             vec![]
         }
+    }
+
+    fn get_all_cached_errors(&self) -> Vec<ModuleDiagnostic> {
+        let cache = self.module_cache.read().unwrap();
+        let mut module_paths: Vec<_> = cache.keys().cloned().collect();
+        module_paths.sort();
+        module_paths
+            .into_iter()
+            .flat_map(|module_path| {
+                let module = cache
+                    .get(&module_path)
+                    .expect("cached module path should remain available");
+                module
+                    .borrow_lexer_errors()
+                    .iter()
+                    .chain(module.borrow_parser_errors())
+                    .chain(module.borrow_analyzer_errors())
+                    .chain(module.borrow_collision_errors())
+                    .chain(module.borrow_module_errors())
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     }
 
     /// Gets errors of a specific phase for a module.
@@ -661,7 +837,12 @@ impl XenoRegistry {
             match phase {
                 ErrorPhase::Lexer => module.borrow_lexer_errors().clone(),
                 ErrorPhase::Parser => module.borrow_parser_errors().clone(),
-                ErrorPhase::Analyzer => module.borrow_analyzer_errors().clone(),
+                ErrorPhase::Analyzer => module
+                    .borrow_analyzer_errors()
+                    .iter()
+                    .chain(module.borrow_collision_errors())
+                    .cloned()
+                    .collect(),
                 ErrorPhase::Module => module.borrow_module_errors().clone(),
             }
         } else {
@@ -765,6 +946,7 @@ impl XenoRegistry {
             lexer_errors: Vec::new(),
             parser_errors: Vec::new(),
             analyzer_errors: Vec::new(),
+            collision_errors: Vec::new(),
             module_errors: Vec::new(),
             imports: Vec::new(),
             tokens_builder: |source| {
@@ -854,11 +1036,17 @@ impl XenoRegistry {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, path::PathBuf};
+    use std::{
+        collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+        path::PathBuf,
+    };
 
     use super::{ErrorPhase, ModuleData, ModuleDiagnostic};
     use crate::{
-        config::PluginConfigs, module::XenoRegistry, semantic::Analyzer, utils::calculate_hash,
+        config::PluginConfigs,
+        module::XenoRegistry,
+        semantic::{Analyzer, NameCollisionValidator, BUILTIN_TYPES},
+        utils::calculate_hash,
         XenoDiagSeverity,
     };
 
@@ -949,7 +1137,7 @@ mod tests {
     fn analyze(cache: &HashMap<String, ModuleData>, module_path: &str) -> Vec<String> {
         let module = cache.get(module_path).expect("module should be cached");
         let imports = module.borrow_imports().to_vec();
-        Analyzer::new(false, &[])
+        let mut errors = Analyzer::new(false, &[])
             .run(
                 module.borrow_ast(),
                 module,
@@ -958,6 +1146,26 @@ mod tests {
                 &[],
                 &PluginConfigs::new(),
             )
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut type_owners: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for (owner, cached_module) in cache {
+            for declaration in cached_module.borrow_declarations().values() {
+                type_owners
+                    .entry(declaration.name.clone())
+                    .or_default()
+                    .insert(owner.clone());
+            }
+        }
+        let static_types: HashSet<_> = BUILTIN_TYPES
+            .iter()
+            .map(|semantic_type| semantic_type.name.to_string())
+            .collect();
+        errors.extend(
+            NameCollisionValidator::new(module_path, &type_owners, &static_types)
+                .validate(module.borrow_ast()),
+        );
+        errors
             .into_iter()
             .filter(|diagnostic| diagnostic.severity == XenoDiagSeverity::Err)
             .map(|diagnostic| diagnostic.message)
@@ -971,6 +1179,208 @@ mod tests {
         cache.insert("test".to_string(), parsed_module("test", source));
 
         assert!(analyze(&cache, "test").is_empty());
+    }
+
+    #[test]
+    fn semantic_pass_rejects_duplicate_type_names_in_one_module() {
+        let source = "type Duplicate = string; type Duplicate = u8;";
+        let mut cache = HashMap::new();
+        cache.insert("test".to_string(), parsed_module("test", source));
+
+        let errors = analyze(&cache, "test");
+        assert_eq!(
+            errors,
+            vec!["Duplicate type name 'Duplicate' in this module"]
+        );
+    }
+
+    #[test]
+    fn semantic_pass_rejects_duplicate_type_names_across_cached_modules() {
+        let mut cache = HashMap::new();
+        cache.insert(
+            "first".to_string(),
+            parsed_module("first", "type Shared = string;"),
+        );
+        cache.insert(
+            "second".to_string(),
+            parsed_module("second", "type Shared = u8;"),
+        );
+
+        let errors = analyze(&cache, "second");
+        assert_eq!(
+            errors,
+            vec!["Duplicate type name 'Shared' (also declared in module 'first')"]
+        );
+    }
+
+    #[test]
+    fn semantic_pass_rejects_duplicate_struct_fields_and_enum_variants() {
+        let source =
+            "type User = { id: string, id: u8 }; type State = enum { ready: string, ready: u8 };";
+        let mut cache = HashMap::new();
+        cache.insert("test".to_string(), parsed_module("test", source));
+
+        let errors = analyze(&cache, "test");
+        assert_eq!(
+            errors,
+            vec![
+                "Duplicate struct field 'id'",
+                "Duplicate enum variant 'ready'",
+            ]
+        );
+    }
+
+    #[test]
+    fn semantic_pass_allows_member_names_in_separate_declarations() {
+        let source = "type First = { id: string }; type Second = { id: u8 }; type Left = enum { ready: string }; type Right = enum { ready: u8 };";
+        let mut cache = HashMap::new();
+        cache.insert("test".to_string(), parsed_module("test", source));
+
+        assert!(analyze(&cache, "test").is_empty());
+    }
+
+    #[test]
+    fn semantic_pass_rejects_duplicate_and_shadowing_generic_parameters() {
+        let source = "type Existing = string; type Pair<T, T> = T; type UserGeneric<Existing> = Existing; type BuiltinGeneric<string> = string;";
+        let mut cache = HashMap::new();
+        cache.insert("test".to_string(), parsed_module("test", source));
+
+        let errors = analyze(&cache, "test");
+        assert_eq!(
+            errors,
+            vec![
+                "Duplicate generic parameter 'T'",
+                "Generic parameter 'Existing' shadows an existing type",
+                "Generic parameter 'string' shadows an existing type",
+            ]
+        );
+    }
+
+    #[test]
+    fn semantic_pass_rejects_generics_that_shadow_types_from_other_cached_modules() {
+        let mut cache = HashMap::new();
+        cache.insert(
+            "shared".to_string(),
+            parsed_module("shared", "type Existing = string;"),
+        );
+        cache.insert(
+            "test".to_string(),
+            parsed_module("test", "type UserGeneric<Existing> = Existing;"),
+        );
+
+        let errors = analyze(&cache, "test");
+        assert_eq!(
+            errors,
+            vec!["Generic parameter 'Existing' shadows an existing type"]
+        );
+    }
+
+    #[test]
+    fn semantic_pass_allows_generic_names_to_repeat_in_separate_declarations() {
+        let source = "type First<T> = T; type Second<T> = T;";
+        let mut cache = HashMap::new();
+        cache.insert("test".to_string(), parsed_module("test", source));
+
+        assert!(analyze(&cache, "test").is_empty());
+    }
+
+    #[test]
+    fn full_cache_revalidation_finds_types_added_after_generic_declarations() {
+        static EMPTY_PLUGINS: Vec<&'static crate::plugins::XenoPlugin<'static>> = Vec::new();
+
+        let mut cache = HashMap::new();
+        cache.insert(
+            "early".to_string(),
+            parsed_module("early", "type Wrapper<Late> = Late;"),
+        );
+        cache.insert(
+            "late".to_string(),
+            parsed_module("late", "type Late = string;"),
+        );
+        let registry = XenoRegistry {
+            module_cache: std::sync::RwLock::new(cache),
+            root: PathBuf::new(),
+            entry: "early".to_string(),
+            plugins: &EMPTY_PLUGINS,
+            analyzer: Analyzer::new(false, &EMPTY_PLUGINS),
+        };
+
+        registry.refresh_name_collision_diagnostics();
+
+        let errors = registry.get_all_errors_for("early");
+        assert!(errors.iter().any(|diagnostic| {
+            diagnostic.message == "Generic parameter 'Late' shadows an existing type"
+        }));
+    }
+
+    #[test]
+    fn collision_refresh_reports_duplicate_types_on_both_declarations() {
+        static EMPTY_PLUGINS: Vec<&'static crate::plugins::XenoPlugin<'static>> = Vec::new();
+
+        let mut cache = HashMap::new();
+        cache.insert(
+            "first".to_string(),
+            parsed_module("first", "type Shared = string;"),
+        );
+        cache.insert(
+            "second".to_string(),
+            parsed_module("second", "type Shared = u8;"),
+        );
+        let registry = XenoRegistry {
+            module_cache: std::sync::RwLock::new(cache),
+            root: PathBuf::new(),
+            entry: "first".to_string(),
+            plugins: &EMPTY_PLUGINS,
+            analyzer: Analyzer::new(false, &EMPTY_PLUGINS),
+        };
+
+        registry.refresh_name_collision_diagnostics();
+
+        for module_path in ["first", "second"] {
+            let errors = registry.get_all_errors_for(module_path);
+            assert!(errors.iter().any(|diagnostic| {
+                diagnostic
+                    .message
+                    .starts_with("Duplicate type name 'Shared'")
+            }));
+        }
+    }
+
+    #[test]
+    fn dependency_order_places_imports_before_importers() {
+        let mut cache = HashMap::new();
+        cache.insert(
+            "leaf".to_string(),
+            parsed_module("leaf", "type Leaf = string;"),
+        );
+        cache.insert(
+            "middle".to_string(),
+            parsed_module("middle", "import leaf; type Middle = Leaf;"),
+        );
+        cache.insert(
+            "entry".to_string(),
+            parsed_module("entry", "import middle; type Entry = Middle;"),
+        );
+
+        assert_eq!(
+            XenoRegistry::dependency_order(&cache, "entry"),
+            vec!["leaf", "middle", "entry"]
+        );
+    }
+
+    #[test]
+    fn semantic_pass_rejects_type_names_that_shadow_static_types() {
+        let mut cache = HashMap::new();
+        cache.insert(
+            "test".to_string(),
+            parsed_module("test", "type string = u8;"),
+        );
+
+        let errors = analyze(&cache, "test");
+        assert_eq!(
+            errors,
+            vec!["Type name 'string' conflicts with a built-in or plugin type"]
+        );
     }
 
     #[test]
@@ -1049,10 +1459,7 @@ mod tests {
         let mut cache = HashMap::new();
         cache.insert(
             "containers".to_string(),
-            parsed_module(
-                "containers",
-                "type Box<T: NumberLiteral> = T; type Local = string;",
-            ),
+            parsed_module("containers", "type Box<T: NumberLiteral> = T;"),
         );
         cache.insert(
             "test".to_string(),

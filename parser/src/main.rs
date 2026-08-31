@@ -149,6 +149,7 @@ fn run_parser() {
         let diagnostics: Vec<_> = module
             .borrow_analyzer_errors()
             .iter()
+            .chain(module.borrow_collision_errors())
             .chain(module.borrow_parser_errors())
             .chain(module.borrow_lexer_errors())
             .chain(module.borrow_module_errors())

@@ -1,7 +1,5 @@
 - [ ] This is just a concern: Make sure not to recompute the global types/traits hierarchy to keep the code performant, and keep a per-module local hierarchy that joins the global one. And importing modules can rely on other modules' local hierarchy. Also place declaration local hierarchies below this one (generics). This also makes validation easier. Although I think there is a notification feature missing from the LSP that tells importing modules that the current module changed and they need to recompute their own type constraints (and other validation). (if you implement this make sure not to run into recursive imports, modules can be exported by modules which are imported by a module)
 
-- unique types (within the reachable module graph, if there are multiple disjoint entries in the codebase e.g. for backend and frontent and some microservice (via multiple xenomorph files e.g. thorugh a xeno schema repo being used in multiple git projects and the xenomoprh toml sits outside the git submodule and the using repos have differing configs) then allow the completely disjoint/unrelated modules (they might import same modules directly or transitively) to have same types) & struct fields (& enum variants)
-
 - constrain dict keys to a KeyTrait which needs to be implemented by string, number, and TS should provide Symbol which should also implement it.
 
 - Make sure sets actually mean a list of unique constants or types in the language so the same string literal twice in a set should error. Although it should be possible to make a set type via `set<T>` (no [...] here) without the prefill content, but `set (<T>)? [...SimpleTypeExpr]` should just yield a list/array of unique items where each item should be bound by the T constraint if `<T>` is defined, e.g. `set<string>["a", "b"]` -> fine `set<string>["a", "a", 123]` -> fails because duplicate "a" and 123 fails string/string literal constraint.
@@ -10,7 +8,11 @@
 
 - Add gh actions on main tagging (manually enter version and replace all package.json & Cargo.toml versions with that, generate/build exe/dll/so/dylib/other executables and vsce package, publish the vscode extension to marketplace and individual binaries to npm with the given version) e.g. @xenomorph/cli @xenomorph/lsp @xenomorph/typescript @xenomorph/json-schema @xenomorph/java-dto
 
-- Formatter '|' & '&'
-- Restart LSP vscode command
 - Lombok "types" to annotations
     - [ ] Add a bool field to "hide" some types from being recommended (e.g. lombok decorator typenames), only show them if there is some constraint (not Any type) it matches, e.g. the LombokDecorator trait.
+    - [ ] Only warn if there is a missing type IN a missing annotation's arguments.
+    - [ ] Rework lombok "type" identifiers to annotations.
+
+- Prevent &ing very disjoint types (e.g. u8 and string)
+
+- use clap for arg parsing

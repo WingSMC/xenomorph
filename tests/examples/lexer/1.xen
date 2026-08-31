@@ -1,23 +1,13 @@
-type Color = [
+type Colors = [
     "red",
     "green",
     "blue",
 ];
 
-type User = {
-    name: string,
-    age: number,
-    favoriteColor: Color,
-} @Lombok(Getter, Setter);
-
-type ActionEntry = [?date, Action<User>];
-type ActionActions = ActionEntry[] @minlen(1) @maxlen(10);
-type Action<T> = {
-    actions: ?T,
+type Color = { r: u8, g: u8, b: u8 };
+type BrightChannel = u8 @min(125) @max(255);
+type BrightColor = {
+    r: BrightChannel,
+    g: BrightChannel,
+    b: BrightChannel,
 };
-
-
-
-type Admin =
-    & User
-    & Action<User>;
