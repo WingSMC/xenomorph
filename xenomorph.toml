@@ -3,7 +3,7 @@
 extends = "./tda-schemas/xenomorph.toml"
 
 [parser]
-entry = "xeno/index"
+entry = "tda-schemas/ui"
 
 [plugins]
 path = "./target/release/"
