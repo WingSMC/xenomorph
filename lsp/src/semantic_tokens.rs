@@ -23,7 +23,7 @@ enum TokenKind {
     Number,
     Regexp,
     Operator,
-    Decorator,
+    Function,
 }
 
 const DECLARATION: u32 = 1 << 0;
@@ -85,7 +85,7 @@ pub fn legend() -> SemanticTokensLegend {
             SemanticTokenType::NUMBER,
             SemanticTokenType::REGEXP,
             SemanticTokenType::OPERATOR,
-            SemanticTokenType::DECORATOR,
+            SemanticTokenType::FUNCTION,
         ],
         token_modifiers: vec![
             SemanticTokenModifier::DECLARATION,
@@ -290,7 +290,7 @@ fn visit_annotation(
 ) {
     roles.insert(
         TokenPosition::from(annotation.ident),
-        TokenStyle::new(TokenKind::Decorator),
+        TokenStyle::new(TokenKind::Function),
     );
     for parameter in &annotation.params {
         visit_expr(roles, parameter, type_parameters);
@@ -431,7 +431,7 @@ type Cast = 1 as u64;
         assert!(contains("T", TokenKind::TypeParameter, 0));
         assert!(contains("value", TokenKind::Property, DECLARATION));
         assert!(contains("yes", TokenKind::EnumMember, DECLARATION));
-        assert!(contains("minlen", TokenKind::Decorator, 0));
+        assert!(contains("minlen", TokenKind::Function, 0));
         assert!(contains("/a+/", TokenKind::Regexp, 0));
         assert!(contains("2", TokenKind::Number, 0));
         assert!(contains("as", TokenKind::Keyword, 0));
@@ -480,7 +480,7 @@ type Cast = 1 as u64;
 
         let decorator_start = source.find("check").unwrap();
         let decorator_start_utf16 = source[..decorator_start].encode_utf16().count() as u32;
-        assert!(absolute.contains(&(0, decorator_start_utf16, 5, TokenKind::Decorator as u32,)));
+        assert!(absolute.contains(&(0, decorator_start_utf16, 5, TokenKind::Function as u32,)));
     }
 
     #[test]
