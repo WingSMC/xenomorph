@@ -9,6 +9,7 @@ pub enum TokenVariant {
     Validator,
     Set,
     Enum,
+    As,
     True,
     False,
 
@@ -23,20 +24,18 @@ pub enum TokenVariant {
     Colon,
     Semicolon,
 
-    Plus,
+    // Plus,
     Minus,
-    Backslash,
-    Slash,
-    Dollar,
-    Asterix,
-    Caret,
+    // Backslash,
+    // Slash,
+    // Dollar,
+    // Asterix,
+    // Caret,
+    Question,
 
     At,
     Eq,
     Neq,
-    SymmDiff,
-    Range,
-
     Gt,
     Lt,
 
@@ -48,56 +47,11 @@ pub enum TokenVariant {
     RBracket,
 
     Documentation,
+    Path,
 }
 
 pub type Token<'src> = (TokenVariant, TokenData<'src>);
 pub type XenoTokens<'src> = Vec<Token<'src>>;
-
-impl fmt::Display for TokenVariant {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            TokenVariant::Identifier => write!(f, "Identifier"),
-            TokenVariant::Type => write!(f, "Type"),
-            TokenVariant::Import => write!(f, "Import"),
-            TokenVariant::Validator => write!(f, "Validator"),
-            TokenVariant::Set => write!(f, "Set"),
-            TokenVariant::Enum => write!(f, "Enum"),
-            TokenVariant::True => write!(f, "True"),
-            TokenVariant::False => write!(f, "False"),
-            TokenVariant::Number => write!(f, "Number"),
-            TokenVariant::String => write!(f, "String"),
-            TokenVariant::Regex => write!(f, "Regex"),
-            TokenVariant::Not => write!(f, "Not"),
-            TokenVariant::Or => write!(f, "Or"),
-            TokenVariant::And => write!(f, "And"),
-            TokenVariant::Dot => write!(f, "Dot"),
-            TokenVariant::Comma => write!(f, "Comma"),
-            TokenVariant::Colon => write!(f, "Colon"),
-            TokenVariant::Semicolon => write!(f, "Semicolon"),
-            TokenVariant::Plus => write!(f, "Plus"),
-            TokenVariant::Minus => write!(f, "Minus"),
-            TokenVariant::Asterix => write!(f, "Asterix"),
-            TokenVariant::Backslash => write!(f, "Backslash"),
-            TokenVariant::Slash => write!(f, "Slash"),
-            TokenVariant::Dollar => write!(f, "Dollar"),
-            TokenVariant::At => write!(f, "At"),
-            TokenVariant::Eq => write!(f, "Eq"),
-            TokenVariant::Neq => write!(f, "Neq"),
-            TokenVariant::Caret => write!(f, "Caret"),
-            TokenVariant::SymmDiff => write!(f, "SymmDiff"),
-            TokenVariant::Gt => write!(f, "Gt"),
-            TokenVariant::Lt => write!(f, "Lt"),
-            TokenVariant::LParen => write!(f, "LParen"),
-            TokenVariant::RParen => write!(f, "RParen"),
-            TokenVariant::LCurly => write!(f, "LCurly"),
-            TokenVariant::RCurly => write!(f, "RCurly"),
-            TokenVariant::LBracket => write!(f, "LBracket"),
-            TokenVariant::RBracket => write!(f, "RBracket"),
-            TokenVariant::Range => write!(f, "Range"),
-            TokenVariant::Documentation => write!(f, "Documentation"),
-        }
-    }
-}
 
 impl<'src> fmt::Display for TokenData<'src> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

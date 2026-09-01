@@ -1,5 +1,7 @@
 use std::{fmt, path::PathBuf};
 
+use crate::semantic::TypeDeclarationInfo;
+
 /// Error severity level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorPhase {
@@ -11,14 +13,15 @@ pub enum ErrorPhase {
 
 /// Errors that can occur during module loading.
 #[derive(Debug, Clone)]
-pub struct ModuleError {
+pub struct ModuleDiagnostic {
     pub module_path: ModulePath,
     pub message: String,
     pub location: Option<(u32, u32, u32)>, // line, column, length
     pub phase: ErrorPhase,
+    pub severity: crate::XenoDiagSeverity,
 }
 
-impl fmt::Display for ModuleError {
+impl fmt::Display for ModuleDiagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "[{}] {}", self.module_path, self.message)
     }
@@ -46,6 +49,6 @@ pub struct DeclarationInfo {
     pub column: u32,
     /// Length of the declaration name.
     pub name_len: u32,
-    /// For struct declarations, the fields of the struct.
-    pub fields: Option<Vec<(String, String)>>,
+    /// Semantic metadata collected before validation starts.
+    pub semantic: TypeDeclarationInfo,
 }

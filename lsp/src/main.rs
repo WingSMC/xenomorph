@@ -1,49 +1,388 @@
-use crate::formatter::format_xenomorph;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use tower_lsp::jsonrpc::Result;
+use tower_lsp::lsp_types::notification::Notification;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 use xenomorph_common::{
+    config::WorkspaceConfigWatcher,
+    formatter::format_xenomorph_with_syntax,
     lexer::{Token, TokenVariant},
     module::{
-        types::{DeclarationInfo, ErrorPhase},
+        types::{DeclarationInfo, ModuleDiagnostic},
         XenoRegistry,
     },
-    parser::Declaration,
+    parser::{
+        Annotation, Declaration, Expr, Literal, SimpleType, Type, XenoType as ParsedXenoType,
+    },
+    semantic::{XenoAnnotation, XenoConstraint, XenoParent, XenoTrait, XenoTraitKind, XenoType},
     TokenData,
 };
 use xenomorph_lsp_common::types::{
-    create_completion_item, BUILTIN_ANNOTATION_COMPLETIONS, BUILTIN_TYPE_COMPLETIONS,
+    create_annotation_completion_item, create_completion_item, create_type_completion_item,
+    BUILTIN_ANNOTATION_COMPLETIONS, BUILTIN_TYPE_COMPLETIONS,
 };
 
-mod formatter;
+mod hover;
+mod semantic_tokens;
+
+struct HoverTarget {
+    name: String,
+    type_arguments: Vec<String>,
+    range: Range,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SourceTokenSpan {
+    line: u32,
+    scalar_column: u32,
+    utf16_length: u32,
+}
+
+impl SourceTokenSpan {
+    fn from_token(token: &TokenData<'_>) -> Self {
+        Self {
+            line: token.l,
+            scalar_column: token.c,
+            utf16_length: token.v.encode_utf16().count() as u32,
+        }
+    }
+
+    fn to_editor_range(self, source: &str) -> Range {
+        let start = source_position_to_editor(source, self.line, self.scalar_column);
+        Range {
+            start,
+            end: Position::new(start.line, start.character + self.utf16_length),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct GenericParameterTarget {
+    name: String,
+    declaration: SourceTokenSpan,
+    occurrences: Vec<SourceTokenSpan>,
+}
+
+fn source_position_to_editor(source: &str, line: u32, scalar_column: u32) -> Position {
+    let character = source
+        .split('\n')
+        .nth(line as usize)
+        .map(|source_line| {
+            source_line
+                .chars()
+                .take(scalar_column as usize)
+                .map(char::len_utf16)
+                .sum::<usize>() as u32
+        })
+        .unwrap_or(scalar_column);
+    Position::new(line, character)
+}
+
+fn token_to_editor_range(source: &str, token: &TokenData<'_>) -> Range {
+    let start = source_position_to_editor(source, token.l, token.c);
+    let mut segments = token.v.split('\n');
+    let first = segments.next().unwrap_or_default();
+    let remaining: Vec<_> = segments.collect();
+    let end = if let Some(last) = remaining.last() {
+        Position::new(
+            token.l + remaining.len() as u32,
+            last.strip_suffix('\r')
+                .unwrap_or(last)
+                .encode_utf16()
+                .count() as u32,
+        )
+    } else {
+        Position::new(
+            start.line,
+            start.character + first.encode_utf16().count() as u32,
+        )
+    };
+    Range { start, end }
+}
+
+fn same_token(left: &TokenData<'_>, right: &TokenData<'_>) -> bool {
+    left.l == right.l && left.c == right.c && left.v == right.v
+}
+
+fn generic_parameter_target_at(
+    ast: &[Declaration<'_>],
+    selected: &TokenData<'_>,
+) -> Option<GenericParameterTarget> {
+    for declaration in ast {
+        let Declaration::Type { generics, ty, .. } = declaration else {
+            continue;
+        };
+        for (parameter, _) in generics.as_deref().unwrap_or_default() {
+            let mut references = Vec::new();
+            collect_generic_references(ty, parameter.v, &mut references);
+            if !same_token(parameter, selected)
+                && !references
+                    .iter()
+                    .any(|reference| same_token(reference, selected))
+            {
+                continue;
+            }
+
+            let declaration = SourceTokenSpan::from_token(parameter);
+            let mut occurrences = Vec::with_capacity(references.len() + 1);
+            occurrences.push(declaration);
+            occurrences.extend(references.into_iter().map(SourceTokenSpan::from_token));
+            return Some(GenericParameterTarget {
+                name: parameter.v.to_string(),
+                declaration,
+                occurrences,
+            });
+        }
+    }
+    None
+}
+
+fn collect_generic_references<'src>(
+    (ty, annotations): &ParsedXenoType<'src>,
+    name: &str,
+    references: &mut Vec<&'src TokenData<'src>>,
+) {
+    collect_generic_references_from_type(ty, name, references);
+    for annotation in annotations {
+        collect_generic_references_from_annotation(annotation, name, references);
+    }
+}
+
+fn collect_generic_references_from_type<'src>(
+    ty: &Type<'src>,
+    name: &str,
+    references: &mut Vec<&'src TokenData<'src>>,
+) {
+    match ty {
+        Type::Simple(ty) => collect_generic_references_from_simple_type(ty, name, references),
+        Type::Tuple(types) | Type::Set(types) | Type::Sum(types) | Type::Intersection(types) => {
+            for ty in types {
+                collect_generic_references_from_simple_type(ty, name, references);
+            }
+        }
+        Type::Struct(fields) | Type::Enum(fields) => {
+            for (_, ty, _) in fields {
+                collect_generic_references_from_simple_type(ty, name, references);
+            }
+        }
+    }
+}
+
+fn collect_generic_references_from_simple_type<'src>(
+    ty: &SimpleType<'src>,
+    name: &str,
+    references: &mut Vec<&'src TokenData<'src>>,
+) {
+    match ty {
+        SimpleType::Literal(literal) | SimpleType::OptionalLiteral(literal) => {
+            collect_generic_references_from_literal(literal, name, references);
+        }
+        SimpleType::Identifier(token, arguments)
+        | SimpleType::OptionalIdentifier(token, arguments)
+        | SimpleType::Array(token, arguments)
+        | SimpleType::OptionalArray(token, arguments) => {
+            if token.v == name {
+                references.push(token);
+            }
+            for argument in arguments.as_deref().unwrap_or_default() {
+                collect_generic_references_from_simple_type(argument, name, references);
+            }
+        }
+    }
+}
+
+fn collect_generic_references_from_literal<'src>(
+    literal: &Literal<'src>,
+    name: &str,
+    references: &mut Vec<&'src TokenData<'src>>,
+) {
+    if let Some(target) = literal.cast_target().filter(|target| target.v == name) {
+        references.push(target);
+    }
+}
+
+fn collect_generic_references_from_annotation<'src>(
+    annotation: &Annotation<'src>,
+    name: &str,
+    references: &mut Vec<&'src TokenData<'src>>,
+) {
+    for parameter in &annotation.params {
+        match parameter {
+            Expr::Regex(_) => {}
+            Expr::Annotation(annotation) => {
+                collect_generic_references_from_annotation(annotation, name, references)
+            }
+            Expr::Type(ty) => collect_generic_references_from_type(ty, name, references),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CompletionFrame<'src> {
+    Annotation {
+        name: &'src str,
+        parameter_index: usize,
+    },
+    Parenthesis,
+    Bracket,
+    Curly,
+    Angle,
+}
+
+fn token_starts_before(source: &str, token: &Token<'_>, position: Position) -> bool {
+    token_to_editor_range(source, &token.1).start < position
+}
+
+fn annotation_argument_context<'src>(
+    tokens: &'src [Token<'src>],
+    source: &str,
+    position: Position,
+) -> Option<(&'src str, usize)> {
+    let mut frames = Vec::new();
+    for (index, token) in tokens.iter().enumerate() {
+        if !token_starts_before(source, token, position) {
+            break;
+        }
+
+        match token.0 {
+            TokenVariant::LParen => {
+                let annotation_name = index
+                    .checked_sub(1)
+                    .and_then(|index| tokens.get(index))
+                    .filter(|token| token.0 == TokenVariant::Identifier)
+                    .and_then(|name| {
+                        index
+                            .checked_sub(2)
+                            .and_then(|index| tokens.get(index))
+                            .filter(|token| token.0 == TokenVariant::At)
+                            .map(|_| name.1.v)
+                    });
+                frames.push(match annotation_name {
+                    Some(name) => CompletionFrame::Annotation {
+                        name,
+                        parameter_index: 0,
+                    },
+                    None => CompletionFrame::Parenthesis,
+                });
+            }
+            TokenVariant::LBracket => frames.push(CompletionFrame::Bracket),
+            TokenVariant::LCurly => frames.push(CompletionFrame::Curly),
+            TokenVariant::Lt => frames.push(CompletionFrame::Angle),
+            TokenVariant::RParen => pop_frame(&mut frames, |frame| {
+                matches!(
+                    frame,
+                    CompletionFrame::Annotation { .. } | CompletionFrame::Parenthesis
+                )
+            }),
+            TokenVariant::RBracket => pop_frame(&mut frames, |frame| {
+                matches!(frame, CompletionFrame::Bracket)
+            }),
+            TokenVariant::RCurly => {
+                pop_frame(&mut frames, |frame| matches!(frame, CompletionFrame::Curly))
+            }
+            TokenVariant::Gt => {
+                pop_frame(&mut frames, |frame| matches!(frame, CompletionFrame::Angle))
+            }
+            TokenVariant::Comma => {
+                if let Some(CompletionFrame::Annotation {
+                    parameter_index, ..
+                }) = frames.last_mut()
+                {
+                    *parameter_index += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    frames.iter().rev().find_map(|frame| match frame {
+        CompletionFrame::Annotation {
+            name,
+            parameter_index,
+        } => Some((*name, *parameter_index)),
+        _ => None,
+    })
+}
+
+fn generic_constraint_context(tokens: &[Token<'_>], source: &str, position: Position) -> bool {
+    let mut angle_depth = 0usize;
+    let mut constraint_at_depth = None;
+    for token in tokens {
+        if !token_starts_before(source, token, position) {
+            break;
+        }
+        match token.0 {
+            TokenVariant::Lt => angle_depth += 1,
+            TokenVariant::Gt => {
+                if constraint_at_depth == Some(angle_depth) {
+                    constraint_at_depth = None;
+                }
+                angle_depth = angle_depth.saturating_sub(1);
+            }
+            TokenVariant::Colon if angle_depth > 0 => constraint_at_depth = Some(angle_depth),
+            TokenVariant::Comma if constraint_at_depth == Some(angle_depth) => {
+                constraint_at_depth = None
+            }
+            _ => {}
+        }
+    }
+    constraint_at_depth == Some(angle_depth) && angle_depth > 0
+}
+
+fn pop_frame(frames: &mut Vec<CompletionFrame<'_>>, matches: impl Fn(CompletionFrame<'_>) -> bool) {
+    if let Some(index) = frames.iter().rposition(|frame| matches(*frame)) {
+        frames.truncate(index);
+    }
+}
+
+fn deduplicate_completions(mut items: Vec<CompletionItem>) -> Vec<CompletionItem> {
+    let mut seen = std::collections::HashSet::new();
+    items.retain(|item| seen.insert(item.label.clone()));
+    items
+}
 
 struct Backend {
     client: Client,
-    registry: XenoRegistry,
+    registry: Arc<XenoRegistry>,
+    config_watcher: Mutex<Option<WorkspaceConfigWatcher>>,
 }
 
-trait EditorPosition {
-    fn to_editor_position(&self) -> Position;
-    fn to_editor_range(&self) -> Range;
+enum RestartRequested {}
+
+impl Notification for RestartRequested {
+    type Params = ();
+    const METHOD: &'static str = "xenomorph/restartRequested";
 }
-impl<'src> EditorPosition for TokenData<'src> {
-    fn to_editor_position(&self) -> Position {
-        Position {
-            line: self.l,
-            character: self.c,
-        }
-    }
-    fn to_editor_range(&self) -> Range {
-        let start = self.to_editor_position();
-        Range {
-            start,
-            end: Position {
-                line: start.line,
-                character: start.character + self.v.len() as u32,
-            },
-        }
-    }
+
+fn diagnostics_for_module(errors: &[ModuleDiagnostic], module_path: &str) -> Vec<Diagnostic> {
+    errors
+        .iter()
+        .filter(|error| error.module_path == module_path)
+        .filter_map(|error| {
+            let (line, col, len) = error.location?;
+            Some(Diagnostic {
+                range: Range {
+                    start: Position {
+                        line,
+                        character: col,
+                    },
+                    end: Position {
+                        line,
+                        character: col + len,
+                    },
+                },
+                severity: Some(match error.severity {
+                    xenomorph_common::XenoDiagSeverity::Err => DiagnosticSeverity::ERROR,
+                    xenomorph_common::XenoDiagSeverity::Warn => DiagnosticSeverity::WARNING,
+                    xenomorph_common::XenoDiagSeverity::Info => DiagnosticSeverity::INFORMATION,
+                }),
+                message: error.message.clone(),
+                source: Some("xenomorph".to_string()),
+                ..Default::default()
+            })
+        })
+        .collect()
 }
 
 impl Backend {
@@ -63,7 +402,7 @@ impl Backend {
             .iter()
             .filter_map(|p| p.provide_types.map(|f| f()))
             .flatten()
-            .map(|pc| create_completion_item(pc.label, pc.detail, CompletionItemKind::CLASS))
+            .map(|semantic_type| create_type_completion_item(semantic_type))
             .chain(BUILTIN_TYPE_COMPLETIONS.iter().cloned())
     }
 
@@ -73,8 +412,190 @@ impl Backend {
             .iter()
             .filter_map(|p| p.provide_annotations.map(|f| f()))
             .flatten()
-            .map(|pc| create_completion_item(pc.label, pc.detail, CompletionItemKind::FUNCTION))
+            .map(|annotation| create_annotation_completion_item(annotation))
             .chain(BUILTIN_ANNOTATION_COMPLETIONS.iter().cloned())
+    }
+
+    fn find_annotation(&self, name: &str) -> Option<&'static XenoAnnotation> {
+        self.registry
+            .plugins
+            .iter()
+            .filter_map(|plugin| plugin.provide_annotations.map(|provide| provide()))
+            .flatten()
+            .copied()
+            .chain(
+                xenomorph_common::semantic::BUILTIN_ANNOTATIONS
+                    .iter()
+                    .copied(),
+            )
+            .find(|annotation| annotation.name == name)
+    }
+
+    fn semantic_types(&self) -> impl Iterator<Item = &'static XenoType> + '_ {
+        self.registry
+            .plugins
+            .iter()
+            .filter_map(|plugin| plugin.provide_types.map(|provide| provide()))
+            .flatten()
+            .copied()
+            .chain(xenomorph_common::semantic::BUILTIN_TYPES.iter().copied())
+    }
+
+    fn semantic_traits(&self) -> Vec<&'static XenoTrait> {
+        fn collect_trait(
+            xeno_trait: &'static XenoTrait,
+            traits: &mut Vec<&'static XenoTrait>,
+            seen: &mut std::collections::HashSet<&'static str>,
+        ) {
+            if !seen.insert(xeno_trait.name) {
+                return;
+            }
+            traits.push(xeno_trait);
+            for parent in xeno_trait.parents.unwrap_or(&[]) {
+                collect_trait(parent, traits, seen);
+            }
+        }
+
+        let mut traits = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for xeno_trait in xenomorph_common::semantic::BUILTIN_TRAITS {
+            collect_trait(xeno_trait, &mut traits, &mut seen);
+        }
+        for semantic_type in self.semantic_types() {
+            for parent in semantic_type.parents.unwrap_or(&[]) {
+                if let XenoParent::Trait(xeno_trait) = parent {
+                    collect_trait(xeno_trait, &mut traits, &mut seen);
+                }
+            }
+            for parameter in semantic_type.generic_params.unwrap_or(&[]) {
+                if let Some(XenoConstraint::Trait(xeno_trait)) = parameter.constraint {
+                    collect_trait(xeno_trait, &mut traits, &mut seen);
+                }
+            }
+        }
+        for annotation in self
+            .registry
+            .plugins
+            .iter()
+            .filter_map(|plugin| plugin.provide_annotations.map(|provide| provide()))
+            .flatten()
+            .copied()
+            .chain(
+                xenomorph_common::semantic::BUILTIN_ANNOTATIONS
+                    .iter()
+                    .copied(),
+            )
+        {
+            for parameter in annotation.params {
+                if let XenoConstraint::Trait(required) = parameter.constraint {
+                    collect_trait(required, &mut traits, &mut seen);
+                }
+            }
+        }
+        traits
+    }
+
+    fn literal_completions(&self, required: &XenoTrait) -> Vec<CompletionItem> {
+        let accepts = |name: &str| {
+            required.kind == XenoTraitKind::Literal
+                || self
+                    .semantic_types()
+                    .find(|candidate| candidate.name == name)
+                    .is_some_and(|candidate| candidate.implements(required))
+        };
+        let mut items = Vec::new();
+        if accepts("integer") || accepts("number") {
+            items.push(create_completion_item(
+                "0",
+                Some("Integer literal"),
+                CompletionItemKind::VALUE,
+            ));
+        }
+        if accepts("number") {
+            items.push(create_completion_item(
+                "0.0",
+                Some("Number literal"),
+                CompletionItemKind::VALUE,
+            ));
+        }
+        if accepts("string") {
+            let mut item = create_completion_item(
+                "string literal",
+                Some("String literal"),
+                CompletionItemKind::VALUE,
+            );
+            item.insert_text = Some("\"${1:value}\"".to_string());
+            item.insert_text_format = Some(InsertTextFormat::SNIPPET);
+            items.push(item);
+        }
+        if accepts("bool") {
+            items.push(create_completion_item(
+                "true",
+                Some("Boolean literal"),
+                CompletionItemKind::VALUE,
+            ));
+            items.push(create_completion_item(
+                "false",
+                Some("Boolean literal"),
+                CompletionItemKind::VALUE,
+            ));
+        }
+        items
+    }
+
+    fn regex_literal_completion() -> CompletionItem {
+        let mut item = create_completion_item(
+            "regex literal",
+            Some("Regular-expression literal"),
+            CompletionItemKind::VALUE,
+        );
+        item.insert_text = Some("/${1:pattern}/".to_string());
+        item.insert_text_format = Some(InsertTextFormat::SNIPPET);
+        item
+    }
+
+    fn completions_for_constraint(
+        &self,
+        required: XenoConstraint,
+        module_path: Option<&str>,
+    ) -> Vec<CompletionItem> {
+        let all_types = || {
+            let mut types: Vec<_> = self.get_builtin_types().collect();
+            if let Some(module_path) = module_path {
+                types.extend(self.get_module_completions(module_path));
+            }
+            deduplicate_completions(types)
+        };
+
+        let XenoConstraint::Trait(required) = required else {
+            return all_types();
+        };
+
+        match required.kind {
+            XenoTraitKind::Semantic => {
+                let allowed: std::collections::HashSet<_> = self
+                    .semantic_types()
+                    .filter(|semantic_type| semantic_type.implements(required))
+                    .map(|semantic_type| semantic_type.name)
+                    .collect();
+                all_types()
+                    .into_iter()
+                    .filter(|item| allowed.contains(item.label.as_str()))
+                    .collect()
+            }
+            XenoTraitKind::Literal | XenoTraitKind::LiteralType => {
+                self.literal_completions(required)
+            }
+            XenoTraitKind::RegexLiteral => vec![Self::regex_literal_completion()],
+            XenoTraitKind::Identifier | XenoTraitKind::Type => all_types(),
+            XenoTraitKind::Annotation => self.get_builtin_annotations().collect(),
+            XenoTraitKind::Expression => {
+                let mut items = all_types();
+                items.extend(self.get_builtin_annotations());
+                items.extend(self.literal_completions(&xenomorph_common::semantic::LITERAL));
+                deduplicate_completions(items)
+            }
+        }
     }
 
     /// Returns completion items for all declarations visible from the given module
@@ -142,51 +663,27 @@ impl Backend {
             .collect()
     }
 
-    /// Walks backward from a token to collect an import path like "foo/bar".
-    /// Returns None if the token chain doesn't trace back to an Import token.
-    fn collect_import_path(tokens: &[Token], current_token: &Token) -> Option<String> {
-        let idx = tokens.iter().position(|t| {
-            t.1.l == current_token.1.l && t.1.c == current_token.1.c && t.0 == current_token.0
-        })?;
-
-        // Walk backward collecting Identifier and Slash tokens
-        let mut segments: Vec<&str> = Vec::new();
-        let mut i = idx;
-        loop {
-            if i == 0 {
-                return None;
-            }
-            i -= 1;
-            match tokens[i].0 {
-                TokenVariant::Identifier => segments.push(tokens[i].1.v),
-                TokenVariant::Slash => continue,
-                TokenVariant::Import => break,
-                _ => return None,
-            }
-        }
-        segments.reverse();
-        Some(segments.join("/"))
-    }
-
     // ── Token helpers ───────────────────────────────────────────────
 
     fn find_token_at_position<'a>(
+        source: &str,
         tokens: &'a [Token<'a>],
         position: Position,
     ) -> Option<&'a Token<'a>> {
         tokens.iter().find(|(_, data)| {
-            let token_range = data.to_editor_range();
+            let token_range = token_to_editor_range(source, data);
             token_range.start <= position && position < token_range.end
         })
     }
 
     fn find_token_before_or_at_position<'a>(
+        source: &str,
         tokens: &'a [Token<'a>],
         position: Position,
     ) -> Option<&'a Token<'a>> {
-        Self::find_token_at_position(tokens, position).or_else(|| {
+        Self::find_token_at_position(source, tokens, position).or_else(|| {
             tokens.iter().rev().find(|(_, data)| {
-                let end = data.to_editor_range().end;
+                let end = token_to_editor_range(source, data).end;
                 end.line < position.line
                     || (end.line == position.line && end.character <= position.character)
             })
@@ -196,45 +693,48 @@ impl Backend {
     // ── Document validation ─────────────────────────────────────────
 
     /// Reloads the module in the registry from the given source text,
-    /// then publishes diagnostics.
+    /// then revalidates and publishes diagnostics for all of its importers.
     async fn validate_document(&self, uri: &Url, source: String) {
         let file_path = match uri.to_file_path() {
             Ok(p) => p,
             Err(_) => return,
         };
+        let Some(module_path) = self.registry.abs_path_to_module_path(&file_path) else {
+            return;
+        };
 
-        let errors = self.registry.load_module_from_source(&file_path, source);
+        let load_errors = self.registry.load_module_from_source(&file_path, source);
+        self.registry.revalidate_importers(&module_path);
+        let affected_modules = self.registry.refresh_name_collision_diagnostics();
+        let current_module_was_revalidated = affected_modules.contains(&module_path);
+        for affected_module in affected_modules {
+            let Some(abs_path) = self.registry.with_module(&affected_module, |_, _, module| {
+                module.borrow_abs_path().to_path_buf()
+            }) else {
+                continue;
+            };
+            let Ok(affected_uri) = Url::from_file_path(abs_path) else {
+                continue;
+            };
+            let errors = self.registry.get_all_errors_for(&affected_module);
+            self.publish_module_diagnostics(affected_uri, &affected_module, &errors)
+                .await;
+        }
+        if !current_module_was_revalidated {
+            self.publish_module_diagnostics(uri.clone(), &module_path, &load_errors)
+                .await;
+        }
+    }
 
-        let diagnostics: Vec<Diagnostic> = errors
-            .iter()
-            .filter_map(|err| {
-                let (line, col, len) = err.location?;
-                Some(Diagnostic {
-                    range: Range {
-                        start: Position {
-                            line,
-                            character: col,
-                        },
-                        end: Position {
-                            line,
-                            character: col + len,
-                        },
-                    },
-                    severity: Some(match err.phase {
-                        ErrorPhase::Lexer | ErrorPhase::Parser | ErrorPhase::Module => {
-                            DiagnosticSeverity::ERROR
-                        }
-                        ErrorPhase::Analyzer => DiagnosticSeverity::ERROR,
-                    }),
-                    message: err.message.clone(),
-                    source: Some("xenomorph".to_string()),
-                    ..Default::default()
-                })
-            })
-            .collect();
-
+    async fn publish_module_diagnostics(
+        &self,
+        uri: Url,
+        module_path: &str,
+        errors: &[ModuleDiagnostic],
+    ) {
+        let diagnostics = diagnostics_for_module(errors, module_path);
         self.client
-            .publish_diagnostics(uri.clone(), diagnostics, None)
+            .publish_diagnostics(uri, diagnostics, None)
             .await;
     }
 
@@ -244,10 +744,23 @@ impl Backend {
         &self,
         tokens: &[Token<'a>],
         _ast: &[Declaration<'a>],
+        source: &str,
         position: Position,
         module_path: Option<&str>,
     ) -> Vec<CompletionItem> {
         let mut items = Vec::new();
+
+        if let Some((annotation_name, parameter_index)) =
+            annotation_argument_context(tokens, source, position)
+        {
+            if let Some(parameter) = self
+                .find_annotation(annotation_name)
+                .and_then(|annotation| annotation.parameter_at(parameter_index))
+            {
+                return self.completions_for_constraint(parameter.constraint, module_path);
+            }
+            return items;
+        }
 
         let add_top_level_snippets = |items: &mut Vec<CompletionItem>| {
             items.push(CompletionItem {
@@ -273,12 +786,24 @@ impl Backend {
             if let Some(mp) = module_path {
                 types.extend(self.get_module_completions(mp));
             }
-            let mut seen = std::collections::HashSet::new();
-            types.retain(|item| seen.insert(item.label.clone()));
-            types
+            deduplicate_completions(types)
         };
 
-        if let Some(current_token) = Self::find_token_before_or_at_position(tokens, position) {
+        if generic_constraint_context(tokens, source, position) {
+            items.extend(all_types());
+            items.extend(self.semantic_traits().into_iter().map(|xeno_trait| {
+                create_completion_item(
+                    xeno_trait.name,
+                    xeno_trait.documentation,
+                    CompletionItemKind::INTERFACE,
+                )
+            }));
+            return deduplicate_completions(items);
+        }
+
+        if let Some(current_token) =
+            Self::find_token_before_or_at_position(source, tokens, position)
+        {
             let client = self.client.clone();
             let msg = format!(
                 "Current token: {:?} at line {}, col {}, value '{}'",
@@ -322,11 +847,8 @@ impl Backend {
                 TokenVariant::Import => {
                     items.extend(self.get_import_completions(""));
                 }
-                TokenVariant::Slash => {
-                    // Check if we're in an import path: walk back to collect segments
-                    if let Some(path) = Self::collect_import_path(tokens, current_token) {
-                        items.extend(self.get_import_completions(&format!("{}/", path)));
-                    }
+                TokenVariant::Path => {
+                    items.extend(self.get_import_completions(current_token.1.v));
                 }
                 TokenVariant::Identifier => {
                     let token_idx = tokens.iter().position(|t| {
@@ -342,18 +864,6 @@ impl Backend {
                         .map(|t| t.0);
 
                     match prev_variant {
-                        Some(TokenVariant::Import) => {
-                            // Typing first segment of import path
-                            items.extend(self.get_import_completions(""));
-                        }
-                        Some(TokenVariant::Slash) => {
-                            // Typing a segment after slash in import path
-                            if let Some(path) = Self::collect_import_path(tokens, current_token) {
-                                // path includes current identifier; use parent path
-                                let parent = path.rsplitn(2, '/').last().unwrap_or("");
-                                items.extend(self.get_import_completions(&format!("{}/", parent)));
-                            }
-                        }
                         Some(TokenVariant::Colon) | Some(TokenVariant::Or) => {
                             items.extend(all_types());
                         }
@@ -389,96 +899,116 @@ impl Backend {
 
     // ── Hover ───────────────────────────────────────────────────────
 
-    fn get_hover_for_location(
+    fn hover_target_at_location(
         &self,
         tokens: &[Token],
         ast: &[Declaration],
+        source: &str,
         position: Position,
-        module_path: Option<&str>,
-    ) -> Option<Hover> {
-        let token = Self::find_token_at_position(tokens, position)?;
+    ) -> Option<HoverTarget> {
+        let token = Self::find_token_at_position(source, tokens, position)?;
 
         if token.0 != TokenVariant::Identifier {
             return None;
         }
 
-        let searched_name = token.1.v;
+        Some(HoverTarget {
+            name: token.1.v.to_string(),
+            type_arguments: hover::type_arguments_at_token(ast, &token.1).unwrap_or_default(),
+            range: token_to_editor_range(source, &token.1),
+        })
+    }
 
-        // 1. Check local AST declarations
-        for decl in ast {
-            if let Declaration::TypeDecl { name, docs, .. } = decl {
-                if name.v == searched_name {
-                    let contents = format!("**{}**\n\n{}", name.v, docs.unwrap_or(""));
-                    return Some(Hover {
-                        contents: HoverContents::Markup(MarkupContent {
-                            kind: MarkupKind::Markdown,
-                            value: contents,
-                        }),
-                        range: Some(token.1.to_editor_range()),
-                    });
-                }
-            }
-        }
+    fn type_declaration_preview(
+        &self,
+        info: &DeclarationInfo,
+        type_arguments: &[String],
+    ) -> Option<String> {
+        self.registry
+            .with_module(&info.module_path, |_, ast, _| {
+                ast.iter().find_map(|declaration| match declaration {
+                    Declaration::Type { name, .. } if name.v == info.name => {
+                        hover::format_type_declaration(declaration, type_arguments)
+                    }
+                    _ => None,
+                })
+            })
+            .flatten()
+    }
 
-        // 2. Check builtins
-        let builtin_info = self
-            .get_builtin_types()
-            .find(|item| item.label == searched_name)
-            .or_else(|| {
-                self.get_builtin_annotations()
-                    .find(|item| item.label == searched_name)
-            });
-
-        if let Some(i) = builtin_info {
-            let value = match i.documentation {
-                Some(Documentation::MarkupContent(content)) => content.value,
-                Some(Documentation::String(value)) => value,
-                None => format!("**{}**\n\n{}", i.label, i.detail.unwrap_or_default()),
-            };
-
-            return Some(Hover {
-                contents: HoverContents::Markup(MarkupContent {
-                    kind: MarkupKind::Markdown,
-                    value,
-                }),
-                range: Some(token.1.to_editor_range()),
-            });
-        }
-
-        // 3. Check cross-module declarations via the registry
-        let current_module = module_path.unwrap_or("");
+    fn user_type_hover(&self, target: &HoverTarget, current_module: &str) -> Option<Hover> {
         let info = self
             .registry
-            .find_declaration(current_module, searched_name)?;
-        let docs = info.docs.as_deref().unwrap_or("");
+            .find_declaration(current_module, &target.name)?;
+        let preview = self.type_declaration_preview(&info, &target.type_arguments)?;
+        let mut contents = format!("**{}**", target.name);
+        if info.module_path != current_module {
+            contents.push_str(&format!(" *(from {})*", info.module_path));
+        }
+        if let Some(docs) = info.docs.as_deref().filter(|docs| !docs.is_empty()) {
+            contents.push_str("\n\n");
+            contents.push_str(docs);
+        }
+        contents.push_str("\n\n```xenomorph\n");
+        contents.push_str(&preview);
+        contents.push_str("\n```");
+
         Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
-                value: format!(
-                    "**{}** *(from {})*\n\n{}",
-                    info.name, info.module_path, docs
-                ),
+                value: contents,
             }),
-            range: Some(token.1.to_editor_range()),
+            range: Some(target.range),
+        })
+    }
+
+    fn builtin_hover(&self, target: &HoverTarget) -> Option<Hover> {
+        let builtin_info = self
+            .get_builtin_types()
+            .find(|item| item.label == target.name)
+            .or_else(|| {
+                self.get_builtin_annotations()
+                    .find(|item| item.label == target.name)
+            })?;
+
+        let value = match builtin_info.documentation {
+            Some(Documentation::MarkupContent(content)) => content.value,
+            Some(Documentation::String(value)) => value,
+            None => format!(
+                "**{}**\n\n{}",
+                builtin_info.label,
+                builtin_info.detail.unwrap_or_default()
+            ),
+        };
+        Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value,
+            }),
+            range: Some(target.range),
         })
     }
 
     // ── Goto Definition helpers ─────────────────────────────────────
 
-    fn declaration_info_to_location(info: &DeclarationInfo) -> Option<Location> {
+    fn declaration_info_to_location(&self, info: &DeclarationInfo) -> Option<Location> {
         let target_uri = Url::from_file_path(&info.abs_path).ok()?;
+        let range = self
+            .registry
+            .with_module(&info.module_path, |_, ast, module| {
+                ast.iter().find_map(|declaration| match declaration {
+                    Declaration::Type { name, .. }
+                        if name.l == info.line && name.c == info.column && name.v == info.name =>
+                    {
+                        Some(token_to_editor_range(module.borrow_source(), name))
+                    }
+                    _ => None,
+                })
+            })
+            .flatten()?;
         Some(Location {
             uri: target_uri,
-            range: Range {
-                start: Position {
-                    line: info.line,
-                    character: info.column,
-                },
-                end: Position {
-                    line: info.line,
-                    character: info.column + info.name_len,
-                },
-            },
+            range,
         })
     }
 }
@@ -502,7 +1032,10 @@ impl LanguageServer for Backend {
                         ".".to_string(),
                         ":".to_string(),
                         "@".to_string(),
+                        "(".to_string(),
+                        ",".to_string(),
                         "{".to_string(),
+                        "/".to_string(),
                         " ".to_string(),
                     ]),
                     all_commit_characters: None,
@@ -518,6 +1051,16 @@ impl LanguageServer for Backend {
                     prepare_provider: Some(true),
                     work_done_progress_options: Default::default(),
                 })),
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(
+                        SemanticTokensOptions {
+                            work_done_progress_options: Default::default(),
+                            legend: semantic_tokens::legend(),
+                            range: None,
+                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                        },
+                    ),
+                ),
                 ..Default::default()
             },
             ..Default::default()
@@ -533,6 +1076,58 @@ impl LanguageServer for Backend {
             self.client
                 .log_message(MessageType::WARNING, format!("Module error: {}", e))
                 .await;
+        }
+
+        let registry = Arc::clone(&self.registry);
+        let client = self.client.clone();
+        let runtime = tokio::runtime::Handle::current();
+        match WorkspaceConfigWatcher::watch(move |event| {
+            let client = client.clone();
+            match event {
+                Ok(()) => {
+                    let removed = registry.purge_module_cache();
+                    runtime.spawn(async move {
+                        client
+                            .log_message(
+                                MessageType::INFO,
+                                format!(
+                                    "Workspace config changed; purged {removed} cached module(s) and requested an LSP restart."
+                                ),
+                            )
+                            .await;
+                        client.send_notification::<RestartRequested>(()).await;
+                    });
+                }
+                Err(error) => {
+                    runtime.spawn(async move {
+                        client
+                            .log_message(
+                                MessageType::WARNING,
+                                format!("Workspace config watcher error: {error}"),
+                            )
+                            .await;
+                    });
+                }
+            }
+        }) {
+            Ok(watcher) => {
+                let config_path = watcher.config_path().display().to_string();
+                *self.config_watcher.lock().unwrap() = Some(watcher);
+                self.client
+                    .log_message(
+                        MessageType::INFO,
+                        format!("Watching workspace config: {config_path}"),
+                    )
+                    .await;
+            }
+            Err(error) => {
+                self.client
+                    .log_message(
+                        MessageType::WARNING,
+                        format!("Unable to watch workspace config: {error}"),
+                    )
+                    .await;
+            }
         }
 
         self.client
@@ -572,8 +1167,14 @@ impl LanguageServer for Backend {
 
         let completions = self.registry.with_module(
             module_path.as_deref().unwrap_or(""),
-            |tokens, ast, _| {
-                self.get_context_completions(tokens, ast, position, module_path.as_deref())
+            |tokens, ast, module| {
+                self.get_context_completions(
+                    tokens,
+                    ast,
+                    module.borrow_source(),
+                    position,
+                    module_path.as_deref(),
+                )
             },
         );
 
@@ -591,39 +1192,68 @@ impl LanguageServer for Backend {
         let position = params.text_document_position_params.position;
         let module_path = self.uri_to_module_path(&uri);
 
-        let hover =
-            self.registry
-                .with_module(module_path.as_deref().unwrap_or(""), |tokens, ast, _| {
-                    self.get_hover_for_location(tokens, ast, position, module_path.as_deref())
-                });
+        let current_module = module_path.as_deref().unwrap_or("");
+        let target = self
+            .registry
+            .with_module(current_module, |tokens, ast, module| {
+                self.hover_target_at_location(tokens, ast, module.borrow_source(), position)
+            })
+            .flatten();
+        let Some(target) = target else {
+            return Ok(None);
+        };
 
-        Ok(hover.flatten())
+        Ok(self
+            .user_type_hover(&target, current_module)
+            .or_else(|| self.builtin_hover(&target)))
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
+        let module_path = self.uri_to_module_path(&params.text_document.uri);
+        let tokens = self.registry.with_module(
+            module_path.as_deref().unwrap_or(""),
+            |tokens, ast, module| SemanticTokens {
+                result_id: None,
+                data: semantic_tokens::encode(module.borrow_source(), tokens, ast),
+            },
+        );
+
+        Ok(tokens.map(SemanticTokensResult::Tokens))
     }
 
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
         let uri = params.text_document.uri;
         let module_path = self.uri_to_module_path(&uri);
 
-        let result =
-            self.registry
-                .with_module(module_path.as_deref().unwrap_or(""), |_, _, module| {
-                    let source = module.borrow_source();
-                    let formatted = format_xenomorph(source);
+        let result = self.registry.with_module(
+            module_path.as_deref().unwrap_or(""),
+            |tokens, ast, module| {
+                let source = module.borrow_source();
+                let formatted = format_xenomorph_with_syntax(
+                    source,
+                    tokens,
+                    ast,
+                    &xenomorph_common::config::Config::get().formatter,
+                );
 
-                    vec![TextEdit {
-                        range: Range {
-                            start: Position {
-                                line: 0,
-                                character: 0,
-                            },
-                            end: Position {
-                                line: source.lines().count() as u32,
-                                character: 0,
-                            },
+                vec![TextEdit {
+                    range: Range {
+                        start: Position {
+                            line: 0,
+                            character: 0,
                         },
-                        new_text: formatted,
-                    }]
-                });
+                        end: Position {
+                            line: source.lines().count() as u32,
+                            character: 0,
+                        },
+                    },
+                    new_text: formatted,
+                }]
+            },
+        );
 
         Ok(result)
     }
@@ -638,15 +1268,16 @@ impl LanguageServer for Backend {
         let mp = module_path.as_deref().unwrap_or("");
 
         // First try: local definition or import navigation
-        let local_result = self.registry.with_module(mp, |tokens, ast, _| {
-            let token = Self::find_token_at_position(tokens, position)?;
+        let local_result = self.registry.with_module(mp, |tokens, ast, module| {
+            let source = module.borrow_source();
+            let token = Self::find_token_at_position(source, tokens, position)?;
 
             // If cursor is on an import line, navigate to the imported file
-            if token.0 == TokenVariant::Identifier {
+            if token.0 == TokenVariant::Path {
                 for decl in ast.iter() {
-                    if let Declaration::Import { path, location } = decl {
-                        if token.1.l == location.l {
-                            let segments: Vec<&str> = path.iter().copied().collect();
+                    if let Declaration::Import { path, .. } = decl {
+                        if path.join("/") == token.1.v {
+                            let segments = path.to_vec();
                             if let Ok((_, abs_path)) = self.registry.resolve_import(&segments, None)
                             {
                                 if abs_path.exists() {
@@ -666,12 +1297,18 @@ impl LanguageServer for Backend {
 
             // Try local declaration
             if token.0 == TokenVariant::Identifier {
+                if let Some(generic) = generic_parameter_target_at(ast, &token.1) {
+                    return Some(GotoDefinitionResponse::Scalar(Location {
+                        uri: uri.clone(),
+                        range: generic.declaration.to_editor_range(source),
+                    }));
+                }
                 for decl in ast {
-                    if let Declaration::TypeDecl { name, .. } = decl {
+                    if let Declaration::Type { name, .. } = decl {
                         if name.v == token.1.v {
                             return Some(GotoDefinitionResponse::Scalar(Location {
                                 uri: uri.clone(),
-                                range: name.to_editor_range(),
+                                range: token_to_editor_range(source, name),
                             }));
                         }
                     }
@@ -686,13 +1323,14 @@ impl LanguageServer for Backend {
         }
 
         // Second try: cross-module declaration via the registry
-        let cross_result = self.registry.with_module(mp, |tokens, _, _| {
-            let token = Self::find_token_at_position(tokens, position)?;
+        let cross_result = self.registry.with_module(mp, |tokens, _, module| {
+            let token = Self::find_token_at_position(module.borrow_source(), tokens, position)?;
             if token.0 != TokenVariant::Identifier {
                 return None;
             }
             let info = self.registry.find_declaration(mp, token.1.v)?;
-            Self::declaration_info_to_location(&info).map(GotoDefinitionResponse::Scalar)
+            self.declaration_info_to_location(&info)
+                .map(GotoDefinitionResponse::Scalar)
         });
 
         Ok(cross_result.flatten())
@@ -705,17 +1343,39 @@ impl LanguageServer for Backend {
         let current_module = module_path.as_deref().unwrap_or("");
         let include_declaration = params.context.include_declaration;
 
-        let searched_name = self
+        let selected = self
             .registry
-            .with_module(current_module, |tokens, _, _| {
-                let token = Self::find_token_at_position(tokens, position)?;
-                (token.0 == TokenVariant::Identifier).then(|| token.1.v.to_string())
+            .with_module(current_module, |tokens, ast, module| {
+                let source = module.borrow_source();
+                let token = Self::find_token_at_position(source, tokens, position)?;
+                if token.0 != TokenVariant::Identifier {
+                    return None;
+                }
+                Some((
+                    token.1.v.to_string(),
+                    generic_parameter_target_at(ast, &token.1).map(|generic| {
+                        generic
+                            .occurrences
+                            .into_iter()
+                            .filter(|occurrence| {
+                                include_declaration || *occurrence != generic.declaration
+                            })
+                            .map(|occurrence| Location {
+                                uri: uri.clone(),
+                                range: occurrence.to_editor_range(source),
+                            })
+                            .collect::<Vec<_>>()
+                    }),
+                ))
             })
             .flatten();
 
-        let Some(searched_name) = searched_name else {
+        let Some((searched_name, generic_locations)) = selected else {
             return Ok(None);
         };
+        if let Some(locations) = generic_locations {
+            return Ok(Some(locations));
+        }
 
         let Some(target) = self
             .registry
@@ -727,7 +1387,8 @@ impl LanguageServer for Backend {
         let module_paths: Vec<String> = self
             .registry
             .module_cache
-            .blocking_read()
+            .read()
+            .unwrap()
             .keys()
             .cloned()
             .collect();
@@ -747,6 +1408,7 @@ impl LanguageServer for Backend {
                 .registry
                 .with_module(&module_path, |tokens, _, module| {
                     let uri = Url::from_file_path(module.borrow_abs_path()).ok()?;
+                    let source = module.borrow_source();
                     Some(
                         tokens
                             .iter()
@@ -766,7 +1428,7 @@ impl LanguageServer for Backend {
 
                                 Some(Location {
                                     uri: uri.clone(),
-                                    range: token.1.to_editor_range(),
+                                    range: token_to_editor_range(source, &token.1),
                                 })
                             })
                             .collect::<Vec<Location>>(),
@@ -798,19 +1460,19 @@ impl LanguageServer for Backend {
 
         let symbols =
             self.registry
-                .with_module(module_path.as_deref().unwrap_or(""), |_, ast, _| {
+                .with_module(module_path.as_deref().unwrap_or(""), |_, ast, module| {
                     #[allow(deprecated)]
                     ast.iter()
                         .filter_map(|decl| match decl {
-                            Declaration::Import { .. } => None,
-                            Declaration::TypeDecl { name, .. } => Some(SymbolInformation {
+                            Declaration::Import { .. } | Declaration::Custom { .. } => None,
+                            Declaration::Type { name, .. } => Some(SymbolInformation {
                                 name: name.v.to_string(),
                                 kind: SymbolKind::STRUCT,
                                 tags: None,
                                 deprecated: None,
                                 location: Location {
                                     uri: uri.clone(),
-                                    range: name.to_editor_range(),
+                                    range: token_to_editor_range(module.borrow_source(), name),
                                 },
                                 container_name: None,
                             }),
@@ -829,29 +1491,33 @@ impl LanguageServer for Backend {
         let position = params.position;
         let module_path = self.uri_to_module_path(&uri);
 
-        let result =
-            self.registry
-                .with_module(module_path.as_deref().unwrap_or(""), |tokens, ast, _| {
-                    let token = Self::find_token_at_position(tokens, position)?;
-                    if token.0 != TokenVariant::Identifier {
-                        return None;
-                    }
+        let result = self.registry.with_module(
+            module_path.as_deref().unwrap_or(""),
+            |tokens, ast, module| {
+                let source = module.borrow_source();
+                let token = Self::find_token_at_position(source, tokens, position)?;
+                if token.0 != TokenVariant::Identifier {
+                    return None;
+                }
 
-                    // Only allow renaming user-defined declarations
-                    let is_user_defined = ast.iter().any(|decl| match decl {
-                        Declaration::Import { .. } => false,
-                        Declaration::TypeDecl { name, .. } => name.v == token.1.v,
+                // Only allow declaration-local generic parameters and
+                // user-defined type declarations to be renamed.
+                let is_user_defined = generic_parameter_target_at(ast, &token.1).is_some()
+                    || ast.iter().any(|decl| match decl {
+                        Declaration::Import { .. } | Declaration::Custom { .. } => false,
+                        Declaration::Type { name, .. } => name.v == token.1.v,
                     });
 
-                    if !is_user_defined {
-                        return None;
-                    }
+                if !is_user_defined {
+                    return None;
+                }
 
-                    Some(PrepareRenameResponse::RangeWithPlaceholder {
-                        range: token.1.to_editor_range(),
-                        placeholder: token.1.v.to_string(),
-                    })
-                });
+                Some(PrepareRenameResponse::RangeWithPlaceholder {
+                    range: token_to_editor_range(source, &token.1),
+                    placeholder: token.1.v.to_string(),
+                })
+            },
+        );
 
         Ok(result.flatten())
     }
@@ -862,46 +1528,65 @@ impl LanguageServer for Backend {
         let new_name = params.new_name;
         let module_path = self.uri_to_module_path(&uri);
 
-        let result =
-            self.registry
-                .with_module(module_path.as_deref().unwrap_or(""), |tokens, ast, _| {
-                    let token = Self::find_token_at_position(tokens, position)?;
-                    if token.0 != TokenVariant::Identifier {
-                        return None;
-                    }
+        let result = self.registry.with_module(
+            module_path.as_deref().unwrap_or(""),
+            |tokens, ast, module| {
+                let source = module.borrow_source();
+                let token = Self::find_token_at_position(source, tokens, position)?;
+                if token.0 != TokenVariant::Identifier {
+                    return None;
+                }
 
-                    let old_name = token.1.v;
+                let old_name = token.1.v;
 
-                    let is_user_defined = ast.iter().any(|decl| match decl {
-                        Declaration::Import { .. } => false,
-                        Declaration::TypeDecl { name, .. } => name.v == old_name,
-                    });
-
-                    if !is_user_defined {
-                        return None;
-                    }
-
-                    let edits: Vec<TextEdit> = tokens
-                        .iter()
-                        .filter(|t| t.0 == TokenVariant::Identifier && t.1.v == old_name)
-                        .map(|t| TextEdit {
-                            range: t.1.to_editor_range(),
+                if let Some(generic) = generic_parameter_target_at(ast, &token.1) {
+                    let edits = generic
+                        .occurrences
+                        .into_iter()
+                        .map(|occurrence| TextEdit {
+                            range: occurrence.to_editor_range(source),
                             new_text: new_name.clone(),
                         })
                         .collect();
-
-                    if edits.is_empty() {
-                        return None;
-                    }
-
                     let mut changes = HashMap::new();
                     changes.insert(uri.clone(), edits);
-
-                    Some(WorkspaceEdit {
+                    return Some(WorkspaceEdit {
                         changes: Some(changes),
                         ..Default::default()
-                    })
+                    });
+                }
+
+                let is_user_defined = ast.iter().any(|decl| match decl {
+                    Declaration::Import { .. } | Declaration::Custom { .. } => false,
+                    Declaration::Type { name, .. } => name.v == old_name,
                 });
+
+                if !is_user_defined {
+                    return None;
+                }
+
+                let edits: Vec<TextEdit> = tokens
+                    .iter()
+                    .filter(|t| t.0 == TokenVariant::Identifier && t.1.v == old_name)
+                    .map(|t| TextEdit {
+                        range: token_to_editor_range(source, &t.1),
+                        new_text: new_name.clone(),
+                    })
+                    .collect();
+
+                if edits.is_empty() {
+                    return None;
+                }
+
+                let mut changes = HashMap::new();
+                changes.insert(uri.clone(), edits);
+
+                Some(WorkspaceEdit {
+                    changes: Some(changes),
+                    ..Default::default()
+                })
+            },
+        );
 
         Ok(result.flatten())
     }
@@ -916,13 +1601,188 @@ async fn main() {
             return;
         }
     };
+    let reg = Arc::new(reg);
 
     let (service, socket) = LspService::new(move |client| Backend {
         client,
-        registry: reg,
+        registry: Arc::clone(&reg),
+        config_watcher: Mutex::new(None),
     });
 
     Server::new(tokio::io::stdin(), tokio::io::stdout(), socket)
         .serve(service)
         .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xenomorph_common::lexer::Lexer;
+    use xenomorph_common::module::types::ErrorPhase;
+    use xenomorph_common::XenoDiagSeverity;
+
+    fn context_at_end(source: &str) -> Option<(String, usize)> {
+        let tokens = Lexer::tokenize(source).expect("completion fixture should lex");
+        annotation_argument_context(
+            &tokens,
+            source,
+            Position {
+                line: 0,
+                character: source.len() as u32,
+            },
+        )
+        .map(|(name, index)| (name.to_string(), index))
+    }
+
+    #[test]
+    fn annotation_context_tracks_variadic_parameter_index() {
+        assert_eq!(
+            context_at_end("@Lombok(Data, "),
+            Some(("Lombok".to_string(), 1))
+        );
+    }
+
+    #[test]
+    fn annotation_context_ignores_nested_expression_commas() {
+        assert_eq!(
+            context_at_end("@Outer(@Inner(first, second), "),
+            Some(("Outer".to_string(), 1))
+        );
+        assert_eq!(
+            context_at_end("@Outer(@Inner(first, "),
+            Some(("Inner".to_string(), 1))
+        );
+    }
+
+    #[test]
+    fn generic_constraint_context_only_matches_colons_inside_angle_parameters() {
+        let generic = "type Box<T: Number";
+        let generic_tokens = Lexer::tokenize(generic).expect("generic fixture should lex");
+        assert!(generic_constraint_context(
+            &generic_tokens,
+            generic,
+            Position::new(0, generic.len() as u32)
+        ));
+
+        let field = "type Box = { value: Number";
+        let field_tokens = Lexer::tokenize(field).expect("field fixture should lex");
+        assert!(!generic_constraint_context(
+            &field_tokens,
+            field,
+            Position::new(0, field.len() as u32)
+        ));
+    }
+
+    #[test]
+    fn generic_parameter_target_is_scoped_to_its_declaration() {
+        let source = "type First<T> = T; type Second<T> = Box<T>;";
+        let tokens = Lexer::tokenize(source).expect("generic fixture should lex");
+        let (ast, diagnostics) = xenomorph_common::parser::Parser::parse(&tokens);
+        assert!(diagnostics.is_empty());
+        let selected = tokens
+            .iter()
+            .filter(|token| token.0 == TokenVariant::Identifier && token.1.v == "T")
+            .nth(3)
+            .expect("second generic reference should exist");
+
+        let target = generic_parameter_target_at(&ast, &selected.1)
+            .expect("generic reference should resolve");
+
+        let second_start = source.find("Second").unwrap() as u32;
+        assert_eq!(target.name, "T");
+        assert_eq!(target.occurrences.len(), 2);
+        assert_eq!(target.declaration.scalar_column, second_start + 7);
+        assert!(target
+            .occurrences
+            .iter()
+            .all(|occurrence| occurrence.scalar_column >= second_start));
+    }
+
+    #[test]
+    fn generic_parameter_target_collects_nested_and_annotation_references() {
+        let source = "type Result<T> = { value: Box<T>, items: T[] } @example(T);";
+        let tokens = Lexer::tokenize(source).expect("generic fixture should lex");
+        let (ast, diagnostics) = xenomorph_common::parser::Parser::parse(&tokens);
+        assert!(diagnostics.is_empty());
+        let declaration = tokens
+            .iter()
+            .find(|token| token.0 == TokenVariant::Identifier && token.1.v == "T")
+            .expect("generic declaration should exist");
+
+        let target = generic_parameter_target_at(&ast, &declaration.1)
+            .expect("generic declaration should resolve");
+
+        assert_eq!(target.occurrences.len(), 4);
+    }
+
+    #[test]
+    fn generic_parameter_target_does_not_treat_constraints_as_parameter_uses() {
+        let source = "type Result<T: T> = T;";
+        let tokens = Lexer::tokenize(source).expect("generic fixture should lex");
+        let (ast, diagnostics) = xenomorph_common::parser::Parser::parse(&tokens);
+        assert!(diagnostics.is_empty());
+        let declaration = tokens
+            .iter()
+            .find(|token| token.0 == TokenVariant::Identifier && token.1.v == "T")
+            .expect("generic declaration should exist");
+
+        let target = generic_parameter_target_at(&ast, &declaration.1)
+            .expect("generic declaration should resolve");
+
+        assert_eq!(target.occurrences.len(), 2);
+    }
+
+    #[test]
+    fn editor_ranges_convert_scalar_columns_and_lengths_to_utf16() {
+        let source = "type Emoji = [\"😀\", string];";
+        let tokens = Lexer::tokenize(source).expect("UTF-16 fixture should lex");
+        let string = tokens
+            .iter()
+            .find(|token| token.0 == TokenVariant::Identifier && token.1.v == "string")
+            .expect("type reference should exist");
+
+        let range = token_to_editor_range(source, &string.1);
+
+        assert_eq!(range.start.character, 20);
+        assert_eq!(range.end.character, 26);
+    }
+
+    #[test]
+    fn match_argument_completion_inserts_regex_literal() {
+        let completion = Backend::regex_literal_completion();
+
+        assert_eq!(completion.label, "regex literal");
+        assert_eq!(completion.insert_text.as_deref(), Some("/${1:pattern}/"));
+        assert_eq!(
+            completion.insert_text_format,
+            Some(InsertTextFormat::SNIPPET)
+        );
+    }
+
+    #[test]
+    fn diagnostics_are_only_published_for_their_own_module() {
+        let errors = vec![
+            ModuleDiagnostic {
+                module_path: "parser/p1".to_string(),
+                message: "p1 error".to_string(),
+                location: Some((1, 2, 3)),
+                phase: ErrorPhase::Parser,
+                severity: XenoDiagSeverity::Err,
+            },
+            ModuleDiagnostic {
+                module_path: "parser/p2".to_string(),
+                message: "p2 error".to_string(),
+                location: Some((4, 5, 6)),
+                phase: ErrorPhase::Analyzer,
+                severity: XenoDiagSeverity::Err,
+            },
+        ];
+
+        let diagnostics = diagnostics_for_module(&errors, "parser/p2");
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].message, "p2 error");
+        assert_eq!(diagnostics[0].range.start, Position::new(4, 5));
+        assert_eq!(diagnostics[0].range.end, Position::new(4, 11));
+    }
 }

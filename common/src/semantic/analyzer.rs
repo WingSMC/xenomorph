@@ -2,16 +2,18 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+use crate::plugins::ListenerFactory;
 use crate::{
     config::PluginConfigs,
     module::ModuleData,
-    parser::{AnonymType, Declaration, Expr, KeyValExpr, TypeList},
+    parser::{Annotation, Declaration, Expr, KeyValExpr, SimpleType, Type, XenoType},
     plugins::XenoPlugin,
     semantic::{
         annotation_validator::AnnotationValidator, if_validator::IfChainValidator,
-        name_validator::NameValidator, BUILTIN_ANNOTATIONS, BUILTIN_TYPES,
+        name_validator::NameValidator, GenericParameterInfo, OwnedType, TypeHierarchy,
+        BUILTIN_ANNOTATIONS, BUILTIN_TRAITS, BUILTIN_TYPES,
     },
-    TokenData, XenoError,
+    TokenData, XenoDiagnostic,
 };
 
 /// Scope information built by the analyzer and passed to listeners.
@@ -30,22 +32,78 @@ pub struct ScopeInfo {
     pub builtin_types: HashSet<String>,
     /// All known annotation names (builtins + plugins, flat set).
     pub known_annotations: HashSet<String>,
+    /// Canonical runtime hierarchy for builtin, plugin, local, and imported types.
+    pub type_hierarchy: TypeHierarchy,
+    /// Typed definitions for built-in and plugin annotations.
+    pub annotations: HashMap<String, &'static crate::semantic::XenoAnnotation>,
 }
 
 impl ScopeInfo {
     /// Returns true if `name` is a known type (own, imported, or builtin).
     pub fn has_type(&self, name: &str) -> bool {
-        self.builtin_types.contains(name)
-            || self.own_types.iter().any(|n| n == name)
-            || self
-                .imported_types
-                .values()
-                .any(|names| names.iter().any(|n| n == name))
+        self.type_hierarchy.has_type(name)
+            && (self.builtin_types.contains(name)
+                || self.own_types.iter().any(|n| n == name)
+                || self
+                    .imported_types
+                    .values()
+                    .any(|names| names.iter().any(|n| n == name)))
+    }
+
+    /// Returns true for either a visible type or a globally registered trait.
+    pub fn has_constraint(&self, name: &str) -> bool {
+        self.has_type(name) || self.type_hierarchy.has_trait(name)
+    }
+
+    pub fn is_static_type(&self, name: &str) -> bool {
+        self.type_hierarchy
+            .get_type(name)
+            .is_some_and(|definition| definition.module_path.is_none())
     }
 
     /// Returns true if `name` is a known annotation.
     pub fn has_annotation(&self, name: &str) -> bool {
         self.known_annotations.contains(name)
+    }
+
+    pub fn find_annotation(&self, name: &str) -> Option<&'static crate::semantic::XenoAnnotation> {
+        self.annotations.get(name).copied()
+    }
+
+    pub fn generic_parameters(&self, name: &str) -> Option<Vec<GenericParameterInfo>> {
+        self.type_hierarchy.generic_parameters(name)
+    }
+
+    pub fn type_implements_trait(
+        &self,
+        candidate: &OwnedType,
+        required: &crate::semantic::XenoTrait,
+    ) -> bool {
+        self.type_hierarchy
+            .type_implements_trait(candidate, required)
+    }
+
+    pub fn is_type_compatible(&self, candidate: &OwnedType, target: &str) -> bool {
+        self.type_hierarchy.is_type_compatible(candidate, target)
+    }
+
+    pub fn descends_from_static_type(
+        &self,
+        candidate: &OwnedType,
+        target: &'static crate::semantic::XenoType,
+    ) -> bool {
+        self.type_hierarchy
+            .descends_from_static_type(candidate, target)
+    }
+
+    pub fn satisfies_constraint(
+        &self,
+        candidate: &OwnedType,
+        constraint: &str,
+        constraint_scope: Option<&str>,
+    ) -> bool {
+        self.type_hierarchy
+            .satisfies_constraint(candidate, constraint, constraint_scope)
     }
 
     /// Returns the module path that provides a given type name, if it's imported.
@@ -64,19 +122,18 @@ impl ScopeInfo {
 /// care about.
 #[allow(unused_variables)]
 pub trait AnalyzerListener<'src> {
-    /// Called once per analysis run with all plugin configs from `xenomorph.toml`.
-    fn on_init(&mut self, plugin_configs: &PluginConfigs) {}
-
     /// Called before the AST walk begins, with full scope information.
     fn on_before_module(&mut self, scope: &ScopeInfo) {}
     /// Called after the full AST walk completes, with scope information.
     fn on_after_module(&mut self, scope: &ScopeInfo) {}
 
-    fn on_before_ast(&mut self, ast: &[Declaration<'src>], errors: &mut Vec<XenoError<'src>>) {}
-    fn on_after_ast(&mut self, ast: &[Declaration<'src>], errors: &mut Vec<XenoError<'src>>) {}
+    fn on_before_ast(&mut self, ast: &[Declaration<'src>], errors: &mut Vec<XenoDiagnostic<'src>>) {
+    }
+    fn on_after_ast(&mut self, ast: &[Declaration<'src>], errors: &mut Vec<XenoDiagnostic<'src>>) {}
 
-    fn on_before_decl(&mut self, decl: &Declaration<'src>, errors: &mut Vec<XenoError<'src>>) {}
-    fn on_after_decl(&mut self, decl: &Declaration<'src>, errors: &mut Vec<XenoError<'src>>) {}
+    fn on_before_decl(&mut self, decl: &Declaration<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {
+    }
+    fn on_after_decl(&mut self, decl: &Declaration<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {}
 
     // fn on_before_custom(
     //     &mut self,
@@ -90,62 +147,95 @@ pub trait AnalyzerListener<'src> {
     // }
     // fn on_after_custom(&mut self, errors: &mut Vec<XenoError<'src>>) {}
 
-    fn on_before_type(&mut self, exprs: &AnonymType<'src>, errors: &mut Vec<XenoError<'src>>) {}
-    fn on_after_type(&mut self, exprs: &AnonymType<'src>, errors: &mut Vec<XenoError<'src>>) {}
+    fn on_before_type(&mut self, exprs: &XenoType<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {}
+    fn on_after_type(&mut self, exprs: &XenoType<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {}
 
-    fn on_before_expr(&mut self, expr: &Expr<'src>, errors: &mut Vec<XenoError<'src>>) {}
-    fn on_after_expr(&mut self, expr: &Expr<'src>, errors: &mut Vec<XenoError<'src>>) {}
+    fn on_before_expr(&mut self, expr: &Expr<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {}
+    fn on_after_expr(&mut self, expr: &Expr<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {}
 
-    fn on_before_struct(&mut self, fields: &[KeyValExpr<'src>], errors: &mut Vec<XenoError<'src>>) {
+    fn on_before_struct(
+        &mut self,
+        fields: &[KeyValExpr<'src>],
+        errors: &mut Vec<XenoDiagnostic<'src>>,
+    ) {
     }
-    fn on_after_struct(&mut self, fields: &[KeyValExpr<'src>], errors: &mut Vec<XenoError<'src>>) {}
+    fn on_after_struct(
+        &mut self,
+        fields: &[KeyValExpr<'src>],
+        errors: &mut Vec<XenoDiagnostic<'src>>,
+    ) {
+    }
 
     fn on_before_field(
         &mut self,
         key: &TokenData<'src>,
-        value: &AnonymType<'src>,
-        errors: &mut Vec<XenoError<'src>>,
+        value: &SimpleType<'src>,
+        errors: &mut Vec<XenoDiagnostic<'src>>,
     ) {
     }
     fn on_after_field(
         &mut self,
         key: &TokenData<'src>,
-        value: &AnonymType<'src>,
-        errors: &mut Vec<XenoError<'src>>,
+        value: &SimpleType<'src>,
+        errors: &mut Vec<XenoDiagnostic<'src>>,
     ) {
     }
 
-    fn on_before_enum(&mut self, variants: &[KeyValExpr<'src>], errors: &mut Vec<XenoError<'src>>) {
+    fn on_before_enum(
+        &mut self,
+        variants: &[KeyValExpr<'src>],
+        errors: &mut Vec<XenoDiagnostic<'src>>,
+    ) {
     }
-    fn on_after_enum(&mut self, variants: &[KeyValExpr<'src>], errors: &mut Vec<XenoError<'src>>) {}
+    fn on_after_enum(
+        &mut self,
+        variants: &[KeyValExpr<'src>],
+        errors: &mut Vec<XenoDiagnostic<'src>>,
+    ) {
+    }
 
-    fn on_array(&mut self, inner: &TokenData<'src>, errors: &mut Vec<XenoError<'src>>) {}
-    fn on_after_array(&mut self, inner: &TokenData<'src>, errors: &mut Vec<XenoError<'src>>) {}
+    fn on_array(&mut self, inner: &TokenData<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {}
+    fn on_after_array(&mut self, inner: &TokenData<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {}
 
-    fn on_before_list(&mut self, inner: &TypeList<'src>, errors: &mut Vec<XenoError<'src>>) {}
-    fn on_after_list(&mut self, inner: &TypeList<'src>, errors: &mut Vec<XenoError<'src>>) {}
+    fn on_before_list(
+        &mut self,
+        inner: &[SimpleType<'src>],
+        errors: &mut Vec<XenoDiagnostic<'src>>,
+    ) {
+    }
+    fn on_after_list(
+        &mut self,
+        inner: &[SimpleType<'src>],
+        errors: &mut Vec<XenoDiagnostic<'src>>,
+    ) {
+    }
 
-    fn on_before_set(&mut self, inner: &TypeList<'src>, errors: &mut Vec<XenoError<'src>>) {}
-    fn on_after_set(&mut self, inner: &TypeList<'src>, errors: &mut Vec<XenoError<'src>>) {}
+    fn on_before_set(
+        &mut self,
+        inner: &[SimpleType<'src>],
+        errors: &mut Vec<XenoDiagnostic<'src>>,
+    ) {
+    }
+    fn on_after_set(&mut self, inner: &[SimpleType<'src>], errors: &mut Vec<XenoDiagnostic<'src>>) {
+    }
+
+    fn on_simple_type(&mut self, ty: &SimpleType<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {}
 
     fn on_before_annotation(
         &mut self,
         name: &TokenData<'src>,
-        args: &TypeList<'src>,
-        errors: &mut Vec<XenoError<'src>>,
+        args: &[Expr<'src>],
+        errors: &mut Vec<XenoDiagnostic<'src>>,
     ) {
     }
     fn on_after_annotation(
         &mut self,
         name: &TokenData<'src>,
-        args: &TypeList<'src>,
-        errors: &mut Vec<XenoError<'src>>,
+        args: &[Expr<'src>],
+        errors: &mut Vec<XenoDiagnostic<'src>>,
     ) {
     }
 }
-
-/// A factory function that creates a fresh listener instance for each analysis run.
-pub type ListenerFactory = fn() -> Box<dyn for<'a> AnalyzerListener<'a>>;
 
 /// Stateless analyzer that holds registered listener factories.
 /// Created once during registry construction, reused for every module analysis.
@@ -189,34 +279,80 @@ impl Analyzer {
         cache: &HashMap<String, ModuleData>,
         plugins: &[&'static XenoPlugin<'static>],
         plugin_configs: &PluginConfigs,
-    ) -> Vec<XenoError<'src>> {
-        // ── Build ScopeInfo ──
+    ) -> Vec<XenoDiagnostic<'src>> {
+        // ── Pass 1: collect every type and trait before validation ──
         let mut builtin_types: HashSet<String> = HashSet::new();
         let mut known_annotations: HashSet<String> = HashSet::new();
+        let mut type_hierarchy = TypeHierarchy::default();
+        let mut annotations = HashMap::new();
 
         // Builtins
         for t in BUILTIN_TYPES {
             builtin_types.insert(t.name.to_string());
+            type_hierarchy.insert_semantic_type(t);
+        }
+        for xeno_trait in BUILTIN_TRAITS {
+            type_hierarchy.insert_trait(xeno_trait);
         }
         for a in BUILTIN_ANNOTATIONS {
             known_annotations.insert(a.name.to_string());
+            annotations.insert(a.name.to_string(), *a);
+            for parameter in a.params {
+                match parameter.constraint {
+                    crate::semantic::XenoConstraint::Type(required) => {
+                        type_hierarchy.insert_semantic_type(required)
+                    }
+                    crate::semantic::XenoConstraint::Trait(required) => {
+                        type_hierarchy.insert_trait(required)
+                    }
+                }
+            }
         }
 
         // Plugin-provided names
         for plugin in plugins {
             if let Some(provide) = plugin.provide_types {
-                for pc in provide() {
-                    builtin_types.insert(pc.label.to_string());
+                for semantic_type in provide() {
+                    builtin_types.insert(semantic_type.name.to_string());
+                    type_hierarchy.insert_semantic_type(semantic_type);
                 }
             }
             if let Some(provide) = plugin.provide_annotations {
-                for pc in provide() {
-                    known_annotations.insert(pc.label.to_string());
+                for annotation in provide() {
+                    known_annotations.insert(annotation.name.to_string());
+                    annotations.insert(annotation.name.to_string(), *annotation);
+                    for parameter in annotation.params {
+                        match parameter.constraint {
+                            crate::semantic::XenoConstraint::Type(required) => {
+                                type_hierarchy.insert_semantic_type(required)
+                            }
+                            crate::semantic::XenoConstraint::Trait(required) => {
+                                type_hierarchy.insert_trait(required)
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        // Own declarations
+        // Module declarations were indexed when each ModuleData was created.
+        // Qualified keys let the hierarchy retain every cached declaration,
+        // including duplicate simple names. Per-module import scopes resolve
+        // each declaration's own parent graph without exposing transitive or
+        // unrelated names through ScopeInfo::has_type.
+        let module_path_str = module_data.borrow_module_path().to_string();
+        type_hierarchy.set_current_module(module_path_str.clone());
+        for (module_path, module) in cache {
+            type_hierarchy.register_module(module_path.clone(), module.borrow_imports().to_vec());
+            for declaration in module.borrow_declarations().values() {
+                type_hierarchy.insert_declaration(
+                    module_path.clone(),
+                    declaration.name.clone(),
+                    declaration.semantic.clone(),
+                );
+            }
+        }
+
         let own_types: Vec<String> = module_data
             .borrow_declarations()
             .keys()
@@ -224,7 +360,6 @@ impl Analyzer {
             .collect();
 
         // Imported declarations grouped by module (skip self-imports)
-        let module_path_str = module_data.borrow_module_path().to_string();
         let mut imported_types: HashMap<String, Vec<String>> = HashMap::new();
         for import in imports {
             if import == &module_path_str {
@@ -247,12 +382,14 @@ impl Analyzer {
             imported_types,
             builtin_types,
             known_annotations,
+            type_hierarchy,
+            annotations,
         };
 
-        // ── Create listeners ──
+        // ── Pass 2: validate and generate with the completed hierarchy ──
         let mut listeners: Vec<Box<dyn AnalyzerListener<'src>>> = Vec::new();
         for f in &self.listener_factories {
-            let listener: Box<dyn AnalyzerListener<'src>> = f();
+            let listener: Box<dyn AnalyzerListener<'src>> = f(plugin_configs);
             listeners.push(listener);
         }
 
@@ -260,11 +397,6 @@ impl Analyzer {
         listeners.push(Box::new(NameValidator::new(&scope)));
         listeners.push(Box::new(AnnotationValidator::new(&scope)));
         listeners.push(Box::new(IfChainValidator::new()));
-
-        // Pass plugin configs to all listeners
-        for l in listeners.iter_mut() {
-            l.on_init(plugin_configs);
-        }
 
         // Notify listeners of module context + scope
         for l in listeners.iter_mut() {
@@ -279,7 +411,8 @@ impl Analyzer {
             if let Declaration::Import { path, location } = decl {
                 let import_path = path.join("/");
                 if import_path == scope.module_path {
-                    errors.push(XenoError {
+                    errors.push(XenoDiagnostic {
+                        severity: crate::XenoDiagSeverity::Err,
                         location: (*location).clone(),
                         message: format!("Module '{}' cannot import itself", import_path),
                     });
@@ -289,13 +422,23 @@ impl Analyzer {
 
         walk_ast(&mut listeners, ast, &mut errors);
 
-        // Notify listeners that the module is done
-        for l in listeners.iter_mut() {
-            l.on_after_module(&scope);
+        // Generators write their files when the module is finalized. Keep the
+        // log level presentational: warnings and infos do not block this step,
+        // but errors from any phase do.
+        if !self.generation_mode || can_generate(&errors) {
+            for l in listeners.iter_mut() {
+                l.on_after_module(&scope);
+            }
         }
 
         errors
     }
+}
+
+fn can_generate(diagnostics: &[XenoDiagnostic<'_>]) -> bool {
+    !diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == crate::XenoDiagSeverity::Err)
 }
 
 // ── Walk functions (free functions to avoid &mut self borrow issues) ─
@@ -305,7 +448,7 @@ type Listeners<'src> = [Box<dyn AnalyzerListener<'src>>];
 fn walk_ast<'src>(
     ls: &mut Listeners<'src>,
     ast: &[Declaration<'src>],
-    errors: &mut Vec<XenoError<'src>>,
+    errors: &mut Vec<XenoDiagnostic<'src>>,
 ) {
     for l in ls.iter_mut() {
         l.on_before_ast(ast, errors);
@@ -321,13 +464,13 @@ fn walk_ast<'src>(
 fn walk_decl<'src>(
     ls: &mut Listeners<'src>,
     decl: &Declaration<'src>,
-    errors: &mut Vec<XenoError<'src>>,
+    errors: &mut Vec<XenoDiagnostic<'src>>,
 ) {
     for l in ls.iter_mut() {
         l.on_before_decl(decl, errors);
     }
     match decl {
-        Declaration::TypeDecl { t, .. } => {
+        Declaration::Type { ty: t, .. } => {
             walk_type(ls, t, errors);
         }
         _ => {} // Declaration::Custom {
@@ -345,17 +488,18 @@ fn walk_decl<'src>(
 
 fn walk_type<'src>(
     ls: &mut Listeners<'src>,
-    exprs: &AnonymType<'src>,
-    errors: &mut Vec<XenoError<'src>>,
+    ty: &XenoType<'src>,
+    errors: &mut Vec<XenoDiagnostic<'src>>,
 ) {
     for l in ls.iter_mut() {
-        l.on_before_type(exprs, errors);
+        l.on_before_type(ty, errors);
     }
-    for expr in exprs {
-        walk_expr(ls, expr, errors);
+    walk_type_expr(ls, &ty.0, errors);
+    for annotation in &ty.1 {
+        walk_annotation(ls, annotation, errors);
     }
     for l in ls.iter_mut() {
-        l.on_after_type(exprs, errors);
+        l.on_after_type(ty, errors);
     }
 }
 
@@ -376,20 +520,56 @@ fn walk_type<'src>(
 //     }
 // }
 
-fn walk_expr<'src>(ls: &mut Listeners<'src>, expr: &Expr<'src>, errors: &mut Vec<XenoError<'src>>) {
+fn walk_expr<'src>(
+    ls: &mut Listeners<'src>,
+    expr: &Expr<'src>,
+    errors: &mut Vec<XenoDiagnostic<'src>>,
+) {
     for l in ls.iter_mut() {
         l.on_before_expr(expr, errors);
     }
     match expr {
-        Expr::Struct(fields) => {
+        Expr::Regex(_) => {}
+        Expr::Annotation(annotation) => walk_annotation(ls, annotation, errors),
+        Expr::Type(ty) => walk_type_expr(ls, ty, errors),
+    }
+    for l in ls.iter_mut() {
+        l.on_after_expr(expr, errors);
+    }
+}
+
+fn walk_annotation<'src>(
+    ls: &mut Listeners<'src>,
+    annotation: &Annotation<'src>,
+    errors: &mut Vec<XenoDiagnostic<'src>>,
+) {
+    for l in ls.iter_mut() {
+        l.on_before_annotation(annotation.ident, &annotation.params, errors);
+    }
+    for param in &annotation.params {
+        walk_expr(ls, param, errors);
+    }
+    for l in ls.iter_mut() {
+        l.on_after_annotation(annotation.ident, &annotation.params, errors);
+    }
+}
+
+fn walk_type_expr<'src>(
+    ls: &mut Listeners<'src>,
+    ty: &Type<'src>,
+    errors: &mut Vec<XenoDiagnostic<'src>>,
+) {
+    match ty {
+        Type::Simple(simple) => walk_simple_type(ls, simple, errors),
+        Type::Struct(fields) => {
             for l in ls.iter_mut() {
                 l.on_before_struct(fields, errors);
             }
-            for (key, value) in fields {
+            for (key, value, _) in fields {
                 for l in ls.iter_mut() {
                     l.on_before_field(key, value, errors);
                 }
-                walk_type(ls, value, errors);
+                walk_simple_type(ls, value, errors);
                 for l in ls.iter_mut() {
                     l.on_after_field(key, value, errors);
                 }
@@ -398,15 +578,15 @@ fn walk_expr<'src>(ls: &mut Listeners<'src>, expr: &Expr<'src>, errors: &mut Vec
                 l.on_after_struct(fields, errors);
             }
         }
-        Expr::Enum(variants) => {
+        Type::Enum(variants) => {
             for l in ls.iter_mut() {
                 l.on_before_enum(variants, errors);
             }
-            for (key, value) in variants {
+            for (key, value, _) in variants {
                 for l in ls.iter_mut() {
                     l.on_before_field(key, value, errors);
                 }
-                walk_type(ls, value, errors);
+                walk_simple_type(ls, value, errors);
                 for l in ls.iter_mut() {
                     l.on_after_field(key, value, errors);
                 }
@@ -415,55 +595,59 @@ fn walk_expr<'src>(ls: &mut Listeners<'src>, expr: &Expr<'src>, errors: &mut Vec
                 l.on_after_enum(variants, errors);
             }
         }
-        Expr::Array(ident) => {
-            for l in ls.iter_mut() {
-                l.on_array(ident, errors);
-            }
-        }
-        Expr::List(inner) => {
+        Type::Tuple(inner) => {
             for l in ls.iter_mut() {
                 l.on_before_list(inner, errors);
             }
-            for anon_type in inner {
-                walk_type(ls, anon_type, errors);
+            for simple in inner {
+                walk_simple_type(ls, simple, errors);
             }
             for l in ls.iter_mut() {
                 l.on_after_list(inner, errors);
             }
         }
-        Expr::Set(inner) => {
+        Type::Set(inner) => {
             for l in ls.iter_mut() {
                 l.on_before_set(inner, errors);
             }
-            for anon_type in inner {
-                walk_type(ls, anon_type, errors);
+            for simple in inner {
+                walk_simple_type(ls, simple, errors);
             }
             for l in ls.iter_mut() {
                 l.on_after_set(inner, errors);
             }
         }
-        Expr::Annotation(name, args) => {
-            for l in ls.iter_mut() {
-                l.on_before_annotation(name, args, errors);
-            }
-            for anon_type in args {
-                walk_type(ls, anon_type, errors);
-            }
-            for l in ls.iter_mut() {
-                l.on_after_annotation(name, args, errors);
+        Type::Sum(inner) | Type::Intersection(inner) => {
+            for simple in inner {
+                walk_simple_type(ls, simple, errors);
             }
         }
-        Expr::Not(inner) => {
-            walk_expr(ls, inner, errors);
-        }
-        Expr::BinaryExpr(_, pair) => {
-            walk_expr(ls, &pair.0, errors);
-            walk_expr(ls, &pair.1, errors);
-        }
-        Expr::Identifier(_) | Expr::Literal(_) | Expr::Regex(_) | Expr::FieldAccess(_) => {}
     }
+}
+
+fn walk_simple_type<'src>(
+    ls: &mut Listeners<'src>,
+    ty: &SimpleType<'src>,
+    errors: &mut Vec<XenoDiagnostic<'src>>,
+) {
     for l in ls.iter_mut() {
-        l.on_after_expr(expr, errors);
+        l.on_simple_type(ty, errors);
+    }
+    let arguments = match ty {
+        SimpleType::Identifier(_, arguments)
+        | SimpleType::OptionalIdentifier(_, arguments)
+        | SimpleType::Array(_, arguments)
+        | SimpleType::OptionalArray(_, arguments) => arguments,
+        SimpleType::Literal(_) | SimpleType::OptionalLiteral(_) => return,
+    };
+    for argument in arguments.as_deref().unwrap_or(&[]) {
+        walk_simple_type(ls, argument, errors);
+    }
+    if let SimpleType::Array(ident, _) | SimpleType::OptionalArray(ident, _) = ty {
+        for l in ls.iter_mut() {
+            l.on_array(ident, errors);
+            l.on_after_array(ident, errors);
+        }
     }
 }
 
@@ -474,6 +658,7 @@ pub struct XenoDefNode<'src> {
     pub name: &'src str,
     pub docs: Option<&'src str>,
     pub fields: Option<XenoDefTree<'src>>,
+    // TODO from-to
     /** Can contain any data, for plugin developers */
     pub meta: Option<Box<dyn std::any::Any>>,
 }
@@ -484,14 +669,12 @@ impl XenoDefNode<'_> {
 
         for declaration in ast {
             match declaration {
-                Declaration::TypeDecl { name, docs, t } => {
+                Declaration::Type { name, docs, .. } => {
                     let node = XenoDefNode {
                         name: name.v,
                         docs: *docs,
                         fields: None,
-                        meta: Some(Box::new(match t {
-                            _ => Some(true),
-                        })),
+                        meta: Some(Box::new(Some(true))),
                     };
                     def_tree.insert(name.v, node);
                 }
@@ -529,5 +712,109 @@ impl XenoDefNode<'_> {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        semantic::{TypeDeclarationInfo, HAS_LENGTH, NUMERIC},
+        XenoDiagSeverity,
+    };
+
+    fn diagnostic(severity: XenoDiagSeverity) -> XenoDiagnostic<'static> {
+        XenoDiagnostic {
+            location: TokenData::default(),
+            message: "diagnostic".to_string(),
+            severity,
+        }
+    }
+
+    #[test]
+    fn warnings_and_infos_allow_generation() {
+        let diagnostics = [
+            diagnostic(XenoDiagSeverity::Warn),
+            diagnostic(XenoDiagSeverity::Info),
+        ];
+
+        assert!(can_generate(&diagnostics));
+    }
+
+    #[test]
+    fn errors_block_generation() {
+        assert!(!can_generate(&[diagnostic(XenoDiagSeverity::Err)]));
+    }
+
+    fn scope_with_declarations(
+        type_declarations: HashMap<String, TypeDeclarationInfo>,
+    ) -> ScopeInfo {
+        let own_types = type_declarations.keys().cloned().collect();
+        let mut type_hierarchy = TypeHierarchy::default();
+        type_hierarchy.set_current_module("test");
+        type_hierarchy.register_module("test", Vec::new());
+        for semantic_type in BUILTIN_TYPES {
+            type_hierarchy.insert_semantic_type(semantic_type);
+        }
+        for (name, declaration) in type_declarations {
+            type_hierarchy.insert_declaration("test", name, declaration);
+        }
+        ScopeInfo {
+            module_path: "test".to_string(),
+            abs_path: PathBuf::new(),
+            own_types,
+            imported_types: HashMap::new(),
+            builtin_types: BUILTIN_TYPES
+                .iter()
+                .map(|semantic_type| semantic_type.name.to_string())
+                .collect(),
+            known_annotations: HashSet::new(),
+            type_hierarchy,
+            annotations: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn user_types_inherit_traits_through_specialized_parent_chains() {
+        let generic = GenericParameterInfo {
+            name: "T".to_string(),
+            constraint: None,
+            constraint_scope: None,
+        };
+        let mut declarations = HashMap::new();
+        declarations.insert(
+            "Wrapped".to_string(),
+            TypeDeclarationInfo {
+                generic_params: vec![generic.clone()],
+                parents: vec![OwnedType::named("T")],
+                transparent_alias: true,
+            },
+        );
+        declarations.insert(
+            "Outer".to_string(),
+            TypeDeclarationInfo {
+                generic_params: vec![generic],
+                parents: vec![OwnedType::Named {
+                    name: "Wrapped".to_string(),
+                    arguments: vec![OwnedType::named("T")],
+                }],
+                transparent_alias: true,
+            },
+        );
+        let scope = scope_with_declarations(declarations);
+
+        let outer_string = OwnedType::Named {
+            name: "Outer".to_string(),
+            arguments: vec![OwnedType::named("string")],
+        };
+        let outer_integer = OwnedType::Named {
+            name: "Outer".to_string(),
+            arguments: vec![OwnedType::named("u8")],
+        };
+
+        assert!(scope.type_implements_trait(&outer_string, &HAS_LENGTH));
+        assert!(!scope.type_implements_trait(&outer_string, &NUMERIC));
+        assert!(scope.type_implements_trait(&outer_integer, &NUMERIC));
+        assert!(!scope.type_implements_trait(&outer_integer, &HAS_LENGTH));
     }
 }

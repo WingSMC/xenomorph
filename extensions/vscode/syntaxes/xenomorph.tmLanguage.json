@@ -2,20 +2,45 @@
     "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
     "name": "xenomorph",
     "patterns": [
-        { "include": "#comments" },
-        { "include": "#import-declarations" },
-        { "include": "#type-declarations" },
-        { "include": "#annotations" },
-        { "include": "#keywords" },
-        { "include": "#field-access" },
-        { "include": "#strings" },
-        { "include": "#numbers" },
-        { "include": "#regex" },
-        { "include": "#operators" },
-        { "include": "#object-definition" },
-        { "include": "#object-properties" },
-        { "include": "#type-references" },
-        { "include": "#punctuation" }
+        {
+            "include": "#comments"
+        },
+        {
+            "include": "#import-declarations"
+        },
+        {
+            "include": "#type-declarations"
+        },
+        {
+            "include": "#annotations"
+        },
+        {
+            "include": "#keywords"
+        },
+        {
+            "include": "#strings"
+        },
+        {
+            "include": "#numbers"
+        },
+        {
+            "include": "#regex"
+        },
+        {
+            "include": "#operators"
+        },
+        {
+            "include": "#object-definition"
+        },
+        {
+            "include": "#object-properties"
+        },
+        {
+            "include": "#type-references"
+        },
+        {
+            "include": "#punctuation"
+        }
     ],
     "repository": {
         "comments": {
@@ -40,8 +65,12 @@
         "keywords": {
             "patterns": [
                 {
-                    "name": "keyword.control.xenomorph",
-                    "match": "\\b(type|set|enum|validator|import)\\b"
+                    "name": "keyword.control.declaration.xenomorph",
+                    "match": "\\b(type|set|enum|validator)\\b"
+                },
+                {
+                    "name": "keyword.control.import.xenomorph",
+                    "match": "\\bimport\\b"
                 },
                 {
                     "name": "constant.language.boolean.xenomorph",
@@ -52,12 +81,13 @@
         "import-declarations": {
             "patterns": [
                 {
-                    "match": "\\b(import)\\s+([A-Za-z_][A-Za-z0-9_]*(?:/[A-Za-z_][A-Za-z0-9_]*)*)\\s*(;)",
+                    "match": "\\b(import)\\s+([A-Za-z_][A-Za-z0-9_]*(?:/[A-Za-z_][A-Za-z0-9_]*)*)",
                     "captures": {
-                        "1": { "name": "keyword.control.import.xenomorph" },
-                        "2": { "name": "entity.name.import.xenomorph" },
-                        "3": {
-                            "name": "punctuation.terminator.statement.xenomorph"
+                        "1": {
+                            "name": "keyword.control.import.xenomorph"
+                        },
+                        "2": {
+                            "name": "entity.name.namespace.xenomorph"
                         }
                     }
                 }
@@ -66,13 +96,14 @@
         "type-declarations": {
             "patterns": [
                 {
-                    "match": "\\b(type)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(=)",
+                    "match": "\\b(type)\\s+([A-Za-z_][A-Za-z0-9_]*)(?=\\s*(?:<|=))",
                     "captures": {
-                        "1": { "name": "keyword.control.xenomorph" },
+                        "1": {
+                            "name": "keyword.control.declaration.xenomorph"
+                        },
                         "2": {
                             "name": "entity.name.type.declaration.xenomorph"
-                        },
-                        "3": { "name": "keyword.operator.assignment.xenomorph" }
+                        }
                     }
                 }
             ]
@@ -80,49 +111,14 @@
         "annotations": {
             "patterns": [
                 {
-                    "begin": "@(if|elseif|else)\\s*(\\()?",
-                    "beginCaptures": {
-                        "1": {
-                            "name": "keyword.control.conditional.xenomorph"
-                        },
-                        "2": {
-                            "name": "punctuation.definition.parameters.begin.xenomorph"
-                        }
-                    },
-                    "end": "\\)?",
-                    "endCaptures": {
-                        "0": {
-                            "name": "punctuation.definition.parameters.end.xenomorph"
-                        }
-                    },
-                    "patterns": [{ "include": "#expressions" }]
-                },
-                {
-                    "begin": "@([A-Za-z_][A-Za-z0-9_]*)(\\()?",
-                    "beginCaptures": {
-                        "1": {
-                            "name": "entity.name.function.annotation.xenomorph"
-                        },
-                        "2": {
-                            "name": "punctuation.definition.parameters.begin.xenomorph"
-                        }
-                    },
-                    "end": "\\)?",
-                    "endCaptures": {
-                        "0": {
-                            "name": "punctuation.definition.parameters.end.xenomorph"
-                        }
-                    },
-                    "patterns": [{ "include": "#expressions" }]
-                }
-            ]
-        },
-        "field-access": {
-            "patterns": [
-                {
-                    "match": "\\$(\\w+)",
+                    "match": "(@)([A-Za-z_][A-Za-z0-9_]*)",
                     "captures": {
-                        "1": { "name": "variable.other.property.xenomorph" }
+                        "1": {
+                            "name": "keyword.operator.annotation.xenomorph"
+                        },
+                        "2": {
+                            "name": "entity.name.function.decorator.xenomorph"
+                        }
                     }
                 }
             ]
@@ -130,24 +126,20 @@
         "operators": {
             "patterns": [
                 {
-                    "name": "keyword.operator.arithmetic.xenomorph",
-                    "match": "\\+|\\-|\\*"
+                    "name": "keyword.operator.logical.xenomorph",
+                    "match": "\\bnot\\b|[&|!?]"
                 },
                 {
-                    "name": "keyword.operator.logical.xenomorph",
-                    "match": "&|\\||!|\\^|\\bnot\\b"
+                    "name": "keyword.operator.cast.xenomorph",
+                    "match": "\\bas\\b"
                 },
                 {
                     "name": "keyword.operator.comparison.xenomorph",
-                    "match": "=|!="
+                    "match": "!=|[=<>]"
                 },
                 {
-                    "name": "keyword.operator.range.xenomorph",
-                    "match": "<\\.<|\\.\\.|\\.<|<\\."
-                },
-                {
-                    "name": "keyword.operator.set.xenomorph",
-                    "match": "\\\\|<>"
+                    "name": "keyword.operator.arithmetic.xenomorph",
+                    "match": "-"
                 }
             ]
         },
@@ -165,12 +157,12 @@
         "numbers": {
             "patterns": [
                 {
-                    "name": "constant.numeric.integer.xenomorph",
-                    "match": "\\b[0-9]+\\b"
+                    "name": "constant.numeric.float.xenomorph",
+                    "match": "(?<![A-Za-z0-9_.])-?[0-9]+\\.[0-9]+\\b"
                 },
                 {
-                    "name": "constant.numeric.float.xenomorph",
-                    "match": "\\b[0-9]+\\.[0-9]+\\b"
+                    "name": "constant.numeric.integer.xenomorph",
+                    "match": "(?<![A-Za-z0-9_.])-?[0-9]+\\b"
                 }
             ]
         },
@@ -201,9 +193,15 @@
                         }
                     },
                     "patterns": [
-                        { "include": "#comments" },
-                        { "include": "#object-properties" },
-                        { "include": "#expressions" }
+                        {
+                            "include": "#comments"
+                        },
+                        {
+                            "include": "#object-properties"
+                        },
+                        {
+                            "include": "#expressions"
+                        }
                     ]
                 }
             ]
@@ -213,7 +211,9 @@
                 {
                     "match": "([A-Za-z_][A-Za-z0-9_]*)\\s*(:)",
                     "captures": {
-                        "1": { "name": "variable.object.property.xenomorph" },
+                        "1": {
+                            "name": "variable.other.property.xenomorph"
+                        },
                         "2": {
                             "name": "punctuation.separator.key-value.xenomorph"
                         }
@@ -224,12 +224,12 @@
         "type-references": {
             "patterns": [
                 {
-                    "match": "\\b([A-Z][A-Za-z0-9_]*)\\b",
-                    "name": "support.type.xenomorph"
-                },
-                {
                     "match": "\\b(TYPE|any|bool|number|integer|i4|i8|i16|i32|i64|i128|u4|u8|u16|u32|u64|u128|f32|f64|bigint|decimal|date|datetime|duration|string|char|uuid|regex|ip|ipv4|ipv6|hostname|email|url|binary|json|xml|yaml|toml|csv|tsv|semver|dict)\\b",
                     "name": "support.type.primitive.xenomorph"
+                },
+                {
+                    "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b",
+                    "name": "support.type.xenomorph"
                 }
             ]
         },
@@ -248,23 +248,49 @@
                             "name": "punctuation.definition.array.end.xenomorph"
                         }
                     },
-                    "patterns": [{ "include": "#expressions" }]
+                    "patterns": [
+                        {
+                            "include": "#expressions"
+                        }
+                    ]
                 }
             ]
         },
         "expressions": {
             "patterns": [
-                { "include": "#comments" },
-                { "include": "#strings" },
-                { "include": "#numbers" },
-                { "include": "#keywords" },
-                { "include": "#annotations" },
-                { "include": "#field-access" },
-                { "include": "#operators" },
-                { "include": "#regex" },
-                { "include": "#object-definition" },
-                { "include": "#array-notation" },
-                { "include": "#type-references" }
+                {
+                    "include": "#comments"
+                },
+                {
+                    "include": "#strings"
+                },
+                {
+                    "include": "#numbers"
+                },
+                {
+                    "include": "#keywords"
+                },
+                {
+                    "include": "#annotations"
+                },
+                {
+                    "include": "#operators"
+                },
+                {
+                    "include": "#regex"
+                },
+                {
+                    "include": "#object-definition"
+                },
+                {
+                    "include": "#array-notation"
+                },
+                {
+                    "include": "#type-references"
+                },
+                {
+                    "include": "#punctuation"
+                }
             ]
         },
         "punctuation": {
@@ -274,8 +300,24 @@
                     "match": ";"
                 },
                 {
-                    "name": "punctuation.separator.parameter.xenomorph",
+                    "name": "punctuation.separator.delimiter.xenomorph",
                     "match": ","
+                },
+                {
+                    "name": "punctuation.section.group.begin.xenomorph",
+                    "match": "\\("
+                },
+                {
+                    "name": "punctuation.section.group.end.xenomorph",
+                    "match": "\\)"
+                },
+                {
+                    "name": "punctuation.definition.generic.begin.xenomorph",
+                    "match": "<"
+                },
+                {
+                    "name": "punctuation.definition.generic.end.xenomorph",
+                    "match": ">"
                 }
             ]
         }

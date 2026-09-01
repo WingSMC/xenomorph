@@ -1,16 +1,16 @@
-use crate::{config::Config, semantic::AnalyzerListener};
+use crate::{
+    config::{Config, PluginConfigs},
+    semantic::{AnalyzerListener, XenoAnnotation, XenoType},
+};
 use libloading::{Library, Symbol};
 use std::{
     path::{Path, PathBuf},
     sync::OnceLock,
 };
 
-#[derive(Debug, Clone)]
-pub struct PluginCompletion {
-    pub label: &'static str,
-    pub detail: Option<&'static str>,
-    pub documentation: Option<&'static str>,
-}
+/// A factory function that creates a fresh listener instance for each analysis run.
+pub type ListenerFactory =
+    fn(plugin_configs: &PluginConfigs) -> Box<dyn for<'a> AnalyzerListener<'a>>;
 
 #[derive(Debug)]
 pub struct XenoPlugin<'a> {
@@ -18,13 +18,13 @@ pub struct XenoPlugin<'a> {
     pub version: &'a str,
 
     pub initialize: Option<fn() -> ()>,
-    pub provide_types: Option<fn() -> &'static [PluginCompletion]>,
-    pub provide_annotations: Option<fn() -> &'static [PluginCompletion]>,
+    pub provide_types: Option<fn() -> &'static [&'static XenoType]>,
+    pub provide_annotations: Option<fn() -> &'static [&'static XenoAnnotation]>,
     /// Returns a JSON Schema (as a string) describing this plugin's
     /// `[plugins.<name>]` configuration section in `xenomorph.toml`.
     pub provide_config_schema: Option<fn() -> &'static str>,
-    pub register_generator: Option<fn() -> Box<dyn for<'b> AnalyzerListener<'b>>>,
-    pub register_analyzer: Option<fn() -> Box<dyn for<'b> AnalyzerListener<'b>>>,
+    pub register_generator: Option<ListenerFactory>,
+    pub register_analyzer: Option<ListenerFactory>,
     // execute: fn(&[&str]),
     // cleanup: fn(),
 
@@ -52,7 +52,7 @@ macro_rules! lib_filename {
 pub static PLUGINS: OnceLock<Vec<&'static XenoPlugin<'static>>> = OnceLock::new();
 impl<'a> XenoPlugin<'a> {
     pub fn get_plugins() -> &'static Vec<&'static XenoPlugin<'static>> {
-        PLUGINS.get_or_init(|| Self::load_plugins())
+        PLUGINS.get_or_init(Self::load_plugins)
     }
 
     fn plugins_directory() -> PathBuf {
@@ -99,7 +99,7 @@ impl<'a> XenoPlugin<'a> {
                 let lib_path = plugins_dir.join(lib_filename!(&plugin_name));
 
                 Self::load_plugin_library(&lib_path)
-                    .and_then(|lib| Self::create_plugin_instance(lib, &plugin_name))
+                    .and_then(|lib| Self::create_plugin_instance(lib, plugin_name))
                     .map_err(|e| Self::log_loading_error(plugin_name, &e))
                     .ok()
             })

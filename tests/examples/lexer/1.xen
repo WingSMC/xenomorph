@@ -1,15 +1,13 @@
-type Color = [
-	"red",
-	"green",
-	"blue",
+type Colors = [
+    "red",
+    "green",
+    "blue",
 ];
 
-type User = {
-	name: string,
-	age: number,
-	favoriteColor: Color,
-} @Entity @Schema;
-
-type Admin = User + {
-	actions: [Date, Action][] @minlen(1) @maxlen(10),
+type Color = { r: u8, g: u8, b: u8 };
+type BrightChannel = u8 @min(125) @max(255);
+type BrightColor = {
+    r: BrightChannel,
+    g: BrightChannel,
+    b: BrightChannel,
 };

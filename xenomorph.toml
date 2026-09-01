@@ -1,11 +1,23 @@
-#:schema .xenomorph/xenomorph.schema.json
+#:schema ./.xenomorph/xenomorph.schema.json
 
 [parser]
 entry = "./tests/examples/test"
 
+[formatter]
+indent_kind = "space"
+indent_width = 4
+max_line_length = 100
+line_ending = "lf"
+
+[debug]
+loglevel = "info"
+# tokens = true
+# ast = true
+# plugins = true
+
 [plugins]
 path = "./target/release/"
-plugins = ["xenomorph_typescript", "xenomorph_json_schema", "xenomorph_java"]
+plugins = ["xenomorph_json_schema", "xenomorph_java", "xenomorph_typescript"]
 
 [plugins.typescript]
 output = "./tests/out/typescript/"

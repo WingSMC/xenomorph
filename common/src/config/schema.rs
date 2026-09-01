@@ -83,10 +83,41 @@ pub fn build_rc_schema(plugins: &[&'static XenoPlugin<'static>]) -> Value {
                 },
                 "additionalProperties": false
             },
+            "formatter": {
+                "type": "object",
+                "description": "Source formatter layout configuration.",
+                "properties": {
+                    "indent_kind": {
+                        "type": "string",
+                        "description": "Indent with spaces or tab characters.",
+                        "enum": ["space", "tab"],
+                        "default": "space"
+                    },
+                    "indent_width": {
+                        "type": "integer",
+                        "description": "Visual width of one indentation level.",
+                        "minimum": 1,
+                        "default": 4
+                    },
+                    "max_line_length": {
+                        "type": "integer",
+                        "description": "Preferred maximum formatted line length before declarations are wrapped.",
+                        "minimum": 1,
+                        "default": 100
+                    },
+                    "line_ending": {
+                        "type": "string",
+                        "description": "Line ending emitted by the formatter. Auto preserves the first line ending found in the source.",
+                        "enum": ["lf", "crlf", "auto"],
+                        "default": "lf"
+                    }
+                },
+                "additionalProperties": false
+            },
             "plugins": plugins_section,
             "debug": {
                 "type": "object",
-                "description": "Debug output toggles.",
+                "description": "Debug output and CLI diagnostic logging configuration.",
                 "properties": {
                     "plugins": {
                         "type": "boolean",
@@ -102,6 +133,12 @@ pub fn build_rc_schema(plugins: &[&'static XenoPlugin<'static>]) -> Value {
                         "type": "boolean",
                         "description": "Print the parsed AST for each module.",
                         "default": false
+                    },
+                    "loglevel": {
+                        "type": "string",
+                        "description": "Minimum diagnostic severity displayed by the xeno CLI.",
+                        "enum": ["error", "warning", "info"],
+                        "default": "info"
                     }
                 },
                 "additionalProperties": false
@@ -127,4 +164,39 @@ pub fn write_rc_schema(
     let schema = build_rc_schema(plugins);
     let contents = serde_json::to_string_pretty(&schema).unwrap_or_else(|_| "{}".to_string());
     fs::write(out_path, contents)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_rc_schema;
+    use serde_json::json;
+
+    #[test]
+    fn formatter_schema_describes_layout_options() {
+        let schema = build_rc_schema(&[]);
+        let formatter = schema
+            .pointer("/properties/formatter")
+            .expect("formatter section should be present");
+
+        assert_eq!(formatter["additionalProperties"], false);
+        assert_eq!(formatter["properties"]["indent_kind"]["default"], "space");
+        assert_eq!(formatter["properties"]["indent_width"]["default"], 4);
+        assert_eq!(formatter["properties"]["max_line_length"]["default"], 100);
+        assert_eq!(
+            formatter["properties"]["line_ending"]["enum"],
+            json!(["lf", "crlf", "auto"])
+        );
+    }
+
+    #[test]
+    fn debug_schema_describes_loglevel() {
+        let schema = build_rc_schema(&[]);
+        let loglevel = schema
+            .pointer("/properties/debug/properties/loglevel")
+            .expect("debug.loglevel should be present");
+
+        assert_eq!(loglevel["type"], "string");
+        assert_eq!(loglevel["enum"], json!(["error", "warning", "info"]));
+        assert_eq!(loglevel["default"], "info");
+    }
 }

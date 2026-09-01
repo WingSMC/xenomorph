@@ -1,24 +1,18 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::{
-    parser::{AnonymType, BinaryExpr, Declaration, Expr, Literal, NumberType, TypeList},
+    parser::{Declaration, Expr, Literal, SimpleType, Type, XenoType as AstType},
     semantic::{
-        is_type_compatible, AnalyzerListener, ScopeInfo, XenoAnnotation, XenoParameterType,
-        XenoType, BUILTIN_ANNOTATIONS, BUILTIN_TYPES,
+        simple_to_owned_type, AnalyzerListener, OwnedType, ScopeInfo, XenoAnnotation,
+        XenoConstraint, XenoTrait, XenoTraitKind,
     },
-    TokenData, XenoError,
+    TokenData, XenoDiagnostic,
 };
-
-#[derive(Clone)]
-enum TypeHint {
-    Builtin(&'static XenoType),
-    Alias(String),
-}
 
 pub struct AnnotationValidator {
     scope: ScopeInfo,
-    type_aliases: HashMap<String, Vec<TypeHint>>,
-    type_stack: Vec<Vec<&'static XenoType>>,
+    type_stack: Vec<Vec<OwnedType>>,
+    generic_params: HashMap<String, Option<String>>,
     annotation_depth: usize,
 }
 
@@ -26,154 +20,96 @@ impl AnnotationValidator {
     pub fn new(scope: &ScopeInfo) -> Self {
         Self {
             scope: scope.clone(),
-            type_aliases: HashMap::new(),
             type_stack: Vec::new(),
+            generic_params: HashMap::new(),
             annotation_depth: 0,
         }
     }
 
-    fn find_annotation(&self, name: &str) -> Option<&'static XenoAnnotation> {
-        BUILTIN_ANNOTATIONS
-            .iter()
-            .copied()
-            .find(|annotation| annotation.name == name)
-    }
-
-    fn find_builtin_type(&self, name: &str) -> Option<&'static XenoType> {
-        BUILTIN_TYPES
-            .iter()
-            .copied()
-            .find(|builtin_type| builtin_type.name == name)
-    }
-
-    fn current_types(&self) -> &[&'static XenoType] {
+    fn current_types(&self) -> &[OwnedType] {
         self.type_stack.last().map_or(&[], Vec::as_slice)
     }
 
-    fn resolve_types(&self, exprs: &AnonymType<'_>) -> Vec<&'static XenoType> {
+    fn resolve_types(&self, ty: &AstType<'_>) -> Vec<OwnedType> {
         let mut types = Vec::new();
-        let mut visited_aliases = HashSet::new();
-        for expr in exprs {
-            self.collect_types(expr, &mut types, &mut visited_aliases);
-        }
+        self.collect_types(&ty.0, &mut types);
         types
     }
 
-    fn collect_types(
-        &self,
-        expr: &Expr<'_>,
-        types: &mut Vec<&'static XenoType>,
-        visited_aliases: &mut HashSet<String>,
-    ) {
-        match expr {
-            Expr::Identifier(identifier) => {
-                if let Some(builtin_type) = self.find_builtin_type(identifier.v) {
-                    types.push(builtin_type);
-                } else {
-                    self.collect_alias_types(identifier.v, types, visited_aliases);
+    fn collect_types(&self, ty: &Type<'_>, types: &mut Vec<OwnedType>) {
+        match ty {
+            Type::Simple(simple) => self.collect_simple_types(simple, types),
+            Type::Sum(items) | Type::Intersection(items) => {
+                for item in items {
+                    self.collect_simple_types(item, types);
                 }
             }
-            Expr::BinaryExpr(_, pair) => {
-                self.collect_binary_types(pair, types, visited_aliases);
+            Type::Tuple(_) | Type::Set(_) => types.push(OwnedType::named("array")),
+            Type::Struct(_) => types.push(OwnedType::named("dict")),
+            Type::Enum(_) => types.push(OwnedType::named("any")),
+        }
+    }
+
+    fn collect_simple_types(&self, simple: &SimpleType<'_>, types: &mut Vec<OwnedType>) {
+        match simple {
+            SimpleType::Identifier(_, _) | SimpleType::OptionalIdentifier(_, _) => {
+                types.push(self.resolve_generic_references(simple_to_owned_type(simple)));
             }
-            Expr::Not(inner) => self.collect_types(inner, types, visited_aliases),
-            Expr::Literal(literal) => self.collect_literal_type(literal, types),
-            Expr::Regex(_) => self.collect_builtin_type("regex", types),
-            Expr::List(_) => self.collect_builtin_type("any", types),
-            Expr::Set(_) => self.collect_builtin_type("any", types),
-            Expr::Struct(_) => self.collect_builtin_type("dict", types),
-            Expr::Annotation(_, _) | Expr::FieldAccess(_) | Expr::Enum(_) => {}
-            Expr::Array(_) => {} // TODO handle array types when they are supported in type hints
+            SimpleType::Array(_, _) | SimpleType::OptionalArray(_, _) => {
+                types.push(self.resolve_generic_references(simple_to_owned_type(simple)));
+            }
+            SimpleType::Literal(literal) | SimpleType::OptionalLiteral(literal) => {
+                Self::collect_literal_type(literal, types)
+            }
         }
     }
 
-    fn collect_binary_types(
-        &self,
-        pair: &BinaryExpr<'_>,
-        types: &mut Vec<&'static XenoType>,
-        visited_aliases: &mut HashSet<String>,
-    ) {
-        self.collect_types(&pair.0, types, visited_aliases);
-        self.collect_types(&pair.1, types, visited_aliases);
-    }
-
-    fn collect_alias_types(
-        &self,
-        alias: &str,
-        types: &mut Vec<&'static XenoType>,
-        visited_aliases: &mut HashSet<String>,
-    ) {
-        if !visited_aliases.insert(alias.to_string()) {
-            return;
-        }
-
-        if let Some(hints) = self.type_aliases.get(alias) {
-            for hint in hints {
-                match hint {
-                    TypeHint::Builtin(builtin_type) => types.push(builtin_type),
-                    TypeHint::Alias(next_alias) => {
-                        self.collect_alias_types(next_alias, types, visited_aliases)
+    fn resolve_generic_references(&self, candidate: OwnedType) -> OwnedType {
+        match candidate {
+            OwnedType::Named { name, arguments } if arguments.is_empty() => {
+                if let Some(constraint) = self.generic_params.get(&name) {
+                    OwnedType::Generic {
+                        name,
+                        constraint: constraint.clone(),
+                        constraint_scope: Some(self.scope.module_path.clone()),
                     }
-                }
-            }
-        }
-
-        visited_aliases.remove(alias);
-    }
-
-    fn collect_literal_type(&self, literal: &Literal<'_>, types: &mut Vec<&'static XenoType>) {
-        match literal {
-            Literal::Number(_) => self.collect_builtin_type("number", types),
-            Literal::String(_, _) => self.collect_builtin_type("string", types),
-            Literal::Boolean(_, _) => self.collect_builtin_type("bool", types),
-        }
-    }
-
-    fn collect_builtin_type(&self, name: &str, types: &mut Vec<&'static XenoType>) {
-        if let Some(builtin_type) = self.find_builtin_type(name) {
-            types.push(builtin_type);
-        }
-    }
-
-    fn collect_type_hints(&self, exprs: &AnonymType<'_>) -> Vec<TypeHint> {
-        let mut hints = Vec::new();
-        for expr in exprs {
-            self.collect_type_hint(expr, &mut hints);
-        }
-        hints
-    }
-
-    fn collect_type_hint(&self, expr: &Expr<'_>, hints: &mut Vec<TypeHint>) {
-        match expr {
-            Expr::Identifier(identifier) => {
-                if let Some(builtin_type) = self.find_builtin_type(identifier.v) {
-                    hints.push(TypeHint::Builtin(builtin_type));
                 } else {
-                    hints.push(TypeHint::Alias(identifier.v.to_string()));
+                    OwnedType::named(name)
                 }
             }
-            Expr::Literal(literal) => match literal {
-                Literal::Number(_) => self.push_builtin_hint("number", hints),
-                Literal::String(_, _) => self.push_builtin_hint("string", hints),
-                Literal::Boolean(_, _) => self.push_builtin_hint("bool", hints),
+            OwnedType::Named { name, arguments } => OwnedType::Named {
+                name,
+                arguments: arguments
+                    .into_iter()
+                    .map(|argument| self.resolve_generic_references(argument))
+                    .collect(),
             },
-            Expr::Regex(_) => self.push_builtin_hint("regex", hints),
-            Expr::BinaryExpr(_, pair) => {
-                self.collect_type_hint(&pair.0, hints);
-                self.collect_type_hint(&pair.1, hints);
+            OwnedType::Qualified {
+                module_path,
+                name,
+                arguments,
+            } => OwnedType::Qualified {
+                module_path,
+                name,
+                arguments: arguments
+                    .into_iter()
+                    .map(|argument| self.resolve_generic_references(argument))
+                    .collect(),
+            },
+            OwnedType::Array(inner) => {
+                OwnedType::Array(Box::new(self.resolve_generic_references(*inner)))
             }
-            Expr::Not(inner) => self.collect_type_hint(inner, hints),
-            Expr::List(_) | Expr::Set(_) => self.push_builtin_hint("any", hints),
-            Expr::Struct(_) => self.push_builtin_hint("dict", hints),
-            Expr::Annotation(_, _) | Expr::FieldAccess(_) | Expr::Enum(_) => {}
-
-            Expr::Array(_) => {} // TODO handle array types when they are supported in type hints
+            OwnedType::Generic { .. } => candidate,
         }
     }
 
-    fn push_builtin_hint(&self, name: &str, hints: &mut Vec<TypeHint>) {
-        if let Some(builtin_type) = self.find_builtin_type(name) {
-            hints.push(TypeHint::Builtin(builtin_type));
+    fn collect_literal_type(literal: &Literal<'_>, types: &mut Vec<OwnedType>) {
+        match literal {
+            Literal::Int(_) | Literal::Float(_) => {
+                types.push(OwnedType::named(literal.semantic_type_name()))
+            }
+            Literal::String(_, _) => types.push(OwnedType::named("string")),
+            Literal::Boolean(_, _) => types.push(OwnedType::named("bool")),
         }
     }
 
@@ -181,31 +117,28 @@ impl AnnotationValidator {
         &self,
         annotation: &XenoAnnotation,
         name: &TokenData<'src>,
-        errors: &mut Vec<XenoError<'src>>,
+        errors: &mut Vec<XenoDiagnostic<'src>>,
     ) {
         if self.annotation_depth > 0 {
             return;
         }
 
-        let Some(applicable_to) = annotation.applicable_to else {
+        let Some(target) = annotation.target_parameter() else {
             return;
         };
 
         for candidate in self.current_types() {
-            let compatible = applicable_to.iter().any(|target| {
-                let mut visited = HashSet::new();
-                is_type_compatible(candidate, target, &mut visited)
-            });
-
-            if !compatible {
-                errors.push(XenoError {
+            if !self.type_matches_constraint(candidate, target.constraint) {
+                errors.push(XenoDiagnostic {
                     location: (*name).clone(),
                     message: format!(
-                        "Annotation '@{}' is not applicable to type '{}'. Expected one of: {}.",
+                        "Annotation '@{}' is not applicable to type '{}'. Required {}(s): {}.",
                         annotation.name,
-                        candidate.name,
-                        Self::format_types(applicable_to)
+                        candidate.display_name(),
+                        Self::constraint_kind(target.constraint),
+                        target.constraint.name()
                     ),
+                    severity: crate::XenoDiagSeverity::Err,
                 });
             }
         }
@@ -215,32 +148,43 @@ impl AnnotationValidator {
         &self,
         annotation: &XenoAnnotation,
         name: &TokenData<'src>,
-        args: &TypeList<'src>,
-        errors: &mut Vec<XenoError<'src>>,
+        args: &[Expr<'src>],
+        errors: &mut Vec<XenoDiagnostic<'src>>,
     ) {
-        let expected_params = annotation.params.unwrap_or(&[]);
-        if args.len() != expected_params.len() {
-            errors.push(XenoError {
+        let expected_params = annotation.explicit_parameters();
+        let invalid_count = if annotation.variadic {
+            args.len() < expected_params.len()
+        } else {
+            args.len() != expected_params.len()
+        };
+        if invalid_count {
+            errors.push(XenoDiagnostic {
+                severity: crate::XenoDiagSeverity::Err,
                 location: (*name).clone(),
                 message: format!(
-                    "Annotation '@{}' expects {} argument(s), got {}.",
+                    "Annotation '@{}' expects {}{} argument(s), got {}.",
                     annotation.name,
                     expected_params.len(),
+                    if annotation.variadic { " or more" } else { "" },
                     args.len()
                 ),
             });
             return;
         }
 
-        for (arg, param) in args.iter().zip(expected_params.iter()) {
-            if !self.arg_matches(arg, param.param_type) {
-                errors.push(XenoError {
-                    location: Self::arg_location(arg).unwrap_or_else(|| (*name).clone()),
+        for (index, arg) in args.iter().enumerate() {
+            let Some(param) = annotation.parameter_at(index) else {
+                continue;
+            };
+            if !self.arg_matches_constraint(arg, param.constraint) {
+                errors.push(XenoDiagnostic {
+                    severity: crate::XenoDiagSeverity::Err,
+                    location: Self::expr_location(arg),
                     message: format!(
                         "Annotation '@{}' argument '{}' expects {}, got {}.",
                         annotation.name,
                         param.name,
-                        Self::param_type_name(param.param_type),
+                        param.constraint.name(),
                         Self::arg_type_name(arg)
                     ),
                 });
@@ -248,161 +192,175 @@ impl AnnotationValidator {
         }
     }
 
-    fn arg_matches(&self, arg: &AnonymType<'_>, expected: XenoParameterType) -> bool {
-        match expected {
-            XenoParameterType::None => arg.is_empty(),
-            XenoParameterType::Expression => !arg.is_empty(),
-            XenoParameterType::Identifier => {
-                matches!(arg.as_slice(), [Expr::Identifier(_)])
+    fn type_matches_constraint(&self, candidate: &OwnedType, required: XenoConstraint) -> bool {
+        match required {
+            XenoConstraint::Type(required) => {
+                self.scope.descends_from_static_type(candidate, required)
             }
-            XenoParameterType::Type => match arg.as_slice() {
-                [Expr::Identifier(identifier)] => self.scope.has_type(identifier.v),
-                _ => false,
-            },
-            XenoParameterType::Annotation => {
-                matches!(arg.as_slice(), [Expr::Annotation(_, _)])
+            XenoConstraint::Trait(required) => {
+                self.scope.type_implements_trait(candidate, required)
             }
-            XenoParameterType::FieldReference => {
-                matches!(arg.as_slice(), [Expr::FieldAccess(_)])
-            }
-            XenoParameterType::NumberLiteral => matches!(
-                arg.as_slice(),
-                [Expr::Literal(Literal::Number(
-                    NumberType::Int(_, _) | NumberType::Float(_, _)
-                ))]
-            ),
-            XenoParameterType::IntegerLiteral => {
-                matches!(
-                    arg.as_slice(),
-                    [Expr::Literal(Literal::Number(NumberType::Int(_, _)))]
-                )
-            }
-            XenoParameterType::StringLiteral => {
-                matches!(arg.as_slice(), [Expr::Literal(Literal::String(_, _))])
-            }
-            XenoParameterType::BoolLiteral => {
-                matches!(arg.as_slice(), [Expr::Literal(Literal::Boolean(_, _))])
-            }
-            XenoParameterType::AnyLiteral => {
-                matches!(arg.as_slice(), [Expr::Literal(_) | Expr::Regex(_)])
-            }
-            XenoParameterType::List(item_types) => match arg.as_slice() {
-                [Expr::List(items)] => {
-                    items.len() == item_types.len()
-                        && items
-                            .iter()
-                            .zip(item_types.iter())
-                            .all(|(item, item_type)| self.arg_matches(item, *item_type))
-                }
-                _ => false,
-            },
         }
     }
 
-    fn arg_location<'src>(arg: &AnonymType<'src>) -> Option<TokenData<'src>> {
-        arg.first().map(Self::expr_location)
+    fn arg_matches_constraint(&self, arg: &Expr<'_>, required: XenoConstraint) -> bool {
+        match required {
+            XenoConstraint::Type(required) => match arg {
+                Expr::Type(Type::Simple(simple)) => self
+                    .scope
+                    .descends_from_static_type(&simple_to_owned_type(simple), required),
+                _ => false,
+            },
+            XenoConstraint::Trait(required) => self.arg_matches_trait(arg, required),
+        }
+    }
+
+    fn constraint_kind(constraint: XenoConstraint) -> &'static str {
+        match constraint {
+            XenoConstraint::Type(_) => "type",
+            XenoConstraint::Trait(_) => "trait",
+        }
+    }
+
+    fn arg_matches_trait(&self, arg: &Expr<'_>, required: &XenoTrait) -> bool {
+        match required.kind {
+            XenoTraitKind::Expression => true,
+            XenoTraitKind::Literal => matches!(
+                arg,
+                Expr::Regex(_) | Expr::Type(Type::Simple(SimpleType::Literal(_)))
+            ),
+            XenoTraitKind::LiteralType => match arg {
+                Expr::Type(Type::Simple(SimpleType::Literal(literal))) => {
+                    let candidate = match literal {
+                        Literal::Int(_) | Literal::Float(_) => {
+                            OwnedType::named(literal.semantic_type_name())
+                        }
+                        Literal::String(_, _) => OwnedType::named("string"),
+                        Literal::Boolean(_, _) => OwnedType::named("bool"),
+                    };
+                    self.scope.type_implements_trait(&candidate, required)
+                }
+                _ => false,
+            },
+            XenoTraitKind::RegexLiteral => matches!(arg, Expr::Regex(_)),
+            XenoTraitKind::Identifier => {
+                matches!(arg, Expr::Type(Type::Simple(SimpleType::Identifier(_, _))))
+            }
+            XenoTraitKind::Type => match arg {
+                Expr::Type(Type::Simple(SimpleType::Identifier(identifier, _))) => {
+                    self.scope.has_type(identifier.v)
+                }
+                _ => false,
+            },
+            XenoTraitKind::Annotation => matches!(arg, Expr::Annotation(_)),
+            XenoTraitKind::Semantic => match arg {
+                Expr::Type(Type::Simple(simple)) => self
+                    .scope
+                    .type_implements_trait(&simple_to_owned_type(simple), required),
+                _ => false,
+            },
+        }
     }
 
     fn expr_location<'src>(expr: &Expr<'src>) -> TokenData<'src> {
         match expr {
-            Expr::Identifier(token)
-            | Expr::Literal(
-                Literal::String(_, token)
-                | Literal::Boolean(_, token)
-                | Literal::Number(NumberType::Int(_, token) | NumberType::Float(_, token)),
-            )
-            | Expr::Regex(token)
-            | Expr::Annotation(token, _)
-            | Expr::Array(token)
-            | Expr::FieldAccess(token) => (*token).clone(),
+            Expr::Regex(token) => (*token).clone(),
+            Expr::Annotation(annotation) => (*annotation.ident).clone(),
+            Expr::Type(ty) => Self::type_location(ty),
+        }
+    }
 
-            Expr::Not(inner) => Self::expr_location(inner),
-            Expr::BinaryExpr(_, pair) => Self::expr_location(&pair.0),
-
-            Expr::List(items) | Expr::Set(items) => items
+    fn type_location<'src>(ty: &Type<'src>) -> TokenData<'src> {
+        match ty {
+            Type::Simple(simple) => simple.get_last_token().clone(),
+            Type::Tuple(items)
+            | Type::Set(items)
+            | Type::Sum(items)
+            | Type::Intersection(items) => items
                 .first()
-                .and_then(Self::arg_location)
-                .unwrap_or(TokenData { v: "", l: 0, c: 0 }),
-            Expr::Struct(fields) | Expr::Enum(fields) => fields
+                .map(|item| item.get_last_token().clone())
+                .unwrap_or_default(),
+            Type::Struct(fields) | Type::Enum(fields) => fields
                 .first()
-                .map(|(key, _)| (*key).clone())
-                .unwrap_or(TokenData { v: "", l: 0, c: 0 }),
+                .map(|(key, _, _)| (*key).clone())
+                .unwrap_or_default(),
         }
     }
 
-    fn arg_type_name(arg: &AnonymType<'_>) -> &'static str {
-        match arg.as_slice() {
-            [] => "no argument",
-            [Expr::Literal(Literal::Number(NumberType::Int(_, _)))] => "integer literal",
-            [Expr::Literal(Literal::Number(NumberType::Float(_, _)))] => "number literal",
-            [Expr::Literal(Literal::String(_, _))] => "string literal",
-            [Expr::Literal(Literal::Boolean(_, _))] => "boolean literal",
-            [Expr::Regex(_)] => "regex literal",
-            [Expr::FieldAccess(_)] => "field reference",
-            [Expr::Identifier(_)] => "identifier",
-            [Expr::Annotation(_, _)] => "annotation",
-            [Expr::List(_)] => "list",
-            [Expr::Set(_)] => "set",
-            [Expr::Struct(_)] => "struct",
-            [Expr::Enum(_)] => "enum",
-            [Expr::Not(_)] | [Expr::BinaryExpr(_, _)] => "expression",
-            _ => "compound expression",
+    fn arg_type_name(arg: &Expr<'_>) -> &'static str {
+        match arg {
+            Expr::Regex(_) => "regex literal",
+            Expr::Annotation(_) => "annotation",
+            Expr::Type(Type::Simple(SimpleType::Literal(Literal::Int(_)))) => "integer literal",
+            Expr::Type(Type::Simple(SimpleType::Literal(Literal::Float(_)))) => "number literal",
+            Expr::Type(Type::Simple(SimpleType::Literal(Literal::String(_, _)))) => {
+                "string literal"
+            }
+            Expr::Type(Type::Simple(SimpleType::Literal(Literal::Boolean(_, _)))) => {
+                "boolean literal"
+            }
+            Expr::Type(Type::Simple(SimpleType::OptionalLiteral(_))) => "optional literal",
+            Expr::Type(Type::Simple(SimpleType::Identifier(_, _))) => "identifier",
+            Expr::Type(Type::Simple(SimpleType::OptionalIdentifier(_, _))) => "optional identifier",
+            Expr::Type(Type::Simple(SimpleType::Array(_, _) | SimpleType::OptionalArray(_, _))) => {
+                "array"
+            }
+            Expr::Type(Type::Tuple(_)) => "list",
+            Expr::Type(Type::Set(_)) => "set",
+            Expr::Type(Type::Struct(_)) => "struct",
+            Expr::Type(Type::Enum(_)) => "enum",
+            Expr::Type(Type::Sum(_) | Type::Intersection(_)) => "compound expression",
         }
-    }
-
-    fn param_type_name(param_type: XenoParameterType) -> &'static str {
-        match param_type {
-            XenoParameterType::None => "no argument",
-            XenoParameterType::NumberLiteral => "number literal",
-            XenoParameterType::IntegerLiteral => "integer literal",
-            XenoParameterType::StringLiteral => "string literal",
-            XenoParameterType::BoolLiteral => "boolean literal",
-            XenoParameterType::FieldReference => "field reference",
-            XenoParameterType::AnyLiteral => "literal",
-            XenoParameterType::Expression => "expression",
-            XenoParameterType::Identifier => "identifier",
-            XenoParameterType::Type => "type",
-            XenoParameterType::Annotation => "annotation",
-            XenoParameterType::List(_) => "list",
-        }
-    }
-
-    fn format_types(types: &[&XenoType]) -> String {
-        types
-            .iter()
-            .map(|xeno_type| xeno_type.name)
-            .collect::<Vec<_>>()
-            .join(", ")
     }
 }
 
 impl<'src> AnalyzerListener<'src> for AnnotationValidator {
-    fn on_before_ast(&mut self, ast: &[Declaration<'src>], _errors: &mut Vec<XenoError<'src>>) {
-        self.type_aliases.clear();
+    fn on_before_type(&mut self, ty: &AstType<'src>, _errors: &mut Vec<XenoDiagnostic<'src>>) {
+        self.type_stack.push(self.resolve_types(ty));
+    }
 
-        for declaration in ast {
-            if let Declaration::TypeDecl { name, t, .. } = declaration {
-                let hints = self.collect_type_hints(t);
-                self.type_aliases.insert(name.v.to_string(), hints);
-            }
+    fn on_before_decl(
+        &mut self,
+        declaration: &Declaration<'src>,
+        _errors: &mut Vec<XenoDiagnostic<'src>>,
+    ) {
+        self.generic_params.clear();
+        if let Declaration::Type { generics, .. } = declaration {
+            self.generic_params
+                .extend(
+                    generics
+                        .as_deref()
+                        .unwrap_or(&[])
+                        .iter()
+                        .map(|(name, constraint)| {
+                            (
+                                name.v.to_string(),
+                                constraint.map(|constraint| constraint.v.to_string()),
+                            )
+                        }),
+                );
         }
     }
 
-    fn on_before_type(&mut self, exprs: &AnonymType<'src>, _errors: &mut Vec<XenoError<'src>>) {
-        self.type_stack.push(self.resolve_types(exprs));
+    fn on_after_decl(
+        &mut self,
+        _declaration: &Declaration<'src>,
+        _errors: &mut Vec<XenoDiagnostic<'src>>,
+    ) {
+        self.generic_params.clear();
     }
 
-    fn on_after_type(&mut self, _exprs: &AnonymType<'src>, _errors: &mut Vec<XenoError<'src>>) {
+    fn on_after_type(&mut self, _ty: &AstType<'src>, _errors: &mut Vec<XenoDiagnostic<'src>>) {
         self.type_stack.pop();
     }
 
     fn on_before_annotation(
         &mut self,
         name: &TokenData<'src>,
-        args: &TypeList<'src>,
-        errors: &mut Vec<XenoError<'src>>,
+        args: &[Expr<'src>],
+        errors: &mut Vec<XenoDiagnostic<'src>>,
     ) {
-        if let Some(annotation) = self.find_annotation(name.v) {
+        if let Some(annotation) = self.scope.find_annotation(name.v) {
             self.validate_applicability(annotation, name, errors);
             self.validate_args(annotation, name, args, errors);
         }
@@ -412,8 +370,8 @@ impl<'src> AnalyzerListener<'src> for AnnotationValidator {
     fn on_after_annotation(
         &mut self,
         _name: &TokenData<'src>,
-        _args: &TypeList<'src>,
-        _errors: &mut Vec<XenoError<'src>>,
+        _args: &[Expr<'src>],
+        _errors: &mut Vec<XenoDiagnostic<'src>>,
     ) {
         self.annotation_depth = self.annotation_depth.saturating_sub(1);
     }
@@ -423,14 +381,42 @@ impl<'src> AnalyzerListener<'src> for AnnotationValidator {
 mod tests {
     use std::{collections::HashMap, path::PathBuf};
 
-    use super::*;
-    use crate::parser::NumberType;
+    use num_bigint::BigInt;
 
-    fn scope() -> ScopeInfo {
+    use super::*;
+    use crate::parser::{Annotation, IntLiteral, IntegerRepresentation, IntegerSize};
+    use crate::semantic::{TypeDeclarationInfo, TypeHierarchy, BUILTIN_ANNOTATIONS, BUILTIN_TYPES};
+
+    fn scope(ast: &[Declaration<'_>]) -> ScopeInfo {
+        let own_types = ast
+            .iter()
+            .filter_map(|declaration| match declaration {
+                Declaration::Type { name, .. } => Some(name.v.to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut type_hierarchy = TypeHierarchy::default();
+        type_hierarchy.set_current_module("test");
+        type_hierarchy.register_module("test", Vec::new());
+        for semantic_type in BUILTIN_TYPES {
+            type_hierarchy.insert_semantic_type(semantic_type);
+        }
+        for declaration in ast {
+            if let Declaration::Type {
+                name, generics, ty, ..
+            } = declaration
+            {
+                type_hierarchy.insert_declaration(
+                    "test",
+                    name.v,
+                    TypeDeclarationInfo::from_ast(generics.as_deref(), &ty.0),
+                );
+            }
+        }
         ScopeInfo {
             module_path: "test".to_string(),
             abs_path: PathBuf::new(),
-            own_types: vec!["A".to_string(), "B".to_string()],
+            own_types,
             imported_types: HashMap::new(),
             builtin_types: BUILTIN_TYPES
                 .iter()
@@ -440,7 +426,26 @@ mod tests {
                 .iter()
                 .map(|annotation| annotation.name.to_string())
                 .collect(),
+            type_hierarchy,
+            annotations: BUILTIN_ANNOTATIONS
+                .iter()
+                .map(|annotation| (annotation.name.to_string(), *annotation))
+                .collect(),
         }
+    }
+
+    fn int_arg<'src>(value: &'src TokenData<'src>) -> Expr<'src> {
+        Expr::Type(Type::Simple(SimpleType::Literal(Literal::Int(
+            IntLiteral {
+                value: BigInt::from(5),
+                representation: IntegerRepresentation {
+                    signed: false,
+                    size: IntegerSize::Bits(3),
+                },
+                token: value,
+                cast: None,
+            },
+        ))))
     }
 
     #[test]
@@ -463,29 +468,40 @@ mod tests {
             l: 1,
             c: 16,
         };
-        let max_args = vec![vec![Expr::Literal(Literal::Number(NumberType::Int(
-            5, &value,
-        )))]];
-        let b_type = vec![
-            Expr::Identifier(&a_reference),
-            Expr::Annotation(&max, max_args.clone()),
-        ];
+        let max_args = vec![int_arg(&value)];
+        let b_type = (
+            Type::Simple(SimpleType::Identifier(&a_reference, None)),
+            vec![Annotation {
+                ident: &max,
+                params: max_args.clone(),
+            }],
+        );
+        let from = TokenData::default();
         let ast = vec![
-            Declaration::TypeDecl {
+            Declaration::Type {
                 docs: None,
                 name: &a_name,
-                t: vec![Expr::Literal(Literal::String(
-                    "literal".to_string(),
-                    &string_literal,
-                ))],
+                generics: None,
+                ty: (
+                    Type::Simple(SimpleType::Literal(Literal::String(
+                        "literal".to_string(),
+                        &string_literal,
+                    ))),
+                    vec![],
+                ),
+                from: &from,
+                to: &from,
             },
-            Declaration::TypeDecl {
+            Declaration::Type {
                 docs: None,
                 name: &b_name,
-                t: b_type.clone(),
+                generics: None,
+                ty: b_type.clone(),
+                from: &from,
+                to: &from,
             },
         ];
-        let mut validator = AnnotationValidator::new(&scope());
+        let mut validator = AnnotationValidator::new(&scope(&ast));
         let mut errors = Vec::new();
 
         validator.on_before_ast(&ast, &mut errors);
@@ -495,7 +511,7 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert!(errors[0]
             .message
-            .contains("Annotation '@max' is not applicable to type 'string'"));
+            .contains("Annotation '@max' is not applicable to type 'A'"));
     }
 
     #[test]
@@ -518,26 +534,34 @@ mod tests {
             l: 1,
             c: 16,
         };
-        let max_args = vec![vec![Expr::Literal(Literal::Number(NumberType::Int(
-            5, &value,
-        )))]];
-        let b_type = vec![
-            Expr::Identifier(&a_reference),
-            Expr::Annotation(&max, max_args.clone()),
-        ];
+        let max_args = vec![int_arg(&value)];
+        let b_type = (
+            Type::Simple(SimpleType::Identifier(&a_reference, None)),
+            vec![Annotation {
+                ident: &max,
+                params: max_args.clone(),
+            }],
+        );
+        let from = TokenData::default();
         let ast = vec![
-            Declaration::TypeDecl {
+            Declaration::Type {
                 docs: None,
                 name: &a_name,
-                t: vec![Expr::Identifier(&u8_type)],
+                generics: None,
+                ty: (Type::Simple(SimpleType::Identifier(&u8_type, None)), vec![]),
+                from: &from,
+                to: &from,
             },
-            Declaration::TypeDecl {
+            Declaration::Type {
                 docs: None,
                 name: &b_name,
-                t: b_type.clone(),
+                generics: None,
+                ty: b_type.clone(),
+                from: &from,
+                to: &from,
             },
         ];
-        let mut validator = AnnotationValidator::new(&scope());
+        let mut validator = AnnotationValidator::new(&scope(&ast));
         let mut errors = Vec::new();
 
         validator.on_before_ast(&ast, &mut errors);

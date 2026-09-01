@@ -4,7 +4,7 @@ use tower_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, Documentation, InsertTextFormat, MarkupContent, MarkupKind,
 };
 use xenomorph_common::semantic::{
-    XenoAnnotation, XenoParameterType, XenoType, BUILTIN_ANNOTATIONS, BUILTIN_TYPES,
+    XenoAnnotation, XenoConstraint, XenoType, BUILTIN_ANNOTATIONS, BUILTIN_TYPES,
 };
 
 pub fn create_completion_item(
@@ -34,7 +34,7 @@ pub static BUILTIN_ANNOTATION_COMPLETIONS: LazyLock<Vec<CompletionItem>> = LazyL
         .collect()
 });
 
-fn create_annotation_completion_item(annotation: &XenoAnnotation) -> CompletionItem {
+pub fn create_annotation_completion_item(annotation: &XenoAnnotation) -> CompletionItem {
     let signature = format_annotation_signature(annotation);
 
     CompletionItem {
@@ -53,10 +53,14 @@ fn create_annotation_completion_item(annotation: &XenoAnnotation) -> CompletionI
 pub fn format_annotation_documentation(annotation: &XenoAnnotation, signature: &str) -> String {
     let mut documentation = format!("```xenomorph\n{}\n```", signature);
 
-    if let Some(applicable_to) = annotation.applicable_to {
+    if let Some(target) = annotation.target_parameter() {
         documentation.push_str(&format!(
-            "\n\n**Applicable to:** `{}`",
-            format_type_list(applicable_to).join("` | `")
+            "\n\n**Applicable {}:** `{}`",
+            match target.constraint {
+                XenoConstraint::Type(_) => "type",
+                XenoConstraint::Trait(_) => "trait",
+            },
+            target.constraint.name()
         ));
     }
 
@@ -69,16 +73,16 @@ pub fn format_annotation_documentation(annotation: &XenoAnnotation, signature: &
 }
 
 pub fn format_annotation_signature(annotation: &XenoAnnotation) -> String {
-    let params = annotation
-        .params
-        .unwrap_or(&[])
+    let explicit_parameters = annotation.explicit_parameters();
+    let params = explicit_parameters
         .iter()
-        .map(|param| {
-            format!(
-                "{}: {}",
-                param.name,
-                format_parameter_type(param.param_type)
-            )
+        .enumerate()
+        .map(|(index, param)| {
+            if annotation.variadic && index + 1 == explicit_parameters.len() {
+                format!("...{}", format_constraint(param.constraint))
+            } else {
+                format_constraint(param.constraint)
+            }
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -86,47 +90,75 @@ pub fn format_annotation_signature(annotation: &XenoAnnotation) -> String {
     format!("@{}({})", annotation.name, params)
 }
 
-fn format_parameter_type(parameter_type: XenoParameterType) -> String {
-    match parameter_type {
-        XenoParameterType::None => "never".to_string(),
-        XenoParameterType::NumberLiteral => "number".to_string(),
-        XenoParameterType::IntegerLiteral => "integer".to_string(),
-        XenoParameterType::StringLiteral => "string".to_string(),
-        XenoParameterType::BoolLiteral => "bool".to_string(),
-        XenoParameterType::FieldReference => "field reference".to_string(),
-        XenoParameterType::AnyLiteral => "literal".to_string(),
-        XenoParameterType::Expression => "expression".to_string(),
-        XenoParameterType::Identifier => "identifier".to_string(),
-        XenoParameterType::Type => "type".to_string(),
-        XenoParameterType::Annotation => "annotation".to_string(),
-        XenoParameterType::List(item_types) => format!(
-            "[{}]",
-            item_types
-                .iter()
-                .map(|item_type| format_parameter_type(*item_type))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    }
+fn format_constraint(required: XenoConstraint) -> String {
+    required.name().to_string()
 }
 
-fn format_type_list(types: &[&XenoType]) -> Vec<&'static str> {
-    types.iter().map(|xeno_type| xeno_type.name).collect()
+pub fn create_type_completion_item(t: &XenoType) -> CompletionItem {
+    create_completion_item(
+        t.name,
+        t.documentation,
+        if t.name.contains("color") || t.name.contains("Color") {
+            CompletionItemKind::COLOR
+        } else {
+            CompletionItemKind::CLASS
+        },
+    )
 }
 
 pub static BUILTIN_TYPE_COMPLETIONS: LazyLock<Vec<CompletionItem>> = LazyLock::new(|| {
     BUILTIN_TYPES
         .iter()
-        .map(|t| {
-            create_completion_item(
-                t.name,
-                t.documentation,
-                if t.name.contains("color") || t.name.contains("Color") {
-                    CompletionItemKind::COLOR
-                } else {
-                    CompletionItemKind::CLASS
-                },
-            )
-        })
+        .map(|t| create_type_completion_item(t))
         .collect()
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xenomorph_common::semantic::{XenoAnnotationKind, XenoParam, ANY_TARGET_PARAM, EXPRESSION};
+
+    static FIRST: XenoParam = XenoParam {
+        name: "first",
+        constraint: XenoConstraint::Trait(&EXPRESSION),
+    };
+    static REST: XenoParam = XenoParam {
+        name: "rest",
+        constraint: XenoConstraint::Trait(&EXPRESSION),
+    };
+    static VARIADIC: XenoAnnotation = XenoAnnotation {
+        name: "annotation",
+        documentation: None,
+        kind: XenoAnnotationKind::Meta,
+        params: &[&ANY_TARGET_PARAM, &FIRST, &REST],
+        variadic: true,
+    };
+
+    #[test]
+    fn variadic_annotation_signature_marks_only_the_repeated_parameter() {
+        assert_eq!(
+            format_annotation_signature(&VARIADIC),
+            "@annotation(Expression, ...Expression)"
+        );
+    }
+
+    #[test]
+    fn lombok_signature_uses_concise_variadic_notation() {
+        static LOMBOK: XenoParam = XenoParam {
+            name: "decorator",
+            constraint: XenoConstraint::Trait(&EXPRESSION),
+        };
+        static ANNOTATION: XenoAnnotation = XenoAnnotation {
+            name: "Lombok",
+            documentation: None,
+            kind: XenoAnnotationKind::Meta,
+            params: &[&ANY_TARGET_PARAM, &LOMBOK],
+            variadic: true,
+        };
+
+        assert_eq!(
+            format_annotation_signature(&ANNOTATION),
+            "@Lombok(...Expression)"
+        );
+    }
+}

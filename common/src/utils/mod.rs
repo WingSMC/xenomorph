@@ -6,7 +6,7 @@ use crate::TokenData;
 /// and trims the result to remove any leading or trailing whitespace.
 pub fn extract_documentation<'src>(token: &TokenData<'src>) -> &'src str {
     let len = token.v.len();
-    &token.v[3..len - 2].trim()
+    token.v[3..len - 2].trim()
 }
 
 pub fn calculate_hash<T: Hash>(t: &T) -> u64 {

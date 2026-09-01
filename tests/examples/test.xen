@@ -1,12 +1,20 @@
-type Color = {
-    r: u8,
-    g: u8,
-    b: u8,
-};
+import parser/p1;
 
-type User = {
-    _id: u64,
-    name: string @minlen(8),
-    age: u8 @min(13),
-    favouriteColor: Color,
-};
+
+
+/**
+Specialized user type with the name as a string.
+*/
+type SpecializedUser = User<string>;
+
+
+type Gt0<T: Numeric> = T @min(1);
+type BigInt<T: Numeric> = Gt0<T>[] @minlen(1) @Lombok(Getter);
+type U8Slice = u8[];
+
+type NumericStore = {
+    /** Serialization discriminant tag */
+    Ty: "#nvStore",
+    /** Test */
+    bigInts: U8Slice[],
+} @Lombok(Data, Builder);
