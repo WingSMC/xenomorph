@@ -1,3 +1,3 @@
-[submodule "tda-schemas"]
-	path = tda-schemas
+[submodule "schema/tda"]
+	path = schema/tda
 	url = https://github.boschdevcloud.com/CC-EPD4-Bp/tda-schemas.git

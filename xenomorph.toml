@@ -1,9 +1,9 @@
-#:schema ./xeno/.xenomorph/xenomorph.schema.json
+#:schema ./schema/tda/.xenomorph/xenomorph.schema.json
 
-extends = "./tda-schemas/xenomorph.toml"
+extends = "./schema/tda/xenomorph.toml"
 
 [parser]
-entry = "tda-schemas/ui"
+entry = "schema/tda/ui"
 
 [plugins]
 path = "./target/release/"

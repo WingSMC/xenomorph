@@ -153,8 +153,18 @@ pub fn run_graft(repository_url: &str) -> Result<(), String> {
         ));
     }
 
+    let mut input = io::stdin().lock();
+    let mut output = io::stdout().lock();
+    let entry_module = prompt(&mut input, &mut output, "Entry module: ")?;
+    drop(input);
+    drop(output);
+    let entry_module = validate_entry_module(&entry_module)?;
+    if let Some(entry_file) = ensure_entry_file(&grafted_directory, &entry_module)? {
+        println!("✓ Created entry module → {}", entry_file.display());
+    }
+
     generate_schema(&grafted_directory)?;
-    write_graft_config(&config_path, &alias)?;
+    write_graft_config(&config_path, &alias, &entry_module)?;
     run_git(
         &original_directory,
         ["add", "--", WORKSPACE_CONFIG_FILE],
@@ -214,6 +224,32 @@ fn validate_graft_path(value: &str) -> Result<PathBuf, String> {
     Ok(path.to_path_buf())
 }
 
+fn validate_entry_module(value: &str) -> Result<PathBuf, String> {
+    let mut path = validate_relative_path(value, "Entry module")?;
+    if path.extension().and_then(OsStr::to_str) == Some("xen") {
+        path.set_extension("");
+    }
+    if path.as_os_str().is_empty() {
+        return Err("Entry module cannot be empty.".to_string());
+    }
+    Ok(path)
+}
+
+fn validate_relative_path(value: &str, name: &str) -> Result<PathBuf, String> {
+    let value = value.trim();
+    let path = Path::new(value);
+    if value.is_empty()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(format!(
+            "{name} must be a non-empty relative path without '.' or '..'."
+        ));
+    }
+    Ok(path.to_path_buf())
+}
+
 fn repository_name(repository_url: &str) -> Result<String, String> {
     let repository_url = repository_url.trim().trim_end_matches(['/', '\\']);
     let repository_path = match repository_url.split_once("://") {
@@ -239,9 +275,44 @@ fn write_default_config(project_directory: &Path) -> Result<(), String> {
         .map_err(|error| format!("Unable to write '{}': {error}", config_path.display()))
 }
 
-fn write_graft_config(config_path: &Path, grafted_project: &Path) -> Result<(), String> {
-    fs::write(config_path, graft_config_toml(grafted_project)?)
-        .map_err(|error| format!("Unable to write '{}': {error}", config_path.display()))
+fn write_graft_config(
+    config_path: &Path,
+    grafted_project: &Path,
+    entry_module: &Path,
+) -> Result<(), String> {
+    fs::write(
+        config_path,
+        graft_config_toml(grafted_project, entry_module)?,
+    )
+    .map_err(|error| format!("Unable to write '{}': {error}", config_path.display()))
+}
+
+fn ensure_entry_file(
+    grafted_directory: &Path,
+    entry_module: &Path,
+) -> Result<Option<PathBuf>, String> {
+    let mut entry_file = grafted_directory.join(entry_module);
+    entry_file.add_extension("xen");
+    if entry_file.is_file() {
+        return Ok(None);
+    }
+    if entry_file.exists() {
+        return Err(format!(
+            "Entry module path '{}' exists but is not a file.",
+            entry_file.display()
+        ));
+    }
+    if let Some(parent) = entry_file.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "Unable to create entry module directory '{}': {error}",
+                parent.display()
+            )
+        })?;
+    }
+    fs::write(&entry_file, "")
+        .map_err(|error| format!("Unable to create '{}': {error}", entry_file.display()))?;
+    Ok(Some(entry_file))
 }
 
 fn ensure_gitignore_entry(path: &Path) -> Result<(), String> {
@@ -456,6 +527,39 @@ mod tests {
         assert!(validate_graft_path("..").is_err());
         assert!(validate_graft_path("schemas/../linked-schema").is_err());
         assert!(validate_graft_path("/schemas/linked-schema").is_err());
+    }
+
+    #[test]
+    fn entry_module_accepts_nested_paths_and_optional_xen_extension() {
+        assert_eq!(
+            validate_entry_module("models/root").unwrap(),
+            PathBuf::from("models/root")
+        );
+        assert_eq!(
+            validate_entry_module("models/root.xen").unwrap(),
+            PathBuf::from("models/root")
+        );
+        assert!(validate_entry_module("").is_err());
+        assert!(validate_entry_module("../root").is_err());
+        assert!(validate_entry_module("/models/root").is_err());
+    }
+
+    #[test]
+    fn missing_nested_entry_file_is_created_once() {
+        let root = temporary_directory("graft-entry");
+        let module = Path::new("models/root");
+
+        let created = ensure_entry_file(&root, module)
+            .expect("entry file should be created")
+            .expect("entry file should be reported as created");
+
+        assert_eq!(created, root.join("models/root.xen"));
+        assert!(created.is_file());
+        assert_eq!(
+            ensure_entry_file(&root, module).expect("existing entry should be accepted"),
+            None
+        );
+        fs::remove_dir_all(root).expect("temporary directory should be removed");
     }
 
     #[test]

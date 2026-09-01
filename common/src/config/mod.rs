@@ -271,11 +271,14 @@ pub fn default_config_toml() -> Result<String, String> {
 /// Serializes the authoritative config that links the current project to a
 /// grafted Xenomorph project. Parser and plugin settings use their canonical
 /// defaults so the current project can override the grafted config explicitly.
-pub fn graft_config_toml(grafted_project: &Path) -> Result<String, String> {
+pub fn graft_config_toml(grafted_project: &Path, entry_module: &Path) -> Result<String, String> {
     let grafted_project = grafted_project.to_string_lossy().replace('\\', "/");
+    let entry_module = entry_module.to_string_lossy().replace('\\', "/");
     let document = GraftConfigDocument {
         extends: format!("./{grafted_project}/{WORKSPACE_CONFIG_FILE}"),
-        parser: ParserConfig::default(),
+        parser: ParserConfig {
+            entry: format!("{grafted_project}/{entry_module}"),
+        },
         plugins: PluginsConfig::default(),
     };
     let config = serialize_config_toml(&document)?;
@@ -539,8 +542,9 @@ mod tests {
 
     #[test]
     fn graft_config_uses_linked_schema_and_canonical_overrides() {
-        let output = graft_config_toml(Path::new("schemas/linked-schema"))
-            .expect("graft config should serialize");
+        let output =
+            graft_config_toml(Path::new("schemas/linked-schema"), Path::new("models/root"))
+                .expect("graft config should serialize");
         let value: ConfigValue = toml::from_str(&output).expect("graft config should be TOML");
         let defaults = ConfigValue::try_from(Config::default())
             .expect("runtime config defaults should serialize");
@@ -551,7 +555,10 @@ mod tests {
             value["extends"].as_str(),
             Some("./schemas/linked-schema/xenomorph.toml")
         );
-        assert_eq!(value["parser"], defaults["parser"]);
+        assert_eq!(
+            value["parser"]["entry"].as_str(),
+            Some("schemas/linked-schema/models/root")
+        );
         assert_eq!(value["plugins"], defaults["plugins"]);
         assert!(value.get("formatter").is_none());
         assert!(value.get("debug").is_none());
