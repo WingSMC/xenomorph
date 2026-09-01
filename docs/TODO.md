@@ -14,3 +14,14 @@
 - Prevent &ing very disjoint types (e.g. u8 and string)
 
 - Utility to find duplicate types (ones which semantically map to the same thing after complete resolution (recursion!!!))
+
+* make a struct constraint
+* make some builtin type utilities like
+    - Pick<T: Struct, K: StringLiterals> (where string literals is a type like |"a"|"b"|"fieldc")
+    - Omit<T: Struct, K: StringLiterals>
+    - Keyof<T: Struct> => sum type of all keynames as string literals
+    - Optional<T> => makes ?T => T and ?T => ?T
+    - Required<T> => makes ?T => T and T => T
+    - Partial<T: Struct> => Optional on all fields
+    - Complete<T: Struct> => Required on all fields
+    - ToList<T: SumType<Literal>> => turns a sumtype of literals into a tuple/list (which will be a const in TS)

@@ -9,9 +9,9 @@ use xenomorph_common::parser::{
 };
 use xenomorph_common::plugins::XenoPlugin;
 use xenomorph_common::semantic::{
-    simple_to_owned_type, AnalyzerListener, OwnedType, ScopeInfo, TypeHierarchy, XenoAnnotation,
-    XenoAnnotationKind, XenoConstraint, XenoParam, XenoParent, XenoTrait, XenoTraitKind,
-    XenoType as SemanticType, ANY_TARGET_PARAM,
+    simple_to_owned_type, unsupported_target_type_diagnostic, AnalyzerListener, OwnedType,
+    ScopeInfo, TypeHierarchy, XenoAnnotation, XenoAnnotationKind, XenoConstraint, XenoParam,
+    XenoParent, XenoTrait, XenoTraitKind, XenoType as SemanticType, ANY_TARGET_PARAM,
 };
 use xenomorph_common::utils::extract_documentation;
 use xenomorph_common::{TokenData, XenoDiagSeverity, XenoDiagnostic};
@@ -248,13 +248,13 @@ impl<'src> AnalyzerListener<'src> for JavaGenerator {
 
     fn on_simple_type(&mut self, ty: &SimpleType<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {
         if self.annotation_depth == 0 {
-            if let Some(identifier) = simple_type_identifier(ty) {
-                let resolved = self
-                    .type_hierarchy
-                    .resolve_transparent_aliases(&simple_to_owned_type(ty));
-                if let Some(name) = first_unmapped_java_type(&resolved, &self.type_hierarchy) {
-                    errors.push(unsupported_type_diagnostic("Java", identifier, &name));
-                }
+            if let Some(diagnostic) = unsupported_target_type_diagnostic(
+                "Java",
+                ty,
+                &self.type_hierarchy,
+                has_native_java_mapping,
+            ) {
+                errors.push(diagnostic);
             }
         }
 
@@ -751,60 +751,8 @@ fn native_type_to_java(name: &str, imports: &mut BTreeSet<String>) -> Option<Str
     })
 }
 
-fn simple_type_identifier<'src>(ty: &SimpleType<'src>) -> Option<&'src TokenData<'src>> {
-    match ty {
-        SimpleType::Identifier(identifier, _)
-        | SimpleType::OptionalIdentifier(identifier, _)
-        | SimpleType::Array(identifier, _)
-        | SimpleType::OptionalArray(identifier, _) => Some(identifier),
-        SimpleType::Literal(_) | SimpleType::OptionalLiteral(_) => None,
-    }
-}
-
-fn first_unmapped_java_type(ty: &OwnedType, hierarchy: &TypeHierarchy) -> Option<String> {
-    match ty {
-        OwnedType::Array(inner) => first_unmapped_java_type(inner, hierarchy),
-        OwnedType::Generic { .. } => None,
-        OwnedType::Named { name, arguments } => {
-            let is_static = hierarchy
-                .get_type(name)
-                .is_some_and(|definition| definition.module_path.is_none());
-            let mut imports = BTreeSet::new();
-            if is_static && native_type_to_java(name, &mut imports).is_none() {
-                return Some(name.clone());
-            }
-            arguments
-                .iter()
-                .find_map(|argument| first_unmapped_java_type(argument, hierarchy))
-        }
-        OwnedType::Qualified {
-            module_path,
-            name,
-            arguments,
-        } => {
-            let mut imports = BTreeSet::new();
-            if module_path.is_none() && native_type_to_java(name, &mut imports).is_none() {
-                return Some(name.clone());
-            }
-            arguments
-                .iter()
-                .find_map(|argument| first_unmapped_java_type(argument, hierarchy))
-        }
-    }
-}
-
-fn unsupported_type_diagnostic<'src>(
-    target: &str,
-    identifier: &'src TokenData<'src>,
-    name: &str,
-) -> XenoDiagnostic<'src> {
-    XenoDiagnostic {
-        location: identifier.clone(),
-        message: format!(
-            "{target} cannot represent type '{name}' because it has no native mapping."
-        ),
-        severity: XenoDiagSeverity::Err,
-    }
+fn has_native_java_mapping(name: &str) -> bool {
+    native_type_to_java(name, &mut BTreeSet::new()).is_some()
 }
 
 /// Collects the decorator names from all `@Lombok(...)` annotations attached to

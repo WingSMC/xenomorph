@@ -9,9 +9,11 @@ use xenomorph_common::parser::{
     Annotation, Declaration, Expr, KeyValExpr, Literal, SimpleType, Type, XenoType,
 };
 use xenomorph_common::plugins::XenoPlugin;
-use xenomorph_common::semantic::{AnalyzerListener, ScopeInfo, TypeHierarchy};
+use xenomorph_common::semantic::{
+    unsupported_target_type_diagnostic, AnalyzerListener, ScopeInfo, TypeHierarchy,
+};
 use xenomorph_common::utils::extract_documentation;
-use xenomorph_common::{TokenData, XenoDiagSeverity, XenoDiagnostic};
+use xenomorph_common::{TokenData, XenoDiagnostic};
 
 // ── Plugin registration ─────────────────────────────────────────────
 
@@ -533,19 +535,15 @@ impl<'src> AnalyzerListener<'src> for JsonSchemaGenerator {
     }
 
     fn on_simple_type(&mut self, ty: &SimpleType<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {
-        if self.annotation_depth > 0 {
-            return;
-        }
-        let Some(identifier) = simple_type_identifier(ty) else {
-            return;
-        };
-        if self
-            .type_hierarchy
-            .get_type(identifier.v)
-            .is_some_and(|definition| definition.module_path.is_none())
-            && builtin_to_schema(identifier.v).is_none()
-        {
-            errors.push(unsupported_type_diagnostic("JSON Schema", identifier));
+        if self.annotation_depth == 0 {
+            if let Some(diagnostic) = unsupported_target_type_diagnostic(
+                "JSON Schema",
+                ty,
+                &self.type_hierarchy,
+                |name| builtin_to_schema(name).is_some(),
+            ) {
+                errors.push(diagnostic);
+            }
         }
     }
 
@@ -741,30 +739,6 @@ fn builtin_to_schema(name: &str) -> Option<Value> {
     Some(schema)
 }
 
-fn simple_type_identifier<'src>(ty: &SimpleType<'src>) -> Option<&'src TokenData<'src>> {
-    match ty {
-        SimpleType::Identifier(identifier, _)
-        | SimpleType::OptionalIdentifier(identifier, _)
-        | SimpleType::Array(identifier, _)
-        | SimpleType::OptionalArray(identifier, _) => Some(identifier),
-        SimpleType::Literal(_) | SimpleType::OptionalLiteral(_) => None,
-    }
-}
-
-fn unsupported_type_diagnostic<'src>(
-    target: &str,
-    identifier: &'src TokenData<'src>,
-) -> XenoDiagnostic<'src> {
-    XenoDiagnostic {
-        location: identifier.clone(),
-        message: format!(
-            "{target} cannot represent type '{}' because it has no native mapping.",
-            identifier.v
-        ),
-        severity: XenoDiagSeverity::Err,
-    }
-}
-
 /// Builds an `integer` schema with bounds for sized int types like `u8`/`i16`.
 fn integer_schema(name: &str) -> Option<Value> {
     let bits: u32 = name.get(1..).and_then(|b| b.parse().ok())?;
@@ -912,6 +886,7 @@ mod tests {
     use xenomorph_common::{
         lexer::Lexer,
         parser::{IntLiteral, IntegerRepresentation, IntegerSize, Parser},
+        XenoDiagSeverity,
     };
 
     fn empty_context<'ast, 'src>() -> SchemaContext<'ast, 'src> {

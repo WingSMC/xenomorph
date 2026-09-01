@@ -9,7 +9,7 @@ use xenomorph_common::parser::{
 };
 use xenomorph_common::plugins::XenoPlugin;
 use xenomorph_common::semantic::{
-    simple_to_owned_type, AnalyzerListener, OwnedType, ScopeInfo, TypeHierarchy, XenoParent,
+    unsupported_target_type_diagnostic, AnalyzerListener, ScopeInfo, TypeHierarchy, XenoParent,
     XenoType as SemanticType, KEY_TRAIT,
 };
 use xenomorph_common::utils::extract_documentation;
@@ -154,13 +154,12 @@ impl<'src> AnalyzerListener<'src> for TsGenerator {
 
     fn on_simple_type(&mut self, ty: &SimpleType<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {
         if self.annotation_depth == 0 {
-            if let Some(identifier) = simple_type_identifier(ty) {
-                let resolved = self
-                    .type_hierarchy
-                    .resolve_transparent_aliases(&simple_to_owned_type(ty));
-                if let Some(name) = first_unmapped_ts_type(&resolved, &self.type_hierarchy) {
-                    errors.push(unsupported_type_diagnostic("TypeScript", identifier, &name));
-                }
+            if let Some(diagnostic) =
+                unsupported_target_type_diagnostic("TypeScript", ty, &self.type_hierarchy, |name| {
+                    native_type_to_ts(name).is_some()
+                })
+            {
+                errors.push(diagnostic);
             }
         }
 
@@ -472,60 +471,6 @@ fn native_type_to_ts(name: &str) -> Option<&'static str> {
         "dict" => "Map<string, unknown>",
         _ => return None,
     })
-}
-
-fn simple_type_identifier<'src>(ty: &SimpleType<'src>) -> Option<&'src TokenData<'src>> {
-    match ty {
-        SimpleType::Identifier(identifier, _)
-        | SimpleType::OptionalIdentifier(identifier, _)
-        | SimpleType::Array(identifier, _)
-        | SimpleType::OptionalArray(identifier, _) => Some(identifier),
-        SimpleType::Literal(_) | SimpleType::OptionalLiteral(_) => None,
-    }
-}
-
-fn first_unmapped_ts_type(ty: &OwnedType, hierarchy: &TypeHierarchy) -> Option<String> {
-    match ty {
-        OwnedType::Array(inner) => first_unmapped_ts_type(inner, hierarchy),
-        OwnedType::Generic { .. } => None,
-        OwnedType::Named { name, arguments } => {
-            let is_static = hierarchy
-                .get_type(name)
-                .is_some_and(|definition| definition.module_path.is_none());
-            if is_static && native_type_to_ts(name).is_none() {
-                return Some(name.clone());
-            }
-            arguments
-                .iter()
-                .find_map(|argument| first_unmapped_ts_type(argument, hierarchy))
-        }
-        OwnedType::Qualified {
-            module_path,
-            name,
-            arguments,
-        } => {
-            if module_path.is_none() && native_type_to_ts(name).is_none() {
-                return Some(name.clone());
-            }
-            arguments
-                .iter()
-                .find_map(|argument| first_unmapped_ts_type(argument, hierarchy))
-        }
-    }
-}
-
-fn unsupported_type_diagnostic<'src>(
-    target: &str,
-    identifier: &'src TokenData<'src>,
-    name: &str,
-) -> XenoDiagnostic<'src> {
-    XenoDiagnostic {
-        location: identifier.clone(),
-        message: format!(
-            "{target} cannot represent type '{name}' because it has no native mapping."
-        ),
-        severity: XenoDiagSeverity::Err,
-    }
 }
 
 fn literal_to_ts(lit: &Literal) -> String {
