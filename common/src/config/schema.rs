@@ -66,11 +66,19 @@ pub fn build_rc_schema(plugins: &[&'static XenoPlugin<'static>]) -> Value {
 
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "$id": "https://wingsmc.github.io/xenomorph/xenomorph.schema.json",
         "title": "Xenomorph configuration (xenomorph.toml)",
         "description": "Configuration file for the Xenomorph toolchain.",
         "type": "object",
         "properties": {
+            "abstract": {
+                "type": "boolean",
+                "description": "When true, directory discovery skips this file and continues upward to an authoritative config. The file can still be used through `extends`.",
+                "default": false
+            },
+            "extends": {
+                "type": "string",
+                "description": "Path to another xenomorph.toml to inherit, relative to this config. This config recursively overrides colliding keys and subkeys."
+            },
             "parser": {
                 "type": "object",
                 "description": "Parser and entry-point configuration.",
@@ -103,7 +111,7 @@ pub fn build_rc_schema(plugins: &[&'static XenoPlugin<'static>]) -> Value {
                         "type": "integer",
                         "description": "Preferred maximum formatted line length before declarations are wrapped.",
                         "minimum": 1,
-                        "default": 100
+                        "default": 80
                     },
                     "line_ending": {
                         "type": "string",
@@ -181,7 +189,7 @@ mod tests {
         assert_eq!(formatter["additionalProperties"], false);
         assert_eq!(formatter["properties"]["indent_kind"]["default"], "space");
         assert_eq!(formatter["properties"]["indent_width"]["default"], 4);
-        assert_eq!(formatter["properties"]["max_line_length"]["default"], 100);
+        assert_eq!(formatter["properties"]["max_line_length"]["default"], 80);
         assert_eq!(
             formatter["properties"]["line_ending"]["enum"],
             json!(["lf", "crlf", "auto"])
@@ -198,5 +206,27 @@ mod tests {
         assert_eq!(loglevel["type"], "string");
         assert_eq!(loglevel["enum"], json!(["error", "warning", "info"]));
         assert_eq!(loglevel["default"], "info");
+    }
+
+    #[test]
+    fn schema_describes_hierarchy_and_only_permits_unknown_plugin_sections() {
+        let schema = build_rc_schema(&[]);
+
+        assert_eq!(schema["properties"]["abstract"]["type"], "boolean");
+        assert_eq!(schema["properties"]["extends"]["type"], "string");
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(
+            schema["properties"]["parser"]["additionalProperties"],
+            false
+        );
+        assert_eq!(
+            schema["properties"]["formatter"]["additionalProperties"],
+            false
+        );
+        assert_eq!(
+            schema["properties"]["plugins"]["additionalProperties"],
+            true
+        );
+        assert_eq!(schema["properties"]["debug"]["additionalProperties"], false);
     }
 }

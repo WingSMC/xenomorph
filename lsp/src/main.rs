@@ -1111,12 +1111,17 @@ impl LanguageServer for Backend {
             }
         }) {
             Ok(watcher) => {
-                let config_path = watcher.config_path().display().to_string();
+                let config_paths = watcher
+                    .config_paths()
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 *self.config_watcher.lock().unwrap() = Some(watcher);
                 self.client
                     .log_message(
                         MessageType::INFO,
-                        format!("Watching workspace config: {config_path}"),
+                        format!("Watching workspace config(s): {config_paths}"),
                     )
                     .await;
             }

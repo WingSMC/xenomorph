@@ -1182,6 +1182,34 @@ mod tests {
     }
 
     #[test]
+    fn unknown_annotations_warn_while_unknown_types_error() {
+        let mut cache = HashMap::new();
+        cache.insert(
+            "test".to_string(),
+            parsed_module("test", "type Test = Missing @Lombok;"),
+        );
+        let module = cache.get("test").expect("module should be cached");
+
+        let diagnostics = Analyzer::new(false, &[]).run(
+            module.borrow_ast(),
+            module,
+            module.borrow_imports(),
+            &cache,
+            &[],
+            &PluginConfigs::new(),
+        );
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.message == "Unknown annotation '@Lombok'"
+                && diagnostic.severity == XenoDiagSeverity::Warn
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.message == "Unknown type 'Missing'"
+                && diagnostic.severity == XenoDiagSeverity::Err
+        }));
+    }
+
+    #[test]
     fn semantic_pass_rejects_duplicate_type_names_in_one_module() {
         let source = "type Duplicate = string; type Duplicate = u8;";
         let mut cache = HashMap::new();

@@ -885,7 +885,7 @@ mod tests {
         let config = FormatterConfig {
             indent_kind: IndentKind::Tab,
             indent_width: 4,
-            max_line_length: 100,
+            max_line_length: 80,
             line_ending: LineEnding::Crlf,
         };
 
@@ -899,7 +899,7 @@ mod tests {
     fn auto_line_endings_preserve_crlf() {
         let config = FormatterConfig {
             line_ending: LineEnding::Auto,
-            ..formatter(100)
+            ..formatter(80)
         };
 
         assert_eq!(

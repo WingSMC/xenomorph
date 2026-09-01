@@ -1,3 +1,4 @@
+mod config;
 mod format;
 mod graph;
 mod inspector;
@@ -5,6 +6,7 @@ mod inspector;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use config::run_config;
 use format::run_format;
 use graph::run_graph;
 use inspector::run_inspector;
@@ -27,6 +29,12 @@ enum Commands {
     Generate,
     /// Generate the xenomorph.toml JSON Schema.
     Schema,
+    /// Inspect the workspace configuration.
+    Config {
+        /// Print the resolved, deeply merged TOML configuration.
+        #[arg(long, required = true)]
+        inspect: bool,
+    },
     /// Inspect standalone Xenomorph source from standard input as JSON.
     /// e.g. `cat my_module.xen | xeno inspect`
     Inspect,
@@ -48,6 +56,12 @@ fn main() {
     match Cli::parse().command {
         Commands::Generate => run_generate(),
         Commands::Schema => generate_rc_schema(),
+        Commands::Config { inspect } => {
+            if let Err(error) = run_config(inspect) {
+                eprintln!("✗ {error}");
+                std::process::exit(1);
+            }
+        }
         Commands::Inspect => run_inspector(),
         Commands::Graph { json } => run_graph(json),
         Commands::Format { file } => match run_format(file.as_deref()) {
@@ -64,10 +78,10 @@ fn main() {
 }
 
 /// Generates the `xenomorph.toml` JSON Schema (base + plugin contributions) and
-/// writes it to `.xenomorph/xenomorph.schema.json` in the workspace root.
+/// writes it beside the deepest config in the inheritance chain.
 fn generate_rc_schema() {
     let plugins = XenoPlugin::get_plugins();
-    let out_path = Config::get().workdir.join(RC_SCHEMA_RELATIVE_PATH);
+    let out_path = Config::get().schema_workdir().join(RC_SCHEMA_RELATIVE_PATH);
 
     match write_rc_schema(plugins, &out_path) {
         Ok(()) => println!("✓ Wrote xenomorph.toml schema → {}", out_path.display()),
@@ -238,6 +252,25 @@ mod tests {
         let cli = Cli::try_parse_from(["xeno", "generate"]).expect("generate command should parse");
 
         assert!(matches!(cli.command, Commands::Generate));
+    }
+
+    #[test]
+    fn clap_parses_config_inspect_option() {
+        let cli = Cli::try_parse_from(["xeno", "config", "--inspect"])
+            .expect("config inspection arguments should parse");
+
+        assert!(matches!(cli.command, Commands::Config { .. }));
+    }
+
+    #[test]
+    fn config_command_requires_inspect_option() {
+        let error = Cli::try_parse_from(["xeno", "config"])
+            .expect_err("config command without an operation should fail");
+
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
     }
 
     #[test]

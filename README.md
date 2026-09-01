@@ -15,6 +15,57 @@ Xenomorph is meant to be a universal schema descriptor. It is a front-end for pl
 
 ## Config (`xenomorph.toml`)
 
+Xenomorph discovers `xenomorph.toml` from the current directory upward. A
+reusable schema project can mark its local config as abstract:
+
+```toml
+# /shared-schemas/xenomorph.toml
+#:schema ./.xenomorph/xenomorph.schema.json
+
+abstract = true
+
+[formatter]
+indent_kind = "space"
+indent_width = 4
+line_ending = "lf"
+
+[debug]
+loglevel = "info"
+# tokens = true
+# ast = true
+# plugins = true
+```
+
+`abstract = true` makes discovery continue upward.
+
+```toml
+# consuming-repository/xenomorph.toml from ui project
+#:schema ./shared-schemas/.xenomorph/xenomorph.schema.json
+
+extends = "./reusable-project/xenomorph.toml"
+
+[parser]
+entry = "reusable-project/ui"
+
+[plugins]
+path = "./node_modules"
+plugins = ["xenomorph_typescript"]
+```
+
+Tables are merged recursively from the extended config into the consuming
+config. The consuming config replaces colliding scalar and array values while
+retaining non-colliding keys and subkeys. Paths used at runtime remain relative
+to the authoritative consuming config's directory. `xeno schema` writes
+`.xenomorph/xenomorph.schema.json` beside the deepest extended config (or beside
+the authoritative config when it does not extend another file).
+
+Unknown annotations in the selected plugin visibility scope are warnings, so a
+TypeScript-only view can tolerate Java-only annotations such as `@Lombok`.
+Unknown types remain errors.
+
+Use `xeno config --inspect` to print the deeply merged TOML configuration to
+standard output. The output omits the consumed `abstract` and `extends` keys.
+
 ## Parser
 
 `xeno` parses the configured workspace. For editor and tooling integrations,

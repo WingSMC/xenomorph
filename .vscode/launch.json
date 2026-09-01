@@ -16,7 +16,7 @@
             "outFiles": [
                 "${workspaceRoot}/extensions/vscode/client/out/**/*.js"
             ],
-            "cwd": "${workspaceFolder}/tests/examples",
+            "cwd": "${workspaceFolder}/xeno",
             "autoAttachChildProcesses": true,
             "preLaunchTask": "npm: build"
         }

@@ -32,6 +32,20 @@ pub struct Config {
 
     #[serde(default = "default_workdir")]
     pub workdir: PathBuf,
+
+    /// The non-abstract config selected by directory discovery.
+    #[serde(skip)]
+    config_path: Option<PathBuf>,
+
+    /// The deepest config in the `extends` chain. Generated editor metadata
+    /// belongs beside this reusable project config.
+    #[serde(skip)]
+    schema_config_path: Option<PathBuf>,
+
+    /// Every config contributing to the effective configuration, ordered from
+    /// the authoritative config to its deepest base.
+    #[serde(skip)]
+    config_paths: Vec<PathBuf>,
 }
 #[repr(Rust)]
 #[derive(Deserialize, Debug, Clone)]
@@ -159,7 +173,28 @@ impl Config {
     }
 
     pub fn workspace_config_path(&self) -> PathBuf {
-        self.workdir.join(WORKSPACE_CONFIG_FILE)
+        self.config_path
+            .clone()
+            .unwrap_or_else(|| self.workdir.join(WORKSPACE_CONFIG_FILE))
+    }
+
+    /// Returns every file that contributes to this effective configuration.
+    pub fn workspace_config_paths(&self) -> Vec<PathBuf> {
+        if self.config_paths.is_empty() {
+            vec![self.workspace_config_path()]
+        } else {
+            self.config_paths.clone()
+        }
+    }
+
+    /// Returns the directory where `.xenomorph` metadata must be generated.
+    /// This is the deepest extended config's directory, or the authoritative
+    /// config's directory when the config is standalone.
+    pub fn schema_workdir(&self) -> &Path {
+        self.schema_config_path
+            .as_deref()
+            .and_then(Path::parent)
+            .unwrap_or(&self.workdir)
     }
 }
 
@@ -195,7 +230,7 @@ pub fn find_workspace_config(wd: &Path) -> Option<PathBuf> {
 
     loop {
         let config_path = current_dir.join(WORKSPACE_CONFIG_FILE);
-        if config_path.exists() {
+        if config_path.is_file() && !config_is_abstract(&config_path) {
             return Some(config_path);
         }
 
@@ -203,6 +238,172 @@ pub fn find_workspace_config(wd: &Path) -> Option<PathBuf> {
             return None;
         }
     }
+}
+
+/// `abstract` is local discovery metadata: it directs tools to keep walking
+/// upward, but does not stop another config from explicitly extending this
+/// file. An unreadable or malformed config remains authoritative so its error
+/// is not silently hidden by a parent config.
+fn config_is_abstract(config_path: &Path) -> bool {
+    fs::read_to_string(config_path)
+        .ok()
+        .and_then(|content| toml::from_str::<ConfigValue>(&content).ok())
+        .and_then(|value| value.get("abstract").and_then(ConfigValue::as_bool))
+        .unwrap_or(false)
+}
+
+fn merge_config_values(base: &mut ConfigValue, overriding: ConfigValue) {
+    match (base, overriding) {
+        (ConfigValue::Table(base), ConfigValue::Table(overriding)) => {
+            for (key, value) in overriding {
+                match base.get_mut(&key) {
+                    Some(existing) => merge_config_values(existing, value),
+                    None => {
+                        base.insert(key, value);
+                    }
+                }
+            }
+        }
+        (base, overriding) => *base = overriding,
+    }
+}
+
+fn normalized_config_path(path: &Path) -> Result<PathBuf, String> {
+    let canonical = path.canonicalize().map_err(|error| {
+        format!(
+            "Unable to resolve config file '{}': {error}",
+            path.display()
+        )
+    })?;
+
+    #[cfg(windows)]
+    {
+        let value = canonical.to_string_lossy();
+        if let Some(unc) = value.strip_prefix(r"\\?\UNC\") {
+            return Ok(PathBuf::from(format!(r"\\{unc}")));
+        }
+        if let Some(local) = value.strip_prefix(r"\\?\") {
+            return Ok(PathBuf::from(local));
+        }
+    }
+
+    Ok(canonical)
+}
+
+fn load_config_value(
+    config_path: &Path,
+    resolving: &mut Vec<PathBuf>,
+    config_paths: &mut Vec<PathBuf>,
+) -> Result<(ConfigValue, PathBuf), String> {
+    let config_path = normalized_config_path(config_path)?;
+    if let Some(cycle_start) = resolving.iter().position(|path| path == &config_path) {
+        let mut cycle = resolving[cycle_start..]
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>();
+        cycle.push(config_path.display().to_string());
+        return Err(format!(
+            "Cyclic xenomorph.toml inheritance: {}",
+            cycle.join(" -> ")
+        ));
+    }
+
+    resolving.push(config_path.clone());
+    config_paths.push(config_path.clone());
+
+    let result = (|| {
+        let content = fs::read_to_string(&config_path).map_err(|error| {
+            format!(
+                "Unable to read config file '{}': {error}",
+                config_path.display()
+            )
+        })?;
+        let mut current = toml::from_str::<ConfigValue>(&content).map_err(|error| {
+            format!(
+                "Unable to parse config file '{}': {error}",
+                config_path.display()
+            )
+        })?;
+        let table = current.as_table_mut().ok_or_else(|| {
+            format!(
+                "Config file '{}' must contain a TOML table",
+                config_path.display()
+            )
+        })?;
+        let extends = match table.remove("extends") {
+            Some(ConfigValue::String(path)) => Some(path),
+            Some(_) => {
+                return Err(format!(
+                    "Config key 'extends' in '{}' must be a string",
+                    config_path.display()
+                ))
+            }
+            None => None,
+        };
+        // Discovery metadata is deliberately file-local and is not inherited.
+        table.remove("abstract");
+
+        let Some(extends) = extends else {
+            return Ok((current, config_path.clone()));
+        };
+        let parent = config_path
+            .parent()
+            .ok_or_else(|| format!("Config path '{}' has no parent", config_path.display()))?;
+        let (mut base, schema_config_path) =
+            load_config_value(&parent.join(extends), resolving, config_paths)?;
+        merge_config_values(&mut base, current);
+        Ok((base, schema_config_path))
+    })();
+
+    resolving.pop();
+    result
+}
+
+fn load_config(config_path: &Path) -> Result<Config, String> {
+    let authoritative_path = normalized_config_path(config_path)?;
+    let workdir = authoritative_path
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| {
+            format!(
+                "Config path '{}' has no parent directory",
+                authoritative_path.display()
+            )
+        })?;
+    let mut config_paths = Vec::new();
+    let (value, schema_config_path) =
+        load_config_value(&authoritative_path, &mut Vec::new(), &mut config_paths)?;
+    let mut config = value.try_into::<Config>().map_err(|error| {
+        format!(
+            "Unable to deserialize merged config '{}': {error}",
+            authoritative_path.display()
+        )
+    })?;
+    config.workdir = workdir;
+    config.config_path = Some(authoritative_path);
+    config.schema_config_path = Some(schema_config_path);
+    config.config_paths = config_paths;
+    Ok(config)
+}
+
+/// Discovers and resolves the authoritative config for `wd`, then serializes
+/// its deeply merged user-defined values as TOML. Hierarchy control keys are
+/// consumed during resolution and derived runtime paths are not added.
+pub fn inspect_merged_config(wd: &Path) -> Result<String, String> {
+    let config_path = find_workspace_config(wd).ok_or_else(|| {
+        format!(
+            "Unable to find a non-abstract '{}' from '{}' or any parent directory",
+            WORKSPACE_CONFIG_FILE,
+            wd.display()
+        )
+    })?;
+    let (value, _) = load_config_value(&config_path, &mut Vec::new(), &mut Vec::new())?;
+    let mut output = toml::to_string_pretty(&value)
+        .map_err(|error| format!("Unable to serialize merged config: {error}"))?;
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+    Ok(output)
 }
 
 fn init_config() -> Config {
@@ -216,38 +417,22 @@ fn init_config() -> Config {
 
     match find_workspace_config(&current_dir) {
         None => Config::default_with_workdir(current_dir),
-        Some(config_path) => {
+        Some(config_path) => load_config(&config_path).unwrap_or_else(|error| {
+            eprintln!("Error: {error}");
             let workdir = config_path
                 .parent()
                 .map(Path::to_path_buf)
-                .unwrap_or_else(|| current_dir.clone());
-            let content = match fs::read_to_string(&config_path) {
-                Ok(content) => content,
-                Err(_) => {
-                    eprintln!("Error: Unable to read config file.");
-                    return Config::default_with_workdir(workdir);
-                }
-            };
-
-            match toml::de::from_str::<Config>(&content) {
-                Ok(mut config) => {
-                    config.workdir = workdir;
-                    config
-                }
-                Err(_) => {
-                    eprintln!("Error: Unable to parse config file.");
-                    Config::default_with_workdir(workdir)
-                }
-            }
-        }
+                .unwrap_or(current_dir);
+            Config::default_with_workdir(workdir)
+        }),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        find_workspace_config, Config, FormatterConfig, IndentKind, LineEnding, LogLevel,
-        WORKSPACE_CONFIG_FILE,
+        find_workspace_config, inspect_merged_config, load_config, Config, ConfigValue,
+        FormatterConfig, IndentKind, LineEnding, LogLevel, WORKSPACE_CONFIG_FILE,
     };
     use crate::XenoDiagSeverity;
     use std::fs;
@@ -260,7 +445,7 @@ mod tests {
         assert_eq!(config.formatter, FormatterConfig::default());
         assert_eq!(config.formatter.indent_kind, IndentKind::Space);
         assert_eq!(config.formatter.indent_width, 4);
-        assert_eq!(config.formatter.max_line_length, 100);
+        assert_eq!(config.formatter.max_line_length, 80);
         assert_eq!(config.formatter.line_ending, LineEnding::Lf);
     }
 
@@ -338,6 +523,168 @@ mod tests {
 
         assert_eq!(find_workspace_config(&nested), Some(config_path));
 
+        fs::remove_dir_all(root).expect("test directory should be removed");
+    }
+
+    fn temporary_directory(name: &str) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("xenomorph-{name}-{unique}"));
+        fs::create_dir_all(&root).expect("test directory should be created");
+        root
+    }
+
+    #[test]
+    fn workspace_config_discovery_skips_abstract_configs() {
+        let root = temporary_directory("abstract-discovery");
+        let inner = root.join("shared");
+        fs::create_dir_all(&inner).expect("inner directory should be created");
+        let authoritative = root.join(WORKSPACE_CONFIG_FILE);
+        fs::write(&authoritative, "[parser]\nentry = \"backend\"\n")
+            .expect("authoritative config should be written");
+        fs::write(inner.join(WORKSPACE_CONFIG_FILE), "abstract = true\n")
+            .expect("abstract config should be written");
+
+        assert_eq!(find_workspace_config(&inner), Some(authoritative));
+
+        fs::remove_dir_all(root).expect("test directory should be removed");
+    }
+
+    #[test]
+    fn standalone_abstract_config_is_not_authoritative() {
+        let root = temporary_directory("standalone-abstract");
+        fs::write(root.join(WORKSPACE_CONFIG_FILE), "abstract = true\n")
+            .expect("abstract config should be written");
+
+        assert_eq!(find_workspace_config(&root), None);
+
+        fs::remove_dir_all(root).expect("test directory should be removed");
+    }
+
+    #[test]
+    fn extends_deep_merges_tables_and_uses_outer_precedence() {
+        let root = temporary_directory("extends-merge");
+        let inner = root.join("shared");
+        fs::create_dir_all(&inner).expect("inner directory should be created");
+        let inner_config = inner.join(WORKSPACE_CONFIG_FILE);
+        let outer_config = root.join(WORKSPACE_CONFIG_FILE);
+        fs::write(
+            &inner_config,
+            concat!(
+                "abstract = true\n",
+                "[parser]\nentry = \"ui\"\n",
+                "[formatter]\nindent_width = 2\nline_ending = \"crlf\"\n",
+                "[plugins.typescript]\noutput = \"./generated/ts\"\n",
+                "[plugins.java]\npackage = \"example.base\"\ndata = true\n",
+            ),
+        )
+        .expect("inner config should be written");
+        fs::write(
+            &outer_config,
+            concat!(
+                "extends = \"./shared/xenomorph.toml\"\n",
+                "[parser]\nentry = \"backend\"\n",
+                "[formatter]\nindent_width = 4\n",
+                "[plugins]\nplugins = [\"xenomorph_typescript\"]\n",
+                "[plugins.java]\npackage = \"example.service\"\n",
+            ),
+        )
+        .expect("outer config should be written");
+
+        let config = load_config(&outer_config).expect("config hierarchy should load");
+
+        assert_eq!(config.parser.entry, "backend");
+        assert_eq!(config.formatter.indent_width, 4);
+        assert_eq!(config.formatter.line_ending, LineEnding::Crlf);
+        assert_eq!(config.plugins.plugins, vec!["xenomorph_typescript"]);
+        assert_eq!(
+            config.plugins.config["typescript"]["output"].as_str(),
+            Some("./generated/ts")
+        );
+        assert_eq!(
+            config.plugins.config["java"]["package"].as_str(),
+            Some("example.service")
+        );
+        assert_eq!(config.plugins.config["java"]["data"].as_bool(), Some(true));
+        assert_eq!(config.workdir, root);
+        assert_eq!(config.workspace_config_path(), outer_config);
+        assert_eq!(config.schema_workdir(), inner.as_path());
+        assert_eq!(
+            config.workspace_config_paths(),
+            vec![outer_config, inner_config]
+        );
+
+        fs::remove_dir_all(root).expect("test directory should be removed");
+    }
+
+    #[test]
+    fn extends_rejects_inheritance_cycles() {
+        let root = temporary_directory("extends-cycle");
+        let first = root.join("first.toml");
+        let second = root.join("second.toml");
+        fs::write(&first, "extends = \"./second.toml\"\n").expect("first config should be written");
+        fs::write(&second, "extends = \"./first.toml\"\n")
+            .expect("second config should be written");
+
+        let error = load_config(&first).expect_err("inheritance cycle should fail");
+        assert!(error.contains("Cyclic xenomorph.toml inheritance"));
+        assert!(error.contains("first.toml"));
+        assert!(error.contains("second.toml"));
+
+        fs::remove_dir_all(root).expect("test directory should be removed");
+    }
+
+    #[test]
+    fn config_inspection_outputs_only_deeply_merged_user_values() {
+        let root = temporary_directory("inspect-merged");
+        let inner = root.join("shared");
+        fs::create_dir_all(&inner).expect("inner directory should be created");
+        fs::write(
+            inner.join(WORKSPACE_CONFIG_FILE),
+            concat!(
+                "abstract = true\n",
+                "[formatter]\nindent_width = 2\nline_ending = \"crlf\"\n",
+                "[plugins.java]\ndata = true\npackage = \"example.base\"\n",
+            ),
+        )
+        .expect("inner config should be written");
+        fs::write(
+            root.join(WORKSPACE_CONFIG_FILE),
+            concat!(
+                "extends = \"./shared/xenomorph.toml\"\n",
+                "[formatter]\nindent_width = 4\n",
+                "[plugins.java]\npackage = \"example.service\"\n",
+            ),
+        )
+        .expect("outer config should be written");
+
+        let output = inspect_merged_config(&inner).expect("merged config should serialize");
+        let value: ConfigValue = toml::from_str(&output).expect("output should be valid TOML");
+
+        assert!(output.ends_with('\n'));
+        assert!(value.get("abstract").is_none());
+        assert!(value.get("extends").is_none());
+        assert_eq!(value["formatter"]["indent_width"].as_integer(), Some(4));
+        assert_eq!(value["formatter"]["line_ending"].as_str(), Some("crlf"));
+        assert_eq!(value["plugins"]["java"]["data"].as_bool(), Some(true));
+        assert_eq!(
+            value["plugins"]["java"]["package"].as_str(),
+            Some("example.service")
+        );
+        assert!(value.get("workdir").is_none());
+
+        fs::remove_dir_all(root).expect("test directory should be removed");
+    }
+
+    #[test]
+    fn config_inspection_reports_missing_config() {
+        let root = temporary_directory("inspect-missing");
+
+        let error = inspect_merged_config(&root).expect_err("missing config should fail");
+
+        assert!(error.contains("Unable to find 'xenomorph.toml'"));
         fs::remove_dir_all(root).expect("test directory should be removed");
     }
 }
