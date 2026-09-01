@@ -1,6 +1,7 @@
 mod config;
 mod format;
 mod graph;
+mod init;
 mod inspector;
 
 use std::path::PathBuf;
@@ -9,6 +10,7 @@ use clap::{Parser, Subcommand};
 use config::run_config;
 use format::run_format;
 use graph::run_graph;
+use init::run_init;
 use inspector::run_inspector;
 use xenomorph_common::config::{write_rc_schema, Config, LogLevel, RC_SCHEMA_RELATIVE_PATH};
 use xenomorph_common::module::{types::ModuleDiagnostic, XenoRegistry};
@@ -25,6 +27,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Initialize a new Xenomorph project in a Git repository.
+    Init,
     /// Parse the configured workspace and run its generators.
     Generate,
     /// Generate the xenomorph.toml JSON Schema.
@@ -54,6 +58,12 @@ enum Commands {
 
 fn main() {
     match Cli::parse().command {
+        Commands::Init => {
+            if let Err(error) = run_init() {
+                eprintln!("✗ {error}");
+                std::process::exit(1);
+            }
+        }
         Commands::Generate => run_generate(),
         Commands::Schema => generate_rc_schema(),
         Commands::Config { inspect } => {
@@ -252,6 +262,13 @@ mod tests {
         let cli = Cli::try_parse_from(["xeno", "generate"]).expect("generate command should parse");
 
         assert!(matches!(cli.command, Commands::Generate));
+    }
+
+    #[test]
+    fn clap_parses_init_command() {
+        let cli = Cli::try_parse_from(["xeno", "init"]).expect("init command should parse");
+
+        assert!(matches!(cli.command, Commands::Init));
     }
 
     #[test]

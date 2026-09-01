@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -12,11 +12,12 @@ pub use schema::{build_rc_schema, write_rc_schema, RC_SCHEMA_RELATIVE_PATH};
 pub use watcher::WorkspaceConfigWatcher;
 
 pub const WORKSPACE_CONFIG_FILE: &str = "xenomorph.toml";
+pub(crate) const DEFAULT_CONFIG_IS_ABSTRACT: bool = false;
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
 #[repr(Rust)]
-#[derive(Deserialize, Debug, Clone, Default)]
+#[derive(Deserialize, Serialize, Debug, Clone, Default)]
 pub struct Config {
     #[serde(default)]
     pub parser: ParserConfig,
@@ -30,7 +31,7 @@ pub struct Config {
     #[serde(default)]
     pub debug: DebugConfig,
 
-    #[serde(default = "default_workdir")]
+    #[serde(default = "default_workdir", skip_serializing)]
     pub workdir: PathBuf,
 
     /// The non-abstract config selected by directory discovery.
@@ -48,14 +49,14 @@ pub struct Config {
     config_paths: Vec<PathBuf>,
 }
 #[repr(Rust)]
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct ParserConfig {
     #[serde(default = "default_parser_path")]
     pub entry: String,
 }
 
 #[repr(Rust)]
-#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct FormatterConfig {
     #[serde(default)]
     pub indent_kind: IndentKind,
@@ -70,7 +71,7 @@ pub struct FormatterConfig {
     pub line_ending: LineEnding,
 }
 
-#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IndentKind {
     #[default]
     #[serde(rename = "space", alias = "spaces")]
@@ -79,7 +80,7 @@ pub enum IndentKind {
     Tab,
 }
 
-#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum LineEnding {
     #[default]
@@ -93,7 +94,7 @@ pub use toml::Value as ConfigValue;
 pub type PluginConfigs = HashMap<String, ConfigValue>;
 
 #[repr(Rust)]
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct PluginsConfig {
     #[serde(default = "default_plugins_path")]
     pub path: String,
@@ -107,7 +108,7 @@ pub struct PluginsConfig {
     pub config: PluginConfigs,
 }
 #[repr(Rust)]
-#[derive(Deserialize, Debug, Clone, Default)]
+#[derive(Deserialize, Serialize, Debug, Clone, Default)]
 pub struct DebugConfig {
     #[serde(default)]
     pub plugins: bool,
@@ -122,7 +123,7 @@ pub struct DebugConfig {
     pub loglevel: LogLevel,
 }
 
-#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
     Error,
@@ -223,6 +224,39 @@ impl Default for PluginsConfig {
             config: HashMap::new(),
         }
     }
+}
+
+#[derive(Serialize)]
+struct DefaultConfigDocument {
+    #[serde(rename = "abstract")]
+    is_abstract: bool,
+
+    #[serde(flatten)]
+    config: Config,
+}
+
+/// Serializes a standalone `xenomorph.toml` containing every canonical
+/// runtime default and its editor schema directive.
+pub fn default_config_toml() -> Result<String, String> {
+    let document = DefaultConfigDocument {
+        is_abstract: DEFAULT_CONFIG_IS_ABSTRACT,
+        config: Config::default(),
+    };
+    let config = serialize_config_toml(&document)?;
+
+    Ok(format!(
+        "#:schema ./{}\n\n{config}",
+        RC_SCHEMA_RELATIVE_PATH
+    ))
+}
+
+fn serialize_config_toml(config: &impl Serialize) -> Result<String, String> {
+    let mut output = toml::to_string_pretty(config)
+        .map_err(|error| format!("Unable to serialize configuration: {error}"))?;
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+    Ok(output)
 }
 
 pub fn find_workspace_config(wd: &Path) -> Option<PathBuf> {
@@ -387,8 +421,9 @@ fn load_config(config_path: &Path) -> Result<Config, String> {
 }
 
 /// Discovers and resolves the authoritative config for `wd`, then serializes
-/// its deeply merged user-defined values as TOML. Hierarchy control keys are
-/// consumed during resolution and derived runtime paths are not added.
+/// the complete effective configuration as TOML. Hierarchy control keys are
+/// consumed during resolution, defaults are materialized, and derived runtime
+/// paths are not added.
 pub fn inspect_merged_config(wd: &Path) -> Result<String, String> {
     let config_path = find_workspace_config(wd).ok_or_else(|| {
         format!(
@@ -397,13 +432,8 @@ pub fn inspect_merged_config(wd: &Path) -> Result<String, String> {
             wd.display()
         )
     })?;
-    let (value, _) = load_config_value(&config_path, &mut Vec::new(), &mut Vec::new())?;
-    let mut output = toml::to_string_pretty(&value)
-        .map_err(|error| format!("Unable to serialize merged config: {error}"))?;
-    if !output.ends_with('\n') {
-        output.push('\n');
-    }
-    Ok(output)
+    let config = load_config(&config_path)?;
+    serialize_config_toml(&config)
 }
 
 fn init_config() -> Config {
@@ -431,8 +461,8 @@ fn init_config() -> Config {
 #[cfg(test)]
 mod tests {
     use super::{
-        find_workspace_config, inspect_merged_config, load_config, Config, ConfigValue,
-        FormatterConfig, IndentKind, LineEnding, LogLevel, WORKSPACE_CONFIG_FILE,
+        default_config_toml, find_workspace_config, inspect_merged_config, load_config, Config,
+        ConfigValue, FormatterConfig, IndentKind, LineEnding, LogLevel, WORKSPACE_CONFIG_FILE,
     };
     use crate::XenoDiagSeverity;
     use std::fs;
@@ -447,6 +477,27 @@ mod tests {
         assert_eq!(config.formatter.indent_width, 4);
         assert_eq!(config.formatter.max_line_length, 80);
         assert_eq!(config.formatter.line_ending, LineEnding::Lf);
+    }
+
+    #[test]
+    fn generated_default_config_uses_canonical_runtime_defaults() {
+        let output = default_config_toml().expect("default config should serialize");
+        let value: ConfigValue = toml::from_str(&output).expect("default config should be TOML");
+        let generated: Config = toml::from_str(&output).expect("default config should load");
+        let expected = Config::default();
+
+        assert!(output.starts_with("#:schema ./.xenomorph/xenomorph.schema.json\n\n"));
+        assert!(output.ends_with('\n'));
+        assert_eq!(value["abstract"].as_bool(), Some(false));
+        assert!(value.get("workdir").is_none());
+        assert_eq!(generated.parser.entry, expected.parser.entry);
+        assert_eq!(generated.formatter, expected.formatter);
+        assert_eq!(generated.plugins.path, expected.plugins.path);
+        assert_eq!(generated.plugins.plugins, expected.plugins.plugins);
+        assert_eq!(generated.debug.plugins, expected.debug.plugins);
+        assert_eq!(generated.debug.tokens, expected.debug.tokens);
+        assert_eq!(generated.debug.ast, expected.debug.ast);
+        assert_eq!(generated.debug.loglevel, expected.debug.loglevel);
     }
 
     #[test]
@@ -637,7 +688,7 @@ mod tests {
     }
 
     #[test]
-    fn config_inspection_outputs_only_deeply_merged_user_values() {
+    fn config_inspection_outputs_the_complete_effective_configuration() {
         let root = temporary_directory("inspect-merged");
         let inner = root.join("shared");
         fs::create_dir_all(&inner).expect("inner directory should be created");
@@ -662,17 +713,27 @@ mod tests {
 
         let output = inspect_merged_config(&inner).expect("merged config should serialize");
         let value: ConfigValue = toml::from_str(&output).expect("output should be valid TOML");
+        let defaults = ConfigValue::try_from(Config::default())
+            .expect("runtime config defaults should serialize");
 
         assert!(output.ends_with('\n'));
         assert!(value.get("abstract").is_none());
         assert!(value.get("extends").is_none());
+        assert_eq!(value["parser"], defaults["parser"]);
         assert_eq!(value["formatter"]["indent_width"].as_integer(), Some(4));
         assert_eq!(value["formatter"]["line_ending"].as_str(), Some("crlf"));
+        assert_eq!(
+            value["formatter"]["max_line_length"],
+            defaults["formatter"]["max_line_length"]
+        );
+        assert_eq!(value["plugins"]["path"], defaults["plugins"]["path"]);
+        assert_eq!(value["plugins"]["plugins"], defaults["plugins"]["plugins"]);
         assert_eq!(value["plugins"]["java"]["data"].as_bool(), Some(true));
         assert_eq!(
             value["plugins"]["java"]["package"].as_str(),
             Some("example.service")
         );
+        assert_eq!(value["debug"], defaults["debug"]);
         assert!(value.get("workdir").is_none());
 
         fs::remove_dir_all(root).expect("test directory should be removed");
@@ -684,7 +745,7 @@ mod tests {
 
         let error = inspect_merged_config(&root).expect_err("missing config should fail");
 
-        assert!(error.contains("Unable to find 'xenomorph.toml'"));
+        assert!(error.contains("Unable to find a non-abstract 'xenomorph.toml'"));
         fs::remove_dir_all(root).expect("test directory should be removed");
     }
 }

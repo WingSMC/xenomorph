@@ -2,6 +2,7 @@ use serde_json::{json, Map, Value};
 use std::fs;
 use std::path::Path;
 
+use super::{Config, DEFAULT_CONFIG_IS_ABSTRACT};
 use crate::plugins::XenoPlugin;
 
 /// Default location (relative to the workspace root) where the generated
@@ -16,6 +17,8 @@ pub const RC_SCHEMA_RELATIVE_PATH: &str = ".xenomorph/xenomorph.schema.json";
 /// their own config section. The returned object is inserted under
 /// `properties.plugins.properties.<plugin-name>`.
 pub fn build_rc_schema(plugins: &[&'static XenoPlugin<'static>]) -> Value {
+    let defaults = Config::default();
+
     // Collect plugin-provided config schemas keyed by plugin name.
     let mut plugin_sections: Map<String, Value> = Map::new();
     for plugin in plugins {
@@ -41,7 +44,8 @@ pub fn build_rc_schema(plugins: &[&'static XenoPlugin<'static>]) -> Value {
         "path".to_string(),
         json!({
             "type": "string",
-            "description": "Directory containing the compiled plugin libraries, relative to the workspace root."
+            "description": "Directory containing the compiled plugin libraries, relative to the workspace root.",
+            "default": &defaults.plugins.path
         }),
     );
     plugins_properties.insert(
@@ -50,7 +54,8 @@ pub fn build_rc_schema(plugins: &[&'static XenoPlugin<'static>]) -> Value {
             "type": "array",
             "description": "Plugin library names to load (without the platform-specific `lib` prefix or file extension).",
             "items": { "type": "string" },
-            "uniqueItems": true
+            "uniqueItems": true,
+            "default": &defaults.plugins.plugins
         }),
     );
     for (name, schema) in plugin_sections {
@@ -73,7 +78,7 @@ pub fn build_rc_schema(plugins: &[&'static XenoPlugin<'static>]) -> Value {
             "abstract": {
                 "type": "boolean",
                 "description": "When true, directory discovery skips this file and continues upward to an authoritative config. The file can still be used through `extends`.",
-                "default": false
+                "default": DEFAULT_CONFIG_IS_ABSTRACT
             },
             "extends": {
                 "type": "string",
@@ -86,7 +91,7 @@ pub fn build_rc_schema(plugins: &[&'static XenoPlugin<'static>]) -> Value {
                     "entry": {
                         "type": "string",
                         "description": "Entry module path relative to the workspace root, without the `.xen` extension.",
-                        "default": "index.xen"
+                        "default": &defaults.parser.entry
                     }
                 },
                 "additionalProperties": false
@@ -99,25 +104,25 @@ pub fn build_rc_schema(plugins: &[&'static XenoPlugin<'static>]) -> Value {
                         "type": "string",
                         "description": "Indent with spaces or tab characters.",
                         "enum": ["space", "tab"],
-                        "default": "space"
+                        "default": defaults.formatter.indent_kind
                     },
                     "indent_width": {
                         "type": "integer",
                         "description": "Visual width of one indentation level.",
                         "minimum": 1,
-                        "default": 4
+                        "default": defaults.formatter.indent_width
                     },
                     "max_line_length": {
                         "type": "integer",
                         "description": "Preferred maximum formatted line length before declarations are wrapped.",
                         "minimum": 1,
-                        "default": 80
+                        "default": defaults.formatter.max_line_length
                     },
                     "line_ending": {
                         "type": "string",
                         "description": "Line ending emitted by the formatter. Auto preserves the first line ending found in the source.",
                         "enum": ["lf", "crlf", "auto"],
-                        "default": "lf"
+                        "default": defaults.formatter.line_ending
                     }
                 },
                 "additionalProperties": false
@@ -130,23 +135,23 @@ pub fn build_rc_schema(plugins: &[&'static XenoPlugin<'static>]) -> Value {
                     "plugins": {
                         "type": "boolean",
                         "description": "Print plugin loading diagnostics.",
-                        "default": false
+                        "default": defaults.debug.plugins
                     },
                     "tokens": {
                         "type": "boolean",
                         "description": "Print the token stream for each module.",
-                        "default": false
+                        "default": defaults.debug.tokens
                     },
                     "ast": {
                         "type": "boolean",
                         "description": "Print the parsed AST for each module.",
-                        "default": false
+                        "default": defaults.debug.ast
                     },
                     "loglevel": {
                         "type": "string",
                         "description": "Minimum diagnostic severity displayed by the xeno CLI.",
                         "enum": ["error", "warning", "info"],
-                        "default": "info"
+                        "default": defaults.debug.loglevel
                     }
                 },
                 "additionalProperties": false
@@ -176,7 +181,7 @@ pub fn write_rc_schema(
 
 #[cfg(test)]
 mod tests {
-    use super::build_rc_schema;
+    use super::{build_rc_schema, Config, DEFAULT_CONFIG_IS_ABSTRACT};
     use serde_json::json;
 
     #[test]
@@ -187,12 +192,65 @@ mod tests {
             .expect("formatter section should be present");
 
         assert_eq!(formatter["additionalProperties"], false);
-        assert_eq!(formatter["properties"]["indent_kind"]["default"], "space");
-        assert_eq!(formatter["properties"]["indent_width"]["default"], 4);
-        assert_eq!(formatter["properties"]["max_line_length"]["default"], 80);
         assert_eq!(
             formatter["properties"]["line_ending"]["enum"],
             json!(["lf", "crlf", "auto"])
+        );
+    }
+
+    #[test]
+    fn schema_uses_the_runtime_config_defaults() {
+        let schema = build_rc_schema(&[]);
+        let defaults = serde_json::to_value(Config::default())
+            .expect("runtime config defaults should serialize");
+
+        assert_eq!(
+            schema["properties"]["parser"]["properties"]["entry"]["default"],
+            defaults["parser"]["entry"]
+        );
+        assert_eq!(
+            schema["properties"]["formatter"]["properties"]["indent_kind"]["default"],
+            defaults["formatter"]["indent_kind"]
+        );
+        assert_eq!(
+            schema["properties"]["formatter"]["properties"]["indent_width"]["default"],
+            defaults["formatter"]["indent_width"]
+        );
+        assert_eq!(
+            schema["properties"]["formatter"]["properties"]["max_line_length"]["default"],
+            defaults["formatter"]["max_line_length"]
+        );
+        assert_eq!(
+            schema["properties"]["formatter"]["properties"]["line_ending"]["default"],
+            defaults["formatter"]["line_ending"]
+        );
+        assert_eq!(
+            schema["properties"]["plugins"]["properties"]["path"]["default"],
+            defaults["plugins"]["path"]
+        );
+        assert_eq!(
+            schema["properties"]["plugins"]["properties"]["plugins"]["default"],
+            defaults["plugins"]["plugins"]
+        );
+        assert_eq!(
+            schema["properties"]["debug"]["properties"]["plugins"]["default"],
+            defaults["debug"]["plugins"]
+        );
+        assert_eq!(
+            schema["properties"]["debug"]["properties"]["tokens"]["default"],
+            defaults["debug"]["tokens"]
+        );
+        assert_eq!(
+            schema["properties"]["debug"]["properties"]["ast"]["default"],
+            defaults["debug"]["ast"]
+        );
+        assert_eq!(
+            schema["properties"]["debug"]["properties"]["loglevel"]["default"],
+            defaults["debug"]["loglevel"]
+        );
+        assert_eq!(
+            schema["properties"]["abstract"]["default"],
+            DEFAULT_CONFIG_IS_ABSTRACT
         );
     }
 
@@ -205,7 +263,6 @@ mod tests {
 
         assert_eq!(loglevel["type"], "string");
         assert_eq!(loglevel["enum"], json!(["error", "warning", "info"]));
-        assert_eq!(loglevel["default"], "info");
     }
 
     #[test]
