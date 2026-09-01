@@ -18,13 +18,15 @@ use xenomorph_common::{
     semantic::{XenoAnnotation, XenoConstraint, XenoParent, XenoTrait, XenoTraitKind, XenoType},
     TokenData,
 };
-use xenomorph_lsp_common::types::{
+
+mod completions;
+mod hover;
+mod semantic_tokens;
+
+use completions::{
     create_annotation_completion_item, create_completion_item, create_type_completion_item,
     BUILTIN_ANNOTATION_COMPLETIONS, BUILTIN_TYPE_COMPLETIONS,
 };
-
-mod hover;
-mod semantic_tokens;
 
 struct HoverTarget {
     name: String,

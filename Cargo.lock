@@ -1319,15 +1319,6 @@ dependencies = [
  "tokio",
  "tower-lsp",
  "xenomorph_common",
- "xenomorph_lsp_common",
-]
-
-[[package]]
-name = "xenomorph_lsp_common"
-version = "0.1.2"
-dependencies = [
- "tower-lsp",
- "xenomorph_common",
 ]
 
 [[package]]

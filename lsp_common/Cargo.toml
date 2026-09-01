@@ -1,8 +1,0 @@
-[package]
-name = "xenomorph_lsp_common"
-version = "0.1.2"
-edition = "2021"
-
-[dependencies]
-xenomorph_common = { path = "../common" }
-tower-lsp = { version = "0.20.0" }
