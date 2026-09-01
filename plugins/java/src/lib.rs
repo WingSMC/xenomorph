@@ -165,6 +165,8 @@ struct JavaGenerator {
     files: Vec<(String, String)>,
     /// Whether the current module contains a generated tuple declaration.
     has_tuples: bool,
+    /// Annotation arguments are metadata and are not emitted as Java value types.
+    annotation_depth: usize,
 }
 
 impl JavaGenerator {
@@ -180,6 +182,7 @@ impl JavaGenerator {
             type_hierarchy: TypeHierarchy::default(),
             files: Vec::new(),
             has_tuples: false,
+            annotation_depth: 0,
         }
     }
 }
@@ -215,6 +218,7 @@ impl<'src> AnalyzerListener<'src> for JavaGenerator {
         self.type_hierarchy = scope.type_hierarchy.clone();
         self.files.clear();
         self.has_tuples = false;
+        self.annotation_depth = 0;
     }
 
     fn on_before_ast(
@@ -243,6 +247,17 @@ impl<'src> AnalyzerListener<'src> for JavaGenerator {
     }
 
     fn on_simple_type(&mut self, ty: &SimpleType<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {
+        if self.annotation_depth == 0 {
+            if let Some(identifier) = simple_type_identifier(ty) {
+                let resolved = self
+                    .type_hierarchy
+                    .resolve_transparent_aliases(&simple_to_owned_type(ty));
+                if let Some(name) = first_unmapped_java_type(&resolved, &self.type_hierarchy) {
+                    errors.push(unsupported_type_diagnostic("Java", identifier, &name));
+                }
+            }
+        }
+
         let literal = match ty {
             SimpleType::Literal(literal) | SimpleType::OptionalLiteral(literal) => literal,
             _ => return,
@@ -265,6 +280,24 @@ impl<'src> AnalyzerListener<'src> for JavaGenerator {
                 severity: XenoDiagSeverity::Err,
             });
         }
+    }
+
+    fn on_before_annotation(
+        &mut self,
+        _name: &TokenData<'src>,
+        _args: &[Expr<'src>],
+        _errors: &mut Vec<XenoDiagnostic<'src>>,
+    ) {
+        self.annotation_depth += 1;
+    }
+
+    fn on_after_annotation(
+        &mut self,
+        _name: &TokenData<'src>,
+        _args: &[Expr<'src>],
+        _errors: &mut Vec<XenoDiagnostic<'src>>,
+    ) {
+        self.annotation_depth = self.annotation_depth.saturating_sub(1);
     }
 
     fn on_after_module(&mut self, scope: &ScopeInfo) {
@@ -641,12 +674,14 @@ impl JavaGenerator {
             };
         }
 
-        let base = builtin_to_java(name, imports);
-        if arguments.is_empty() || base != name {
-            base
+        if let Some(base) = native_type_to_java(name, imports) {
+            return base;
+        }
+        if arguments.is_empty() {
+            name.to_string()
         } else {
             format!(
-                "{base}<{}>",
+                "{name}<{}>",
                 arguments
                     .iter()
                     .map(|argument| self.owned_type_to_java(argument, imports))
@@ -659,11 +694,10 @@ impl JavaGenerator {
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-/// Maps a Xenomorph builtin type name to a Java type, registering the import
-/// for types that live outside `java.lang`. Unknown names are assumed to be
-/// user-defined types in the same package and are returned unchanged.
-fn builtin_to_java(name: &str, imports: &mut BTreeSet<String>) -> String {
-    match name {
+/// Maps a Xenomorph semantic type to a Java type, registering imports for
+/// types outside `java.lang`. `None` means Java has no native mapping.
+fn native_type_to_java(name: &str, imports: &mut BTreeSet<String>) -> Option<String> {
+    Some(match name {
         "string" | "char" | "email" | "url" | "hostname" | "ip" | "ipv4" | "ipv6" | "semver"
         | "strong_password" | "json" | "xml" | "yaml" | "toml" | "csv" | "tsv" => {
             "String".to_string()
@@ -704,12 +738,72 @@ fn builtin_to_java(name: &str, imports: &mut BTreeSet<String>) -> String {
             "Pattern".to_string()
         }
         "binary" => "byte[]".to_string(),
+        "array" => {
+            imports.insert("java.util.List".to_string());
+            "List<Object>".to_string()
+        }
         "dict" => {
             imports.insert("java.util.Map".to_string());
             "Map<String, Object>".to_string()
         }
         "any" | "null" => "Object".to_string(),
-        other => other.to_string(),
+        _ => return None,
+    })
+}
+
+fn simple_type_identifier<'src>(ty: &SimpleType<'src>) -> Option<&'src TokenData<'src>> {
+    match ty {
+        SimpleType::Identifier(identifier, _)
+        | SimpleType::OptionalIdentifier(identifier, _)
+        | SimpleType::Array(identifier, _)
+        | SimpleType::OptionalArray(identifier, _) => Some(identifier),
+        SimpleType::Literal(_) | SimpleType::OptionalLiteral(_) => None,
+    }
+}
+
+fn first_unmapped_java_type(ty: &OwnedType, hierarchy: &TypeHierarchy) -> Option<String> {
+    match ty {
+        OwnedType::Array(inner) => first_unmapped_java_type(inner, hierarchy),
+        OwnedType::Generic { .. } => None,
+        OwnedType::Named { name, arguments } => {
+            let is_static = hierarchy
+                .get_type(name)
+                .is_some_and(|definition| definition.module_path.is_none());
+            let mut imports = BTreeSet::new();
+            if is_static && native_type_to_java(name, &mut imports).is_none() {
+                return Some(name.clone());
+            }
+            arguments
+                .iter()
+                .find_map(|argument| first_unmapped_java_type(argument, hierarchy))
+        }
+        OwnedType::Qualified {
+            module_path,
+            name,
+            arguments,
+        } => {
+            let mut imports = BTreeSet::new();
+            if module_path.is_none() && native_type_to_java(name, &mut imports).is_none() {
+                return Some(name.clone());
+            }
+            arguments
+                .iter()
+                .find_map(|argument| first_unmapped_java_type(argument, hierarchy))
+        }
+    }
+}
+
+fn unsupported_type_diagnostic<'src>(
+    target: &str,
+    identifier: &'src TokenData<'src>,
+    name: &str,
+) -> XenoDiagnostic<'src> {
+    XenoDiagnostic {
+        location: identifier.clone(),
+        message: format!(
+            "{target} cannot represent type '{name}' because it has no native mapping."
+        ),
+        severity: XenoDiagSeverity::Err,
     }
 }
 
@@ -1237,20 +1331,41 @@ mod tests {
     #[test]
     fn test_builtin_mappings() {
         let mut i = imports();
-        assert_eq!(builtin_to_java("string", &mut i), "String");
-        assert_eq!(builtin_to_java("bool", &mut i), "Boolean");
-        assert_eq!(builtin_to_java("i8", &mut i), "Byte");
-        assert_eq!(builtin_to_java("u8", &mut i), "Short");
-        assert_eq!(builtin_to_java("i16", &mut i), "Short");
-        assert_eq!(builtin_to_java("u16", &mut i), "Integer");
-        assert_eq!(builtin_to_java("i64", &mut i), "Long");
-        assert_eq!(builtin_to_java("u64", &mut i), "BigInteger");
-        assert_eq!(builtin_to_java("f32", &mut i), "Float");
-        assert_eq!(builtin_to_java("f64", &mut i), "Double");
-        assert_eq!(builtin_to_java("decimal", &mut i), "BigDecimal");
-        assert_eq!(builtin_to_java("uuid", &mut i), "UUID");
-        assert_eq!(builtin_to_java("binary", &mut i), "byte[]");
-        assert_eq!(builtin_to_java("MyType", &mut i), "MyType");
+        assert_eq!(
+            native_type_to_java("string", &mut i).as_deref(),
+            Some("String")
+        );
+        assert_eq!(
+            native_type_to_java("bool", &mut i).as_deref(),
+            Some("Boolean")
+        );
+        assert_eq!(native_type_to_java("i8", &mut i).as_deref(), Some("Byte"));
+        assert_eq!(native_type_to_java("u8", &mut i).as_deref(), Some("Short"));
+        assert_eq!(native_type_to_java("i16", &mut i).as_deref(), Some("Short"));
+        assert_eq!(
+            native_type_to_java("u16", &mut i).as_deref(),
+            Some("Integer")
+        );
+        assert_eq!(native_type_to_java("i64", &mut i).as_deref(), Some("Long"));
+        assert_eq!(
+            native_type_to_java("u64", &mut i).as_deref(),
+            Some("BigInteger")
+        );
+        assert_eq!(native_type_to_java("f32", &mut i).as_deref(), Some("Float"));
+        assert_eq!(
+            native_type_to_java("f64", &mut i).as_deref(),
+            Some("Double")
+        );
+        assert_eq!(
+            native_type_to_java("decimal", &mut i).as_deref(),
+            Some("BigDecimal")
+        );
+        assert_eq!(native_type_to_java("uuid", &mut i).as_deref(), Some("UUID"));
+        assert_eq!(
+            native_type_to_java("binary", &mut i).as_deref(),
+            Some("byte[]")
+        );
+        assert_eq!(native_type_to_java("MyType", &mut i), None);
         assert!(i.contains("java.math.BigInteger"));
         assert!(i.contains("java.util.UUID"));
     }
@@ -1581,6 +1696,62 @@ mod tests {
             "Map<String, Short>"
         );
         assert!(i.contains("java.util.Map"));
+    }
+
+    #[test]
+    fn generator_reports_static_types_without_a_java_mapping() {
+        static SYMBOL: SemanticType = SemanticType {
+            name: "symbol",
+            documentation: None,
+            generic_params: None,
+            parents: None,
+        };
+        let symbol = token("symbol");
+        let ty = SimpleType::Identifier(&symbol, None);
+        let mut generator = JavaGenerator::new();
+        generator.type_hierarchy.insert_semantic_type(&SYMBOL);
+        let mut errors = Vec::new();
+
+        generator.on_simple_type(&ty, &mut errors);
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            errors[0].message,
+            "Java cannot represent type 'symbol' because it has no native mapping."
+        );
+        assert_eq!(errors[0].severity, XenoDiagSeverity::Err);
+    }
+
+    #[test]
+    fn generator_reports_aliases_to_unmapped_static_types() {
+        static SYMBOL: SemanticType = SemanticType {
+            name: "symbol",
+            documentation: None,
+            generic_params: None,
+            parents: None,
+        };
+        let alias = token("Alias");
+        let ty = SimpleType::Identifier(&alias, None);
+        let mut generator = generator_with_builtins();
+        generator.type_hierarchy.insert_semantic_type(&SYMBOL);
+        generator.type_hierarchy.insert_declaration(
+            "test",
+            "Alias",
+            TypeDeclarationInfo {
+                generic_params: Vec::new(),
+                parents: vec![OwnedType::named("symbol")],
+                transparent_alias: true,
+            },
+        );
+        let mut errors = Vec::new();
+
+        generator.on_simple_type(&ty, &mut errors);
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            errors[0].message,
+            "Java cannot represent type 'symbol' because it has no native mapping."
+        );
     }
 
     #[test]

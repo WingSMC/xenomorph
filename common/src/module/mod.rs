@@ -1442,6 +1442,19 @@ mod tests {
     }
 
     #[test]
+    fn dictionary_keys_must_implement_key_trait() {
+        let source = "type TextKey = dict<string, bool>; type NumberKey = dict<u8, string>; type Alias = string; type AliasKey = dict<Alias, u8>; type Bad = dict<bool, string>;";
+        let mut cache = HashMap::new();
+        cache.insert("test".to_string(), parsed_module("test", source));
+
+        let errors = analyze(&cache, "test");
+        assert_eq!(errors.len(), 1, "unexpected errors: {errors:#?}");
+        assert!(errors[0].contains("bool"));
+        assert!(errors[0].contains("dict.K"));
+        assert!(errors[0].contains("constraint 'KeyTrait'"));
+    }
+
+    #[test]
     fn hierarchy_preserves_duplicate_names_from_loaded_modules() {
         let mut cache = HashMap::new();
         cache.insert(

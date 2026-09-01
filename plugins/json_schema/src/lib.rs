@@ -9,9 +9,9 @@ use xenomorph_common::parser::{
     Annotation, Declaration, Expr, KeyValExpr, Literal, SimpleType, Type, XenoType,
 };
 use xenomorph_common::plugins::XenoPlugin;
-use xenomorph_common::semantic::{AnalyzerListener, ScopeInfo};
+use xenomorph_common::semantic::{AnalyzerListener, ScopeInfo, TypeHierarchy};
 use xenomorph_common::utils::extract_documentation;
-use xenomorph_common::TokenData;
+use xenomorph_common::{TokenData, XenoDiagSeverity, XenoDiagnostic};
 
 // ── Plugin registration ─────────────────────────────────────────────
 
@@ -64,6 +64,11 @@ struct JsonSchemaGenerator {
     /// Types declared in the current module. Local names take precedence over
     /// same-named declarations in imported modules.
     own_types: HashSet<String>,
+    /// Complete semantic graph used to distinguish schema declarations from
+    /// static types that require an explicit JSON Schema mapping.
+    type_hierarchy: TypeHierarchy,
+    /// Annotation arguments are metadata and are not emitted as schema values.
+    annotation_depth: usize,
 }
 
 struct SchemaContext<'ast, 'src> {
@@ -102,6 +107,8 @@ impl JsonSchemaGenerator {
             output_dir: None,
             imported_types: HashMap::new(),
             own_types: HashSet::new(),
+            type_hierarchy: TypeHierarchy::default(),
+            annotation_depth: 0,
         }
     }
 
@@ -482,6 +489,8 @@ impl<'src> AnalyzerListener<'src> for JsonSchemaGenerator {
         self.module_path = scope.module_path.clone();
         self.imported_types = scope.imported_types.clone();
         self.own_types = scope.own_types.iter().cloned().collect();
+        self.type_hierarchy = scope.type_hierarchy.clone();
+        self.annotation_depth = 0;
         self.defs.clear();
     }
 
@@ -521,6 +530,41 @@ impl<'src> AnalyzerListener<'src> for JsonSchemaGenerator {
                 self.defs.insert(name.v.to_string(), schema);
             }
         }
+    }
+
+    fn on_simple_type(&mut self, ty: &SimpleType<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {
+        if self.annotation_depth > 0 {
+            return;
+        }
+        let Some(identifier) = simple_type_identifier(ty) else {
+            return;
+        };
+        if self
+            .type_hierarchy
+            .get_type(identifier.v)
+            .is_some_and(|definition| definition.module_path.is_none())
+            && builtin_to_schema(identifier.v).is_none()
+        {
+            errors.push(unsupported_type_diagnostic("JSON Schema", identifier));
+        }
+    }
+
+    fn on_before_annotation(
+        &mut self,
+        _name: &TokenData<'src>,
+        _args: &[Expr<'src>],
+        _errors: &mut Vec<XenoDiagnostic<'src>>,
+    ) {
+        self.annotation_depth += 1;
+    }
+
+    fn on_after_annotation(
+        &mut self,
+        _name: &TokenData<'src>,
+        _args: &[Expr<'src>],
+        _errors: &mut Vec<XenoDiagnostic<'src>>,
+    ) {
+        self.annotation_depth = self.annotation_depth.saturating_sub(1);
     }
 
     fn on_after_module(&mut self, scope: &ScopeInfo) {
@@ -573,6 +617,12 @@ fn trait_constraint_to_schema(name: &str) -> Option<Value> {
         "IntegerLiteral" => Some(json!({ "type": "integer" })),
         "StringLiteral" => Some(json!({ "type": "string" })),
         "BoolLiteral" => Some(json!({ "type": "boolean" })),
+        "KeyTrait" => Some(json!({
+            "anyOf": [
+                { "type": "string" },
+                { "type": "number" },
+            ]
+        })),
         "HasLength" => Some(json!({
             "anyOf": [
                 { "type": "string" },
@@ -689,6 +739,30 @@ fn builtin_to_schema(name: &str) -> Option<Value> {
         _ => return integer_schema(name),
     };
     Some(schema)
+}
+
+fn simple_type_identifier<'src>(ty: &SimpleType<'src>) -> Option<&'src TokenData<'src>> {
+    match ty {
+        SimpleType::Identifier(identifier, _)
+        | SimpleType::OptionalIdentifier(identifier, _)
+        | SimpleType::Array(identifier, _)
+        | SimpleType::OptionalArray(identifier, _) => Some(identifier),
+        SimpleType::Literal(_) | SimpleType::OptionalLiteral(_) => None,
+    }
+}
+
+fn unsupported_type_diagnostic<'src>(
+    target: &str,
+    identifier: &'src TokenData<'src>,
+) -> XenoDiagnostic<'src> {
+    XenoDiagnostic {
+        location: identifier.clone(),
+        message: format!(
+            "{target} cannot represent type '{}' because it has no native mapping.",
+            identifier.v
+        ),
+        severity: XenoDiagSeverity::Err,
+    }
 }
 
 /// Builds an `integer` schema with bounds for sized int types like `u8`/`i16`.
@@ -988,6 +1062,15 @@ mod tests {
             builtin_to_schema("integer"),
             Some(json!({ "type": "integer" }))
         );
+        assert_eq!(
+            trait_constraint_to_schema("KeyTrait"),
+            Some(json!({
+                "anyOf": [
+                    { "type": "string" },
+                    { "type": "number" },
+                ]
+            }))
+        );
     }
 
     #[test]
@@ -1060,6 +1143,35 @@ mod tests {
     #[test]
     fn test_unknown_identifier_is_not_builtin() {
         assert_eq!(builtin_to_schema("MyCustomType"), None);
+    }
+
+    #[test]
+    fn generator_reports_static_types_without_a_schema_mapping() {
+        static SYMBOL: xenomorph_common::semantic::XenoType =
+            xenomorph_common::semantic::XenoType {
+                name: "symbol",
+                documentation: None,
+                generic_params: None,
+                parents: None,
+            };
+        let symbol = TokenData {
+            v: "symbol",
+            l: 0,
+            c: 0,
+        };
+        let ty = SimpleType::Identifier(&symbol, None);
+        let mut generator = JsonSchemaGenerator::new();
+        generator.type_hierarchy.insert_semantic_type(&SYMBOL);
+        let mut errors = Vec::new();
+
+        generator.on_simple_type(&ty, &mut errors);
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            errors[0].message,
+            "JSON Schema cannot represent type 'symbol' because it has no native mapping."
+        );
+        assert_eq!(errors[0].severity, XenoDiagSeverity::Err);
     }
 
     #[test]

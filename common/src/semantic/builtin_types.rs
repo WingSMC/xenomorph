@@ -67,6 +67,13 @@ pub static HAS_LENGTH: XenoTrait = XenoTrait {
     parents: None,
 };
 
+pub static KEY_TRAIT: XenoTrait = XenoTrait {
+    name: "KeyTrait",
+    documentation: Some("Implemented by types that can be used as dictionary keys."),
+    kind: XenoTraitKind::Semantic,
+    parents: None,
+};
+
 pub static EXPRESSION: XenoTrait = XenoTrait {
     name: "Expression",
     documentation: Some("Implemented by every annotation argument expression."),
@@ -229,6 +236,7 @@ static NUMBER_PARENT: &[XenoParent] = &[
     XenoParent::Type(&ANY),
     XenoParent::Trait(&NUMERIC),
     XenoParent::Trait(&NUMBER_LITERAL),
+    XenoParent::Trait(&KEY_TRAIT),
 ];
 static INTEGER_PARENT: &[XenoParent] = &[
     XenoParent::Type(&NUMBER),
@@ -239,6 +247,7 @@ static STRING_PARENT: &[XenoParent] = &[
     XenoParent::Type(&ANY),
     XenoParent::Trait(&HAS_LENGTH),
     XenoParent::Trait(&STRING_LITERAL),
+    XenoParent::Trait(&KEY_TRAIT),
 ];
 static IP_PARENT: &[XenoParent] = &[XenoParent::Type(&IP)];
 static LENGTH_PARENT: &[XenoParent] = &[XenoParent::Type(&ANY), XenoParent::Trait(&HAS_LENGTH)];
@@ -587,7 +596,7 @@ static DICT: XenoType = XenoType {
     generic_params: Some(&[
         &GenericParam {
             name: "K",
-            constraint: None,
+            constraint: Some(XenoConstraint::Trait(&KEY_TRAIT)),
         },
         &GenericParam {
             name: "V",
@@ -662,6 +671,7 @@ pub static BUILTIN_TYPES: &[&XenoType] = &[
 pub static BUILTIN_TRAITS: &[&XenoTrait] = &[
     &NUMERIC,
     &HAS_LENGTH,
+    &KEY_TRAIT,
     &EXPRESSION,
     &LITERAL,
     &NUMBER_LITERAL,
@@ -681,11 +691,14 @@ mod tests {
     #[test]
     fn semantic_traits_follow_multiple_parent_levels() {
         assert!(STRING.implements(&HAS_LENGTH));
+        assert!(STRING.implements(&KEY_TRAIT));
         assert!(ARRAY.implements(&HAS_LENGTH));
         assert!(BINARY.implements(&HAS_LENGTH));
         assert!(DICT.implements(&HAS_LENGTH));
         assert!(UUID.implements(&HAS_LENGTH));
         assert!(U8.implements(&NUMERIC));
+        assert!(NUMBER.implements(&KEY_TRAIT));
+        assert!(U8.implements(&KEY_TRAIT));
         assert!(U8.implements(&NUMBER_LITERAL));
         assert!(U8.implements(&INTEGER_LITERAL));
         assert!(U8.implements(&LITERAL));
@@ -694,6 +707,7 @@ mod tests {
         assert!(BOOL.implements(&BOOL_LITERAL));
         assert!(STRING.implements(&STRING_LITERAL));
         assert!(!BOOL.implements(&HAS_LENGTH));
+        assert!(!BOOL.implements(&KEY_TRAIT));
         assert!(!F32.implements(&INTEGER_LITERAL));
     }
 
