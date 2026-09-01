@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output};
 
 use xenomorph_common::config::{
-    default_config_toml, RC_SCHEMA_RELATIVE_PATH, WORKSPACE_CONFIG_FILE,
+    default_config_toml, graft_config_toml, RC_SCHEMA_RELATIVE_PATH, WORKSPACE_CONFIG_FILE,
 };
 
 const GITIGNORE_ENTRY: &str = ".xenomorph/";
@@ -85,6 +85,86 @@ pub fn run_init() -> Result<(), String> {
     Ok(())
 }
 
+pub fn run_graft(repository_url: &str) -> Result<(), String> {
+    let original_directory = std::env::current_dir()
+        .map_err(|error| format!("Unable to determine current directory: {error}"))?;
+    let repository_url = repository_url.trim();
+    if repository_url.is_empty() {
+        return Err("Repository URL cannot be empty.".to_string());
+    }
+    if discover_git_repository(&original_directory)?.is_none() {
+        return Err(format!(
+            "Cannot graft into '{}': it is not inside a Git repository.",
+            original_directory.display()
+        ));
+    }
+
+    let config_path = original_directory.join(WORKSPACE_CONFIG_FILE);
+    if config_path.exists() {
+        return Err(format!(
+            "Cannot graft into '{}': '{}' already exists.",
+            original_directory.display(),
+            WORKSPACE_CONFIG_FILE
+        ));
+    }
+
+    let default_name = repository_name(repository_url)?;
+    let mut input = io::stdin().lock();
+    let mut output = io::stdout().lock();
+    let alias = prompt(
+        &mut input,
+        &mut output,
+        &format!("Name/path alias [{default_name}]: "),
+    )?;
+    drop(input);
+    drop(output);
+
+    let alias = if alias.trim().is_empty() {
+        PathBuf::from(default_name)
+    } else {
+        validate_graft_path(&alias)?
+    };
+    let grafted_directory = original_directory.join(&alias);
+    if grafted_directory.exists() {
+        return Err(format!(
+            "Cannot graft '{}': the path already exists.",
+            grafted_directory.display()
+        ));
+    }
+
+    let alias_argument = git_path(&alias);
+    run_git(
+        &original_directory,
+        [
+            "submodule",
+            "add",
+            "--",
+            repository_url,
+            alias_argument.as_str(),
+        ],
+        "add the Xenomorph Git submodule",
+    )?;
+
+    let grafted_config = grafted_directory.join(WORKSPACE_CONFIG_FILE);
+    if !grafted_config.is_file() {
+        return Err(format!(
+            "Grafted repository does not contain '{}' at its root.",
+            WORKSPACE_CONFIG_FILE
+        ));
+    }
+
+    generate_schema(&grafted_directory)?;
+    write_graft_config(&config_path, &alias)?;
+    run_git(
+        &original_directory,
+        ["add", "--", WORKSPACE_CONFIG_FILE],
+        "stage the grafted Xenomorph config",
+    )?;
+
+    println!("✓ Grafted '{}' as '{}'", repository_url, git_path(&alias));
+    Ok(())
+}
+
 fn prompt(
     input: &mut impl BufRead,
     output: &mut impl Write,
@@ -119,9 +199,48 @@ fn validate_folder_name(value: &str) -> Result<PathBuf, String> {
     Ok(path.to_path_buf())
 }
 
+fn validate_graft_path(value: &str) -> Result<PathBuf, String> {
+    let value = value.trim();
+    let path = Path::new(value);
+    if value.is_empty()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(
+            "Name/path alias must be a non-empty relative path without '.' or '..'.".to_string(),
+        );
+    }
+    Ok(path.to_path_buf())
+}
+
+fn repository_name(repository_url: &str) -> Result<String, String> {
+    let repository_url = repository_url.trim().trim_end_matches(['/', '\\']);
+    let repository_path = match repository_url.split_once("://") {
+        Some((_, location)) => location.split_once('/').map(|(_, path)| path).unwrap_or(""),
+        None => repository_url,
+    };
+    let segment = repository_path
+        .rsplit(['/', '\\', ':'])
+        .next()
+        .unwrap_or_default();
+    let name = segment.strip_suffix(".git").unwrap_or(segment);
+    if name.is_empty() || matches!(name, "." | "..") {
+        return Err(format!(
+            "Unable to derive a local folder name from repository URL '{repository_url}'."
+        ));
+    }
+    Ok(name.to_string())
+}
+
 fn write_default_config(project_directory: &Path) -> Result<(), String> {
     let config_path = project_directory.join(WORKSPACE_CONFIG_FILE);
     fs::write(&config_path, default_config_toml()?)
+        .map_err(|error| format!("Unable to write '{}': {error}", config_path.display()))
+}
+
+fn write_graft_config(config_path: &Path, grafted_project: &Path) -> Result<(), String> {
+    fs::write(config_path, graft_config_toml(grafted_project)?)
         .map_err(|error| format!("Unable to write '{}': {error}", config_path.display()))
 }
 
@@ -151,8 +270,11 @@ fn ensure_gitignore_entry(path: &Path) -> Result<(), String> {
 fn generate_schema(project_directory: &Path) -> Result<(), String> {
     let executable = std::env::current_exe()
         .map_err(|error| format!("Unable to locate the xeno executable: {error}"))?;
+    let config_path = project_directory.join(WORKSPACE_CONFIG_FILE);
     let status = Command::new(&executable)
         .arg("schema")
+        .arg("--config")
+        .arg(&config_path)
         .current_dir(project_directory)
         .status()
         .map_err(|error| format!("Unable to run 'xeno schema': {error}"))?;
@@ -321,6 +443,36 @@ mod tests {
         assert!(validate_folder_name("..").is_err());
         assert!(validate_folder_name("models/api").is_err());
         assert!(validate_folder_name("/models").is_err());
+    }
+
+    #[test]
+    fn graft_alias_accepts_safe_nested_relative_paths() {
+        assert_eq!(
+            validate_graft_path("schemas/linked-schema").unwrap(),
+            PathBuf::from("schemas/linked-schema")
+        );
+        assert!(validate_graft_path("").is_err());
+        assert!(validate_graft_path(".").is_err());
+        assert!(validate_graft_path("..").is_err());
+        assert!(validate_graft_path("schemas/../linked-schema").is_err());
+        assert!(validate_graft_path("/schemas/linked-schema").is_err());
+    }
+
+    #[test]
+    fn repository_name_supports_https_ssh_and_git_suffixes() {
+        assert_eq!(
+            repository_name("https://example.com/team/tda-schemas").unwrap(),
+            "tda-schemas"
+        );
+        assert_eq!(
+            repository_name("https://example.com/team/tda-schemas.git/").unwrap(),
+            "tda-schemas"
+        );
+        assert_eq!(
+            repository_name("git@example.com:team/tda-schemas.git").unwrap(),
+            "tda-schemas"
+        );
+        assert!(repository_name("https://example.com/").is_err());
     }
 
     #[test]

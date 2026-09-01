@@ -10,7 +10,7 @@ use clap::{Parser, Subcommand};
 use config::run_config;
 use format::run_format;
 use graph::run_graph;
-use init::run_init;
+use init::{run_graft, run_init};
 use inspector::run_inspector;
 use xenomorph_common::config::{write_rc_schema, Config, LogLevel, RC_SCHEMA_RELATIVE_PATH};
 use xenomorph_common::module::{types::ModuleDiagnostic, XenoRegistry};
@@ -29,10 +29,20 @@ struct Cli {
 enum Commands {
     /// Initialize a new Xenomorph project in a Git repository.
     Init,
+    /// Attach a Xenomorph Git repository as a submodule.
+    Graft {
+        /// URL of the Xenomorph Git repository to attach.
+        #[arg(value_name = "REPO_URL")]
+        repo_url: String,
+    },
     /// Parse the configured workspace and run its generators.
     Generate,
     /// Generate the xenomorph.toml JSON Schema.
-    Schema,
+    Schema {
+        /// Load a specific config, including an abstract config.
+        #[arg(long, value_name = "FILE")]
+        config: Option<PathBuf>,
+    },
     /// Inspect the workspace configuration.
     Config {
         /// Print the resolved, deeply merged TOML configuration.
@@ -64,8 +74,14 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Commands::Graft { repo_url } => {
+            if let Err(error) = run_graft(&repo_url) {
+                eprintln!("✗ {error}");
+                std::process::exit(1);
+            }
+        }
         Commands::Generate => run_generate(),
-        Commands::Schema => generate_rc_schema(),
+        Commands::Schema { config } => generate_rc_schema(config.as_deref()),
         Commands::Config { inspect } => {
             if let Err(error) = run_config(inspect) {
                 eprintln!("✗ {error}");
@@ -89,7 +105,13 @@ fn main() {
 
 /// Generates the `xenomorph.toml` JSON Schema (base + plugin contributions) and
 /// writes it beside the deepest config in the inheritance chain.
-fn generate_rc_schema() {
+fn generate_rc_schema(config_path: Option<&std::path::Path>) {
+    if let Some(config_path) = config_path {
+        if let Err(error) = Config::initialize_from_path(config_path) {
+            eprintln!("✗ Failed to load xenomorph.toml config: {error}");
+            std::process::exit(1);
+        }
+    }
     let plugins = XenoPlugin::get_plugins();
     let out_path = Config::get().schema_workdir().join(RC_SCHEMA_RELATIVE_PATH);
 
@@ -269,6 +291,36 @@ mod tests {
         let cli = Cli::try_parse_from(["xeno", "init"]).expect("init command should parse");
 
         assert!(matches!(cli.command, Commands::Init));
+    }
+
+    #[test]
+    fn clap_parses_graft_repository_url() {
+        let cli =
+            Cli::try_parse_from(["xeno", "graft", "https://example.com/team/tda-schemas.git"])
+                .expect("graft command should parse");
+
+        assert!(matches!(
+            cli.command,
+            Commands::Graft { repo_url }
+                if repo_url == "https://example.com/team/tda-schemas.git"
+        ));
+    }
+
+    #[test]
+    fn clap_parses_schema_config_path() {
+        let cli = Cli::try_parse_from([
+            "xeno",
+            "schema",
+            "--config",
+            "schemas/linked/xenomorph.toml",
+        ])
+        .expect("schema config path should parse");
+
+        assert!(matches!(
+            cli.command,
+            Commands::Schema { config: Some(path) }
+                if path == PathBuf::from("schemas/linked/xenomorph.toml")
+        ));
     }
 
     #[test]

@@ -13,6 +13,7 @@ pub use watcher::WorkspaceConfigWatcher;
 
 pub const WORKSPACE_CONFIG_FILE: &str = "xenomorph.toml";
 pub(crate) const DEFAULT_CONFIG_IS_ABSTRACT: bool = false;
+const INITIALIZED_CONFIG_IS_ABSTRACT: bool = true;
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
@@ -173,6 +174,16 @@ impl Config {
         CONFIG.get_or_init(init_config)
     }
 
+    /// Initializes the process-wide configuration from an explicit file,
+    /// bypassing directory discovery so abstract configs can be operated on
+    /// directly by commands such as `xeno schema --config`.
+    pub fn initialize_from_path(config_path: &Path) -> Result<(), String> {
+        let config = load_config(config_path)?;
+        CONFIG
+            .set(config)
+            .map_err(|_| "Xenomorph configuration is already initialized.".to_string())
+    }
+
     pub fn workspace_config_path(&self) -> PathBuf {
         self.config_path
             .clone()
@@ -235,11 +246,18 @@ struct DefaultConfigDocument {
     config: Config,
 }
 
-/// Serializes a standalone `xenomorph.toml` containing every canonical
-/// runtime default and its editor schema directive.
+#[derive(Serialize)]
+struct GraftConfigDocument {
+    extends: String,
+    parser: ParserConfig,
+    plugins: PluginsConfig,
+}
+
+/// Serializes an abstract `xenomorph.toml` containing every canonical runtime
+/// default and its editor schema directive.
 pub fn default_config_toml() -> Result<String, String> {
     let document = DefaultConfigDocument {
-        is_abstract: DEFAULT_CONFIG_IS_ABSTRACT,
+        is_abstract: INITIALIZED_CONFIG_IS_ABSTRACT,
         config: Config::default(),
     };
     let config = serialize_config_toml(&document)?;
@@ -247,6 +265,23 @@ pub fn default_config_toml() -> Result<String, String> {
     Ok(format!(
         "#:schema ./{}\n\n{config}",
         RC_SCHEMA_RELATIVE_PATH
+    ))
+}
+
+/// Serializes the authoritative config that links the current project to a
+/// grafted Xenomorph project. Parser and plugin settings use their canonical
+/// defaults so the current project can override the grafted config explicitly.
+pub fn graft_config_toml(grafted_project: &Path) -> Result<String, String> {
+    let grafted_project = grafted_project.to_string_lossy().replace('\\', "/");
+    let document = GraftConfigDocument {
+        extends: format!("./{grafted_project}/{WORKSPACE_CONFIG_FILE}"),
+        parser: ParserConfig::default(),
+        plugins: PluginsConfig::default(),
+    };
+    let config = serialize_config_toml(&document)?;
+
+    Ok(format!(
+        "#:schema ./{grafted_project}/{RC_SCHEMA_RELATIVE_PATH}\n\n{config}"
     ))
 }
 
@@ -461,11 +496,13 @@ fn init_config() -> Config {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_config_toml, find_workspace_config, inspect_merged_config, load_config, Config,
-        ConfigValue, FormatterConfig, IndentKind, LineEnding, LogLevel, WORKSPACE_CONFIG_FILE,
+        default_config_toml, find_workspace_config, graft_config_toml, inspect_merged_config,
+        load_config, Config, ConfigValue, FormatterConfig, IndentKind, LineEnding, LogLevel,
+        WORKSPACE_CONFIG_FILE,
     };
     use crate::XenoDiagSeverity;
     use std::fs;
+    use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -488,7 +525,7 @@ mod tests {
 
         assert!(output.starts_with("#:schema ./.xenomorph/xenomorph.schema.json\n\n"));
         assert!(output.ends_with('\n'));
-        assert_eq!(value["abstract"].as_bool(), Some(false));
+        assert!(value["abstract"].as_bool().unwrap_or_default());
         assert!(value.get("workdir").is_none());
         assert_eq!(generated.parser.entry, expected.parser.entry);
         assert_eq!(generated.formatter, expected.formatter);
@@ -498,6 +535,26 @@ mod tests {
         assert_eq!(generated.debug.tokens, expected.debug.tokens);
         assert_eq!(generated.debug.ast, expected.debug.ast);
         assert_eq!(generated.debug.loglevel, expected.debug.loglevel);
+    }
+
+    #[test]
+    fn graft_config_uses_linked_schema_and_canonical_overrides() {
+        let output = graft_config_toml(Path::new("schemas/linked-schema"))
+            .expect("graft config should serialize");
+        let value: ConfigValue = toml::from_str(&output).expect("graft config should be TOML");
+        let defaults = ConfigValue::try_from(Config::default())
+            .expect("runtime config defaults should serialize");
+
+        assert!(output
+            .starts_with("#:schema ./schemas/linked-schema/.xenomorph/xenomorph.schema.json\n\n"));
+        assert_eq!(
+            value["extends"].as_str(),
+            Some("./schemas/linked-schema/xenomorph.toml")
+        );
+        assert_eq!(value["parser"], defaults["parser"]);
+        assert_eq!(value["plugins"], defaults["plugins"]);
+        assert!(value.get("formatter").is_none());
+        assert!(value.get("debug").is_none());
     }
 
     #[test]

@@ -16,7 +16,5 @@
         "test:xeno": "cargo test --release",
         "xeno:schema": "xeno schema"
     },
-    "devDependencies": {
-        "run-script-os": "^1.1.6"
-    }
+    "devDependencies": {}
 }
