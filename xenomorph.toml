@@ -1,6 +1,6 @@
 #:schema ./xeno/.xenomorph/xenomorph.schema.json
 
-extends = "./xeno/xenomorph.toml"
+extends = "./tda-schemas/xenomorph.toml"
 
 [parser]
 entry = "xeno/index"
