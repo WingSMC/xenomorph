@@ -5,17 +5,12 @@ use std::path::{Path, PathBuf};
 use xenomorph_common::config::Config;
 use xenomorph_common::formatter::format_xenomorph;
 
-pub fn run_format(args: &[String]) -> Result<FormatSummary, String> {
-    if args.len() > 1 {
-        return Err("Usage: xeno format [file.xen]".to_string());
-    }
-
+pub fn run_format(file: Option<&Path>) -> Result<FormatSummary, String> {
     let config = Config::get();
-    let paths = match args.first() {
+    let paths = match file {
         Some(path) => {
-            let path = PathBuf::from(path);
             let path = if path.is_absolute() {
-                path
+                path.to_path_buf()
             } else {
                 std::env::current_dir()
                     .map_err(|error| format!("Unable to determine current directory: {error}"))?

@@ -81,15 +81,24 @@
         "import-declarations": {
             "patterns": [
                 {
-                    "match": "\\b(import)\\s+([A-Za-z_][A-Za-z0-9_]*(?:/[A-Za-z_][A-Za-z0-9_]*)*)",
-                    "captures": {
+                    "begin": "\\b(import)[ \\t]+",
+                    "beginCaptures": {
                         "1": {
                             "name": "keyword.control.import.xenomorph"
-                        },
-                        "2": {
-                            "name": "entity.name.namespace.xenomorph"
                         }
-                    }
+                    },
+                    "end": ";",
+                    "endCaptures": {
+                        "0": {
+                            "name": "punctuation.terminator.statement.xenomorph"
+                        }
+                    },
+                    "patterns": [
+                        {
+                            "name": "entity.name.namespace.xenomorph",
+                            "match": "[A-Za-z0-9_]+(?:/[A-Za-z0-9_]+)*"
+                        }
+                    ]
                 }
             ]
         },

@@ -1,12 +1,11 @@
 import { execSync } from 'node:child_process';
-import { arch, platform } from 'node:process';
-
-console.log(`Packaging extension for ${platform}-${arch}...`);
+import PACKAGE from '../package.json' with { type: 'json' };
 
 // const target = `--target ${platform}-${arch}`
+// const outputFileName = `xenomorph-${platform}-${arch}.vsix`;
+const outputFileName = `xenomorph-${PACKAGE.version}.vsix`;
 
-const outputFileName = `xenomorph-${platform}-${arch}.vsix`;
-
+console.log(`Packaging extension "${outputFileName}"...`);
 execSync(`vsce package --out ${outputFileName}`, {
     stdio: 'inherit',
 });

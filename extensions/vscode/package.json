@@ -107,9 +107,6 @@
         "configurationDefaults": {
             "[xenomorph]": {
                 "editor.semanticHighlighting.enabled": true
-            },
-            "evenBetterToml.schema.associations": {
-                ".*xenomorph\\.toml$": "./.xenomorph/xenomorph.schema.json"
             }
         },
         "configuration": {
@@ -136,7 +133,7 @@
                 },
                 "xenomorph.codeLens.enabled": {
                     "type": "boolean",
-                    "default": true,
+                    "default": false,
                     "scope": "resource",
                     "description": "Show Parse, Debug, and View AST actions above declarations."
                 }

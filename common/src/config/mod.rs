@@ -128,13 +128,13 @@ impl LogLevel {
 }
 
 fn default_parser_path() -> String {
-    "index".to_string()
+    "xeno/index".to_string()
 }
 fn default_indent_width() -> usize {
     4
 }
 fn default_max_line_length() -> usize {
-    100
+    80
 }
 fn default_plugins_path() -> String {
     "".to_string()

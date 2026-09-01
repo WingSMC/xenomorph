@@ -365,13 +365,11 @@ fn annotation_breaks(
                 .get(start_token.line)
                 .is_some_and(|line| visual_length(line, indent_width) > max_line_length);
             let starts_after_content = follows_on_same_line
-                && source[line_start(&starts, start_token.line)..start_token.start]
+                && !source[line_start(&starts, start_token.line)..start_token.start]
                     .trim()
-                    .len()
-                    > 0;
+                    .is_empty();
             let start_new_line = starts_after_content
-                && ((position == 0 && force_annotation_line)
-                    || (position == 0 && line_is_overlong)
+                && ((position == 0 && (force_annotation_line || line_is_overlong))
                     || projected_length > max_line_length);
 
             if start_new_line {

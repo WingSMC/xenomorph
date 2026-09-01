@@ -4,7 +4,7 @@
 **/node_modules/
 coverage/
 
-# Generated xenomorph.toml JSON Schema
+# Generated xenomorph related files (e.g. schema for the config toml)
 **/.xenomorph/
 
 *.swp

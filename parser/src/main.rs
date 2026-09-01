@@ -2,6 +2,9 @@ mod format;
 mod graph;
 mod inspector;
 
+use std::path::PathBuf;
+
+use clap::{Parser, Subcommand};
 use format::run_format;
 use graph::run_graph;
 use inspector::run_inspector;
@@ -10,13 +13,44 @@ use xenomorph_common::module::{types::ModuleDiagnostic, XenoRegistry};
 use xenomorph_common::plugins::XenoPlugin;
 use xenomorph_common::XenoDiagSeverity;
 
+/// Parse Xenomorph workspaces and run developer tools.
+#[derive(Debug, Parser)]
+#[command(name = "xeno", version, arg_required_else_help = true)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    /// Parse the configured workspace and run its generators.
+    Generate,
+    /// Generate the xenomorph.toml JSON Schema.
+    Schema,
+    /// Inspect standalone Xenomorph source from standard input as JSON.
+    /// e.g. `cat my_module.xen | xeno inspect`
+    Inspect,
+    /// Print the configured workspace's module graph.
+    Graph {
+        /// Emit the versioned JSON representation instead of simple text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Format one Xenomorph file or all files in the configured workspace.
+    Format {
+        /// A .xen file to format; omit it to format the entire workspace.
+        #[arg(value_name = "FILE")]
+        file: Option<PathBuf>,
+    },
+}
+
 fn main() {
-    let args = std::env::args().skip(1).collect::<Vec<_>>();
-    match args.first().map(String::as_str) {
-        Some("schema") => generate_rc_schema(),
-        Some("inspect") => run_inspector(),
-        Some("graph") => run_graph(&args[1..]),
-        Some("format") => match run_format(&args[1..]) {
+    match Cli::parse().command {
+        Commands::Generate => run_generate(),
+        Commands::Schema => generate_rc_schema(),
+        Commands::Inspect => run_inspector(),
+        Commands::Graph { json } => run_graph(json),
+        Commands::Format { file } => match run_format(file.as_deref()) {
             Ok(summary) => println!(
                 "✓ Formatted {} file(s); {} changed",
                 summary.files, summary.changed
@@ -26,7 +60,6 @@ fn main() {
                 std::process::exit(1);
             }
         },
-        _ => run_parser(),
     }
 }
 
@@ -124,7 +157,7 @@ fn format_cli_diagnostic(diagnostic: &ModuleDiagnostic) -> String {
     )
 }
 
-fn run_parser() {
+fn run_generate() {
     let loglevel = Config::get().debug.loglevel;
     let reg = match XenoRegistry::load_workspace(true) {
         Ok(r) => r,
@@ -184,7 +217,39 @@ fn run_parser() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
     use xenomorph_common::module::types::ErrorPhase;
+
+    #[test]
+    fn clap_cli_definition_is_valid() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn clap_parses_graph_json_option() {
+        let cli =
+            Cli::try_parse_from(["xeno", "graph", "--json"]).expect("graph arguments should parse");
+
+        assert!(matches!(cli.command, Commands::Graph { json: true }));
+    }
+
+    #[test]
+    fn clap_parses_generate_command() {
+        let cli = Cli::try_parse_from(["xeno", "generate"]).expect("generate command should parse");
+
+        assert!(matches!(cli.command, Commands::Generate));
+    }
+
+    #[test]
+    fn clap_shows_help_when_no_command_is_provided() {
+        let error = Cli::try_parse_from(["xeno"]).expect_err("a command should be required");
+
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        );
+        assert!(error.to_string().contains("Usage: xeno <COMMAND>"));
+    }
 
     #[test]
     fn cli_diagnostic_format_includes_severity_and_module() {

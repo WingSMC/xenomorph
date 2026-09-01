@@ -15,16 +15,7 @@ fn path_for_output(path: &Path) -> String {
         .to_string()
 }
 
-pub fn run_graph(args: &[String]) {
-    let json = match args {
-        [] => false,
-        [flag] if flag == "--json" => true,
-        _ => {
-            eprintln!("Usage: xeno graph [--json]");
-            std::process::exit(2);
-        }
-    };
-
+pub fn run_graph(json: bool) {
     let registry = match XenoRegistry::load_workspace(false) {
         Ok(registry) => registry,
         Err(diagnostics) => {
