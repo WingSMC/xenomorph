@@ -693,13 +693,19 @@ impl Backend {
         tokens: &'a [Token<'a>],
         position: Position,
     ) -> Option<&'a Token<'a>> {
-        Self::find_token_at_position(source, tokens, position).or_else(|| {
-            tokens.iter().rev().find(|(_, data)| {
-                let end = token_to_editor_range(source, data).end;
-                end.line < position.line
-                    || (end.line == position.line && end.character <= position.character)
+        tokens
+            .iter()
+            .find(|(_, data)| {
+                let range = token_to_editor_range(source, data);
+                range.start < position && position < range.end
             })
-        })
+            .or_else(|| {
+                tokens.iter().rev().find(|(_, data)| {
+                    let end = token_to_editor_range(source, data).end;
+                    end.line < position.line
+                        || (end.line == position.line && end.character <= position.character)
+                })
+            })
     }
 
     // ── Document validation ─────────────────────────────────────────
@@ -1688,6 +1694,36 @@ mod tests {
             field,
             Position::new(0, field.len() as u32)
         ));
+    }
+
+    #[test]
+    fn completion_context_uses_type_content_before_terminating_semicolon() {
+        let source = "type A = string @minlen(10);";
+        let tokens = Lexer::tokenize(source).expect("completion fixture should lex");
+        let semicolon = source
+            .find(';')
+            .expect("fixture should contain a semicolon") as u32;
+
+        let token =
+            Backend::find_token_before_or_at_position(source, &tokens, Position::new(0, semicolon))
+                .expect("type content should precede the cursor");
+
+        assert_eq!(token.0, TokenVariant::RParen);
+    }
+
+    #[test]
+    fn completion_context_uses_terminator_after_semicolon() {
+        let source = "type A = string @minlen(10);";
+        let tokens = Lexer::tokenize(source).expect("completion fixture should lex");
+
+        let token = Backend::find_token_before_or_at_position(
+            source,
+            &tokens,
+            Position::new(0, source.len() as u32),
+        )
+        .expect("declaration terminator should precede the cursor");
+
+        assert_eq!(token.0, TokenVariant::Semicolon);
     }
 
     #[test]
