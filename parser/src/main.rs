@@ -41,6 +41,7 @@ enum Commands {
         repo_url: String,
     },
     /// Parse the configured workspace and run its generators.
+    #[command(aliases = ["g"])]
     Generate,
     /// Generate the xenomorph.toml JSON Schema.
     Schema {
