@@ -242,8 +242,9 @@ struct DefaultConfigDocument {
     #[serde(rename = "abstract")]
     is_abstract: bool,
 
-    #[serde(flatten)]
-    config: Config,
+    formatter: FormatterConfig,
+    plugins: PluginsConfig,
+    debug: DebugConfig,
 }
 
 #[derive(Serialize)]
@@ -253,12 +254,16 @@ struct GraftConfigDocument {
     plugins: PluginsConfig,
 }
 
-/// Serializes an abstract `xenomorph.toml` containing every canonical runtime
-/// default and its editor schema directive.
+/// Serializes an abstract `xenomorph.toml` containing the canonical shared
+/// defaults and its editor schema directive. The project-specific parser entry
+/// is intentionally omitted.
 pub fn default_config_toml() -> Result<String, String> {
+    let defaults = Config::default();
     let document = DefaultConfigDocument {
         is_abstract: INITIALIZED_CONFIG_IS_ABSTRACT,
-        config: Config::default(),
+        formatter: defaults.formatter,
+        plugins: defaults.plugins,
+        debug: defaults.debug,
     };
     let config = serialize_config_toml(&document)?;
 
@@ -530,6 +535,7 @@ mod tests {
         assert!(output.ends_with('\n'));
         assert!(value["abstract"].as_bool().unwrap_or_default());
         assert!(value.get("workdir").is_none());
+        assert!(value.get("parser").is_none());
         assert_eq!(generated.parser.entry, expected.parser.entry);
         assert_eq!(generated.formatter, expected.formatter);
         assert_eq!(generated.plugins.path, expected.plugins.path);

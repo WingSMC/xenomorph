@@ -9,6 +9,10 @@ use xenomorph_common::config::{
 };
 
 const GITIGNORE_ENTRY: &str = ".xenomorph/";
+const GITATTRIBUTES_CONTENT: &str = concat!(
+    "# Treat .xen files as TypeScript on GitHub\n",
+    "*.xen linguist-language=TypeScript\n",
+);
 
 pub fn run_init() -> Result<(), String> {
     let original_directory = std::env::current_dir()
@@ -52,6 +56,7 @@ pub fn run_init() -> Result<(), String> {
 
     write_default_config(&project_directory)?;
     ensure_gitignore_entry(&project_directory.join(".gitignore"))?;
+    write_gitattributes(&project_directory.join(".gitattributes"))?;
     generate_schema(&project_directory)?;
 
     if let Some(parent_repository) = parent_repository {
@@ -357,6 +362,11 @@ fn ensure_gitignore_entry(path: &Path) -> Result<(), String> {
         .map_err(|error| format!("Unable to update '{}': {error}", path.display()))
 }
 
+fn write_gitattributes(path: &Path) -> Result<(), String> {
+    fs::write(path, GITATTRIBUTES_CONTENT)
+        .map_err(|error| format!("Unable to write '{}': {error}", path.display()))
+}
+
 fn generate_schema(project_directory: &Path) -> Result<(), String> {
     let executable = std::env::current_exe()
         .map_err(|error| format!("Unable to locate the xeno executable: {error}"))?;
@@ -408,7 +418,13 @@ fn add_parent_submodule(
 ) -> Result<(), String> {
     run_git(
         project_directory,
-        ["add", "--", WORKSPACE_CONFIG_FILE, ".gitignore"],
+        [
+            "add",
+            "--",
+            WORKSPACE_CONFIG_FILE,
+            ".gitignore",
+            ".gitattributes",
+        ],
         "stage the initial project files",
     )?;
     run_git(
@@ -519,6 +535,8 @@ mod tests {
         let config = default_config_toml().expect("default config should serialize");
 
         assert!(config.starts_with("#:schema ./.xenomorph/xenomorph.schema.json\n\n"));
+        assert!(!config.contains("[parser]"));
+        assert!(!config.contains("entry ="));
         assert!(config.ends_with('\n'));
     }
 
@@ -674,6 +692,20 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&gitignore).unwrap(),
             "target/\n.xenomorph/\n"
+        );
+        fs::remove_dir_all(root).expect("temporary directory should be removed");
+    }
+
+    #[test]
+    fn gitattributes_configures_xen_files_for_github() {
+        let root = temporary_directory("gitattributes");
+        let gitattributes = root.join(".gitattributes");
+
+        write_gitattributes(&gitattributes).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&gitattributes).unwrap(),
+            "# Treat .xen files as TypeScript on GitHub\n*.xen linguist-language=TypeScript\n"
         );
         fs::remove_dir_all(root).expect("temporary directory should be removed");
     }
