@@ -296,7 +296,12 @@ fn parses_every_composite_type_case() {
     assert_eq!(ast.len(), 8);
     assert!(matches!(type_declaration(&ast[0]).1, Type::Tuple(items) if items.is_empty()));
     assert!(matches!(type_declaration(&ast[1]).1, Type::Tuple(items) if items.len() == 2));
-    assert!(matches!(type_declaration(&ast[2]).1, Type::Set(items) if items.len() == 2));
+    assert!(matches!(
+        type_declaration(&ast[2]).1,
+        Type::Set(set)
+            if set.element_type.is_none()
+                && set.values.as_ref().is_some_and(|values| values.len() == 2)
+    ));
     assert!(matches!(type_declaration(&ast[3]).1, Type::Struct(fields) if fields.is_empty()));
     assert!(matches!(
         type_declaration(&ast[4]).1,
@@ -308,6 +313,56 @@ fn parses_every_composite_type_case() {
     assert!(matches!(type_declaration(&ast[5]).1, Type::Enum(items) if items.len() == 2));
     assert!(matches!(type_declaration(&ast[6]).1, Type::Sum(items) if items.len() == 2));
     assert!(matches!(type_declaration(&ast[7]).1, Type::Intersection(items) if items.len() == 2));
+}
+
+#[test]
+fn parses_typed_inferred_and_prefilled_sets() {
+    let text = "type Open = set<string>; type Inferred = set [\"a\", \"b\"]; type Typed = set<string> [\"a\", \"b\"]; type Empty = set<string> [];";
+    let tokens = Lexer::tokenize(text).expect("set types must lex");
+    let (ast, diagnostics) = parse(&tokens);
+
+    assert_no_errors(&diagnostics);
+    assert_eq!(ast.len(), 4);
+    assert!(matches!(type_declaration(&ast[0]).1, Type::Set(set)
+        if matches!(&set.element_type, Some(SimpleType::Identifier(name, None)) if name.v == "string")
+            && set.values.is_none()));
+    assert!(matches!(type_declaration(&ast[1]).1, Type::Set(set)
+        if set.element_type.is_none()
+            && set.values.as_ref().is_some_and(|values| values.len() == 2)));
+    assert!(matches!(type_declaration(&ast[2]).1, Type::Set(set)
+        if set.element_type.is_some()
+            && set.values.as_ref().is_some_and(|values| values.len() == 2)));
+    assert!(matches!(type_declaration(&ast[3]).1, Type::Set(set)
+        if set.element_type.is_some()
+            && set.values.as_ref().is_some_and(Vec::is_empty)));
+}
+
+#[test]
+fn set_prefills_reject_non_literals() {
+    let text = "type Bad = set<string> [\"a\", string, \"b\"]; type After = string;";
+    let tokens = Lexer::tokenize(text).expect("invalid set prefill must still lex");
+    let (ast, diagnostics) = parse(&tokens);
+
+    assert_eq!(ast.len(), 1, "the following declaration must survive");
+    assert_eq!(type_declaration(&ast[0]).0, "After");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.severity == XenoDiagSeverity::Err
+            && diagnostic.message.contains("only literals")
+            && diagnostic.location.v == "string"
+    }));
+}
+
+#[test]
+fn rejects_bare_set_and_recovers_at_the_declaration_boundary() {
+    let text = "type Bad = set; type After = string;";
+    let tokens = Lexer::tokenize(text).expect("bare set must lex");
+    let (ast, diagnostics) = parse(&tokens);
+
+    assert_eq!(ast.len(), 1);
+    assert_eq!(type_declaration(&ast[0]).0, "After");
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.message.contains("requires an element type")));
 }
 
 #[test]

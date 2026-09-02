@@ -226,9 +226,17 @@ fn visit_type(
 ) {
     match ty {
         Type::Simple(simple) => visit_simple_type(roles, simple, type_parameters),
-        Type::Tuple(types) | Type::Set(types) | Type::Sum(types) | Type::Intersection(types) => {
+        Type::Tuple(types) | Type::Sum(types) | Type::Intersection(types) => {
             for ty in types {
                 visit_simple_type(roles, ty, type_parameters);
+            }
+        }
+        Type::Set(set) => {
+            if let Some(element_type) = &set.element_type {
+                visit_simple_type(roles, element_type, type_parameters);
+            }
+            for literal in set.values.as_deref().unwrap_or_default() {
+                visit_literal(roles, literal, type_parameters);
             }
         }
         Type::Struct(fields) => {

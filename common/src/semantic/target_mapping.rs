@@ -6,7 +6,7 @@ use super::{simple_to_owned_type, OwnedType, TypeHierarchy};
 /// Creates a fatal diagnostic when a source type contains a static semantic
 /// type that has no native mapping for the target language.
 ///
-/// Transparent aliases and nested type arguments are resolved recursively.
+/// Transparent aliases and built-in type utilities are evaluated recursively.
 /// Source declarations and generic parameters remain representable by name.
 pub fn unsupported_target_type_diagnostic<'src>(
     target: &str,
@@ -15,8 +15,8 @@ pub fn unsupported_target_type_diagnostic<'src>(
     has_native_mapping: impl FnMut(&str) -> bool,
 ) -> Option<XenoDiagnostic<'src>> {
     let identifier = simple_type_identifier(ty)?;
-    let resolved = hierarchy.resolve_transparent_aliases(&simple_to_owned_type(ty));
-    let type_name = first_unmapped_target_type(&resolved, hierarchy, has_native_mapping)?;
+    let evaluated = hierarchy.resolve_for_target(&simple_to_owned_type(ty));
+    let type_name = first_unmapped_target_type(&evaluated, hierarchy, has_native_mapping)?;
 
     Some(XenoDiagnostic {
         location: identifier.clone(),
@@ -51,10 +51,19 @@ fn first_unmapped_target_type_inner(
     has_native_mapping: &mut impl FnMut(&str) -> bool,
 ) -> Option<String> {
     match ty {
-        OwnedType::Array(inner) => {
+        OwnedType::Array(inner) | OwnedType::Optional(inner) => {
             first_unmapped_target_type_inner(inner, hierarchy, has_native_mapping)
         }
-        OwnedType::Generic { .. } => None,
+        OwnedType::Tuple(items) | OwnedType::Sum(items) | OwnedType::Intersection(items) => items
+            .iter()
+            .find_map(|item| first_unmapped_target_type_inner(item, hierarchy, has_native_mapping)),
+        OwnedType::Set(set) => set.element_type.as_deref().and_then(|element| {
+            first_unmapped_target_type_inner(element, hierarchy, has_native_mapping)
+        }),
+        OwnedType::Struct(fields) | OwnedType::Enum(fields) => fields.iter().find_map(|field| {
+            first_unmapped_target_type_inner(&field.ty, hierarchy, has_native_mapping)
+        }),
+        OwnedType::Literal(_) | OwnedType::Generic { .. } => None,
         OwnedType::Named { name, arguments } => {
             let is_static = hierarchy
                 .get_type(name)
@@ -111,6 +120,7 @@ mod tests {
             TypeDeclarationInfo {
                 generic_params: Vec::new(),
                 parents: vec![OwnedType::named("unmapped")],
+                body: OwnedType::named("unmapped"),
                 transparent_alias: true,
             },
         );
@@ -150,6 +160,7 @@ mod tests {
             TypeDeclarationInfo {
                 generic_params: Vec::new(),
                 parents: vec![OwnedType::named("unmapped")],
+                body: OwnedType::named("unmapped"),
                 transparent_alias: false,
             },
         );
@@ -168,5 +179,58 @@ mod tests {
             |_| false,
         )
         .is_none());
+    }
+
+    #[test]
+    fn accepts_utility_results_when_their_nested_types_are_mapped() {
+        let pick = TokenData {
+            v: "Pick",
+            l: 1,
+            c: 2,
+        };
+        let user = TokenData {
+            v: "User",
+            l: 1,
+            c: 7,
+        };
+        let key = TokenData {
+            v: "\"id\"",
+            l: 1,
+            c: 13,
+        };
+        let mut hierarchy = TypeHierarchy::default();
+        hierarchy.set_current_module("test");
+        hierarchy.register_module("test", Vec::new());
+        for semantic_type in crate::semantic::BUILTIN_TYPES {
+            hierarchy.insert_semantic_type(semantic_type);
+        }
+        hierarchy.insert_declaration(
+            "test",
+            "User",
+            TypeDeclarationInfo {
+                generic_params: Vec::new(),
+                parents: vec![OwnedType::named("dict")],
+                body: OwnedType::Struct(vec![crate::semantic::OwnedField {
+                    name: "id".to_string(),
+                    ty: OwnedType::named("string"),
+                    documentation: None,
+                }]),
+                transparent_alias: false,
+            },
+        );
+        let ty = SimpleType::Identifier(
+            &pick,
+            Some(vec![
+                SimpleType::Identifier(&user, None),
+                SimpleType::Literal(crate::parser::Literal::String("id".to_string(), &key)),
+            ]),
+        );
+
+        assert!(
+            unsupported_target_type_diagnostic("Target", &ty, &hierarchy, |name| {
+                matches!(name, "string" | "dict")
+            })
+            .is_none()
+        );
     }
 }

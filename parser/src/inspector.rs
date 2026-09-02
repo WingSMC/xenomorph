@@ -296,12 +296,29 @@ fn type_node(ty: &Type<'_>) -> AstNode {
             None,
             types.iter().map(simple_type_node).collect(),
         ),
-        Type::Set(types) => node(
-            "SetType",
-            None,
-            None,
-            types.iter().map(simple_type_node).collect(),
-        ),
+        Type::Set(set) => {
+            let mut children = Vec::new();
+            if let Some(element_type) = &set.element_type {
+                children.push(node(
+                    "ElementType",
+                    None,
+                    None,
+                    vec![simple_type_node(element_type)],
+                ));
+            }
+            if let Some(values) = &set.values {
+                children.push(node(
+                    "Values",
+                    None,
+                    None,
+                    values
+                        .iter()
+                        .map(|literal| literal_node("Literal", literal))
+                        .collect(),
+                ));
+            }
+            node("SetType", None, None, children)
+        }
         Type::Struct(fields) => node(
             "StructType",
             None,

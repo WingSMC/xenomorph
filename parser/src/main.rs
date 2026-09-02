@@ -19,7 +19,12 @@ use xenomorph_common::XenoDiagSeverity;
 
 /// Parse Xenomorph workspaces and run developer tools.
 #[derive(Debug, Parser)]
-#[command(name = "xeno", version, arg_required_else_help = true)]
+#[command(
+    name = "xeno",
+    version,
+    arg_required_else_help = true,
+    infer_subcommands = true
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

@@ -102,6 +102,13 @@ impl<'src> Parser<'src> {
         matches!(self.peek(), Some((variant, _)) if *variant == expected)
     }
 
+    pub fn previous(&self) -> Option<&'src TokenData<'src>> {
+        self.current
+            .checked_sub(1)
+            .and_then(|index| self.tokens.get(index))
+            .map(|(_, data)| data)
+    }
+
     pub fn step_forward(&mut self) {
         self.current += 1;
     }

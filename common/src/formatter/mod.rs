@@ -218,7 +218,8 @@ fn structural_breaks(
                 indent_width,
                 max_line_length,
                 indent_width,
-            ) {
+            ) && core_variant != TokenVariant::Set
+            {
                 if let Some(generic_open) = (core_start..core_end)
                     .find(|candidate| tokens[*candidate].variant == TokenVariant::Lt)
                 {

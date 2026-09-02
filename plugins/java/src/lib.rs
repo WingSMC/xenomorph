@@ -9,9 +9,10 @@ use xenomorph_common::parser::{
 };
 use xenomorph_common::plugins::XenoPlugin;
 use xenomorph_common::semantic::{
-    simple_to_owned_type, unsupported_target_type_diagnostic, AnalyzerListener, OwnedType,
-    ScopeInfo, TypeHierarchy, XenoAnnotation, XenoAnnotationKind, XenoConstraint, XenoParam,
-    XenoParent, XenoTrait, XenoTraitKind, XenoType as SemanticType, ANY_TARGET_PARAM,
+    is_type_utility, simple_to_owned_type, unsupported_target_type_diagnostic, AnalyzerListener,
+    OwnedField, OwnedLiteral, OwnedType, ScopeInfo, TypeHierarchy, XenoAnnotation,
+    XenoAnnotationKind, XenoConstraint, XenoParam, XenoParent, XenoTrait, XenoTraitKind,
+    XenoType as SemanticType, ANY_TARGET_PARAM,
 };
 use xenomorph_common::utils::extract_documentation;
 use xenomorph_common::{TokenData, XenoDiagSeverity, XenoDiagnostic};
@@ -163,6 +164,9 @@ struct JavaGenerator {
     type_hierarchy: TypeHierarchy,
     /// Generated files for the current module: (type name, file contents).
     files: Vec<(String, String)>,
+    /// Homogeneous literal collections emitted as `Xenomorph` constants.
+    /// `(name, type, value)`
+    constants: Vec<(String, String, String)>,
     /// Whether the current module contains a generated tuple declaration.
     has_tuples: bool,
     /// Annotation arguments are metadata and are not emitted as Java value types.
@@ -181,6 +185,7 @@ impl JavaGenerator {
             blanket_data: false,
             type_hierarchy: TypeHierarchy::default(),
             files: Vec::new(),
+            constants: Vec::new(),
             has_tuples: false,
             annotation_depth: 0,
         }
@@ -217,6 +222,7 @@ impl<'src> AnalyzerListener<'src> for JavaGenerator {
         self.module_path = scope.module_path.clone();
         self.type_hierarchy = scope.type_hierarchy.clone();
         self.files.clear();
+        self.constants.clear();
         self.has_tuples = false;
         self.annotation_depth = 0;
     }
@@ -235,6 +241,11 @@ impl<'src> AnalyzerListener<'src> for JavaGenerator {
                 ..
             } = decl
             {
+                if let Some((java_type, initializer)) = self.constant_collection(&t.0) {
+                    self.constants
+                        .push((name.v.to_string(), java_type, initializer));
+                    continue;
+                }
                 if matches!(&t.0, Type::Tuple(_)) {
                     self.has_tuples = true;
                 }
@@ -325,12 +336,110 @@ impl<'src> AnalyzerListener<'src> for JavaGenerator {
         for (name, content) in &self.files {
             write_java_file(&package_dir, scope.module_path.as_str(), name, content);
         }
+
+        if let Some(constants) = self.constants_file() {
+            write_java_file(
+                &package_dir,
+                scope.module_path.as_str(),
+                "Xenomorph",
+                &constants,
+            );
+        }
     }
 }
 
 // ── Type declaration generation ─────────────────────────────────────
 
 impl JavaGenerator {
+    /// Set and constant-collection declarations have no generated class, so
+    /// references to them resolve to the collection type itself.
+    fn declared_collection_type(
+        &self,
+        name: &str,
+        imports: &mut BTreeSet<String>,
+    ) -> Option<String> {
+        let body = self.type_hierarchy.get_type(name)?.body.as_ref()?;
+        let literals: Vec<&OwnedLiteral> = match body {
+            OwnedType::Set(set) if set.values.is_none() => {
+                return Some(self.owned_type_to_java(body, imports));
+            }
+            OwnedType::Set(set) => set.values.as_ref()?.iter().collect(),
+            OwnedType::Tuple(items) => items
+                .iter()
+                .map(|item| match item {
+                    OwnedType::Literal(literal) => Some(literal),
+                    _ => None,
+                })
+                .collect::<Option<_>>()?,
+            _ => return None,
+        };
+        Some(format!(
+            "{}[]",
+            common_java_owned_literal_type(&literals, imports)?
+        ))
+    }
+
+    /// Homogeneous literal tuples and prefilled sets become plain arrays.
+    /// Heterogeneous literal tuples keep their positional tuple class.
+    fn constant_collection(&self, ty: &Type) -> Option<(String, String)> {
+        let literals: Vec<&Literal> = match ty {
+            Type::Set(set) => set.values.as_ref()?.iter().collect(),
+            Type::Tuple(items) => items
+                .iter()
+                .map(|item| match item {
+                    SimpleType::Literal(literal) => Some(literal),
+                    _ => None,
+                })
+                .collect::<Option<_>>()?,
+            _ => return None,
+        };
+
+        let mut imports = BTreeSet::new();
+        let element = common_java_literal_type(&literals, &mut imports)?;
+        let values = literals
+            .iter()
+            .map(|literal| literal_to_java(literal, &element))
+            .collect::<Vec<_>>();
+        Some((format!("{element}[]"), format!("{{{}}}", values.join(", "))))
+    }
+
+    fn constants_file(&self) -> Option<String> {
+        if self.constants.is_empty() {
+            return None;
+        }
+
+        let mut imports = BTreeSet::new();
+        for (_, java_type, _) in &self.constants {
+            if java_type.starts_with("BigInteger") {
+                imports.insert("java.math.BigInteger".to_string());
+            }
+            if java_type.starts_with("BigDecimal") {
+                imports.insert("java.math.BigDecimal".to_string());
+            }
+        }
+
+        let mut out = String::new();
+        out.push_str("// Auto-generated by xenomorph-java — do not edit.\n");
+        if !self.package.is_empty() {
+            out.push_str(&format!("package {};\n", self.package));
+        }
+        out.push('\n');
+        if !imports.is_empty() {
+            for import in &imports {
+                out.push_str(&format!("import {import};\n"));
+            }
+            out.push('\n');
+        }
+        out.push_str("public class Xenomorph {\n");
+        for (name, java_type, initializer) in &self.constants {
+            out.push_str(&format!(
+                "    public static final {java_type} {name} = {initializer};\n"
+            ));
+        }
+        out.push_str("}\n");
+        Some(out)
+    }
+
     fn tuple_support_files(&self) -> Vec<(&'static str, String)> {
         if !self.has_tuples {
             return Vec::new();
@@ -354,6 +463,16 @@ impl JavaGenerator {
     ) -> Option<String> {
         let lombok_decorators = collect_lombok_decorators(&t.1);
 
+        if let Some(fields) = self.evaluated_utility_fields(&t.0) {
+            return Some(self.generate_owned_class(
+                docs,
+                name,
+                &format_generic_params(generics),
+                &fields,
+                &lombok_decorators,
+            ));
+        }
+
         match &t.0 {
             Type::Struct(fields) => Some(self.generate_class(
                 docs,
@@ -376,6 +495,114 @@ impl JavaGenerator {
 
     // ── Class (struct) generation ───────────────────────────────────
 
+    /// Type utilities are operations rather than referenceable types, so a
+    /// struct-producing utility is generated as a class of its own.
+    fn evaluated_utility_fields(&self, ty: &Type) -> Option<Vec<OwnedField>> {
+        let Type::Simple(SimpleType::Identifier(identifier, Some(arguments))) = ty else {
+            return None;
+        };
+        if !is_type_utility(identifier.v) {
+            return None;
+        }
+        let candidate = OwnedType::Named {
+            name: identifier.v.to_string(),
+            arguments: arguments.iter().map(simple_to_owned_type).collect(),
+        };
+        match self.type_hierarchy.evaluate_type(&candidate).ok()? {
+            OwnedType::Struct(fields) => Some(fields),
+            _ => None,
+        }
+    }
+
+    fn generate_owned_class(
+        &self,
+        docs: &Option<&str>,
+        name: &str,
+        generic_params: &str,
+        fields: &[OwnedField],
+        type_lombok_decorators: &[String],
+    ) -> String {
+        let mut imports: BTreeSet<String> = BTreeSet::new();
+        let class_annotations = self.class_annotations(type_lombok_decorators);
+
+        let mut field_block = String::new();
+        for field in fields {
+            let java_type = self.owned_type_to_java(&field.ty, &mut imports);
+            let literal = match &field.ty {
+                OwnedType::Literal(literal) => Some(literal),
+                _ => None,
+            };
+
+            if let Some(documentation) = field.documentation.as_deref() {
+                push_indented_javadoc(&mut field_block, documentation, "    ");
+            }
+            if !matches!(field.ty, OwnedType::Optional(_)) && literal.is_none() {
+                field_block.push_str("    @NonNull\n");
+                register_lombok_import(&mut imports, "NonNull");
+            }
+            if let Some(literal) = literal {
+                field_block.push_str(&format!(
+                    "    private final {java_type} {} = {};\n",
+                    field.name,
+                    owned_literal_to_java(literal, &java_type)
+                ));
+            } else {
+                field_block.push_str(&format!("    private {java_type} {};\n", field.name));
+            }
+        }
+
+        self.render_class(
+            docs,
+            name,
+            generic_params,
+            imports,
+            &class_annotations,
+            None,
+            &field_block,
+        )
+    }
+
+    fn render_class(
+        &self,
+        docs: &Option<&str>,
+        name: &str,
+        generic_params: &str,
+        mut imports: BTreeSet<String>,
+        class_annotations: &[String],
+        marker: Option<&str>,
+        field_block: &str,
+    ) -> String {
+        for annotation in class_annotations {
+            register_lombok_import(&mut imports, annotation);
+        }
+
+        let mut out = String::new();
+        out.push_str("// Auto-generated by xenomorph-java — do not edit.\n");
+        if !self.package.is_empty() {
+            out.push_str(&format!("package {};\n", self.package));
+        }
+        out.push('\n');
+
+        if !imports.is_empty() {
+            for import in &imports {
+                out.push_str(&format!("import {import};\n"));
+            }
+            out.push('\n');
+        }
+
+        push_javadoc(&mut out, docs);
+        if let Some(marker) = marker {
+            out.push_str(&format!("@{marker}\n"));
+        }
+        for annotation in class_annotations {
+            out.push_str(&format!("@{annotation}\n"));
+        }
+        out.push_str(&format!("public class {name}{generic_params} {{\n"));
+        out.push_str(field_block);
+        out.push_str("}\n");
+        out
+    }
+
     fn generate_class(
         &self,
         docs: &Option<&str>,
@@ -391,7 +618,7 @@ impl JavaGenerator {
         let mut field_block = String::new();
         for (key, value, docs) in fields {
             let java_type = self.type_to_java(value, &mut imports);
-            let nullable = is_optional(value);
+            let nullable = self.is_nullable(value);
             let literal = required_literal(value);
 
             if let Some(docs) = docs {
@@ -412,32 +639,15 @@ impl JavaGenerator {
             }
         }
 
-        for annotation in &class_annotations {
-            register_lombok_import(&mut imports, annotation);
-        }
-
-        let mut out = String::new();
-        out.push_str("// Auto-generated by xenomorph-java — do not edit.\n");
-        if !self.package.is_empty() {
-            out.push_str(&format!("package {};\n", self.package));
-        }
-        out.push('\n');
-
-        if !imports.is_empty() {
-            for import in &imports {
-                out.push_str(&format!("import {import};\n"));
-            }
-            out.push('\n');
-        }
-
-        push_javadoc(&mut out, docs);
-        for annotation in &class_annotations {
-            out.push_str(&format!("@{annotation}\n"));
-        }
-        out.push_str(&format!("public class {name}{generic_params} {{\n"));
-        out.push_str(&field_block);
-        out.push_str("}\n");
-        out
+        self.render_class(
+            docs,
+            name,
+            generic_params,
+            imports,
+            &class_annotations,
+            None,
+            &field_block,
+        )
     }
 
     fn generate_tuple_class(
@@ -458,7 +668,7 @@ impl JavaGenerator {
             let literal = required_literal(item);
 
             field_block.push_str(&format!("    @SerializedName(\"item{index}\")\n"));
-            if !is_optional(item) && literal.is_none() {
+            if !self.is_nullable(item) && literal.is_none() {
                 field_block.push_str("    @NonNull\n");
                 register_lombok_import(&mut imports, "NonNull");
             }
@@ -472,33 +682,15 @@ impl JavaGenerator {
             }
         }
 
-        for annotation in &class_annotations {
-            register_lombok_import(&mut imports, annotation);
-        }
-
-        let mut out = String::new();
-        out.push_str("// Auto-generated by xenomorph-java — do not edit.\n");
-        if !self.package.is_empty() {
-            out.push_str(&format!("package {};\n", self.package));
-        }
-        out.push('\n');
-
-        if !imports.is_empty() {
-            for import in &imports {
-                out.push_str(&format!("import {import};\n"));
-            }
-            out.push('\n');
-        }
-
-        push_javadoc(&mut out, docs);
-        out.push_str("@JsonTuple\n");
-        for annotation in &class_annotations {
-            out.push_str(&format!("@{annotation}\n"));
-        }
-        out.push_str(&format!("public class {name}{generic_params} {{\n"));
-        out.push_str(&field_block);
-        out.push_str("}\n");
-        out
+        self.render_class(
+            docs,
+            name,
+            generic_params,
+            imports,
+            &class_annotations,
+            Some("JsonTuple"),
+            &field_block,
+        )
     }
 
     /// Determines the Lombok class-level annotations for a generated class,
@@ -607,28 +799,20 @@ impl JavaGenerator {
     // ── Type mapping ────────────────────────────────────────────────
 
     fn type_to_java(&self, ty: &SimpleType, imports: &mut BTreeSet<String>) -> String {
-        match ty {
-            SimpleType::Identifier(_, _)
-            | SimpleType::OptionalIdentifier(_, _)
-            | SimpleType::Array(_, _)
-            | SimpleType::OptionalArray(_, _) => {
-                let owned = simple_to_owned_type(ty);
-                let resolved = self.type_hierarchy.resolve_transparent_aliases(&owned);
-                self.owned_type_to_java(&resolved, imports)
-            }
-            SimpleType::Literal(Literal::String(_, _))
-            | SimpleType::OptionalLiteral(Literal::String(_, _)) => "String".to_string(),
-            SimpleType::Literal(Literal::Boolean(_, _))
-            | SimpleType::OptionalLiteral(Literal::Boolean(_, _)) => "Boolean".to_string(),
-            SimpleType::Literal(Literal::Int(integer))
-            | SimpleType::OptionalLiteral(Literal::Int(integer)) => {
-                java_integer_type(integer.representation, imports).to_string()
-            }
-            SimpleType::Literal(Literal::Float(float))
-            | SimpleType::OptionalLiteral(Literal::Float(float)) => {
-                java_float_type(float.representation.size, imports).to_string()
-            }
-        }
+        self.owned_type_to_java(&self.resolved_type(ty), imports)
+    }
+
+    /// The concrete type a field carries once aliases and utilities are
+    /// resolved, e.g. `Required<D>` becomes `D` without its optionality.
+    fn resolved_type(&self, ty: &SimpleType) -> OwnedType {
+        self.type_hierarchy
+            .resolve_for_target(&simple_to_owned_type(ty))
+    }
+
+    /// Optionality can come from the `?` prefix or from a resolved alias or
+    /// utility such as `Optional<T>`.
+    fn is_nullable(&self, ty: &SimpleType) -> bool {
+        ty.is_optional() || matches!(self.resolved_type(ty), OwnedType::Optional(_))
     }
 
     fn owned_type_to_java(&self, ty: &OwnedType, imports: &mut BTreeSet<String>) -> String {
@@ -637,6 +821,42 @@ impl JavaGenerator {
                 imports.insert("java.util.List".to_string());
                 format!("List<{}>", self.owned_type_to_java(inner, imports))
             }
+            OwnedType::Optional(inner) => self.owned_type_to_java(inner, imports),
+            OwnedType::Literal(OwnedLiteral::String(_)) => "String".to_string(),
+            OwnedType::Literal(OwnedLiteral::Boolean(_)) => "Boolean".to_string(),
+            OwnedType::Literal(OwnedLiteral::Integer { representation, .. }) => {
+                java_integer_type(*representation, imports).to_string()
+            }
+            OwnedType::Literal(OwnedLiteral::Float { representation, .. }) => {
+                java_float_type(representation.size, imports).to_string()
+            }
+            OwnedType::Tuple(_) => {
+                imports.insert("java.util.List".to_string());
+                "List<Object>".to_string()
+            }
+            OwnedType::Set(set) => {
+                imports.insert("java.util.Set".to_string());
+                let element = set
+                    .element_type
+                    .as_deref()
+                    .map(|element| self.owned_type_to_java(element, imports))
+                    .or_else(|| {
+                        // An untyped prefill takes its element type from the first value.
+                        set.values
+                            .as_ref()
+                            .and_then(|values| values.first())
+                            .map(|value| {
+                                self.owned_type_to_java(&OwnedType::Literal(value.clone()), imports)
+                            })
+                    })
+                    .unwrap_or_else(|| "Object".to_string());
+                format!("Set<{element}>")
+            }
+            OwnedType::Struct(_) | OwnedType::Enum(_) => "Object".to_string(),
+            OwnedType::Sum(items) | OwnedType::Intersection(items) => items
+                .first()
+                .map(|item| self.owned_type_to_java(item, imports))
+                .unwrap_or_else(|| "Object".to_string()),
             OwnedType::Generic { name, .. } => name.clone(),
             OwnedType::Named { name, arguments }
             | OwnedType::Qualified {
@@ -676,6 +896,9 @@ impl JavaGenerator {
 
         if let Some(base) = native_type_to_java(name, imports) {
             return base;
+        }
+        if let Some(collection) = self.declared_collection_type(name, imports) {
+            return collection;
         }
         if arguments.is_empty() {
             name.to_string()
@@ -792,19 +1015,29 @@ fn register_lombok_import(imports: &mut BTreeSet<String>, decorator: &str) {
     }
 }
 
-fn is_optional(ty: &SimpleType) -> bool {
-    matches!(
-        ty,
-        SimpleType::OptionalLiteral(_)
-            | SimpleType::OptionalIdentifier(_, _)
-            | SimpleType::OptionalArray(_, _)
-    )
-}
-
 fn required_literal<'src>(ty: &'src SimpleType<'src>) -> Option<&'src Literal<'src>> {
     match ty {
         SimpleType::Literal(literal) => Some(literal),
         _ => None,
+    }
+}
+
+fn owned_literal_to_java(literal: &OwnedLiteral, java_type: &str) -> String {
+    match literal {
+        OwnedLiteral::String(value) => java_string_literal(value),
+        OwnedLiteral::Boolean(value) => value.to_string(),
+        OwnedLiteral::Integer { value, .. } if java_type == "Long" || java_type == "long" => {
+            format!("{value}L")
+        }
+        OwnedLiteral::Integer { value, .. } if java_type == "BigInteger" => {
+            format!("new BigInteger(\"{value}\")")
+        }
+        OwnedLiteral::Integer { value, .. } => value.to_string(),
+        OwnedLiteral::Float { value, .. } if java_type == "Float" => format!("{value}F"),
+        OwnedLiteral::Float { value, .. } if java_type == "BigDecimal" => {
+            format!("new BigDecimal(\"{value}\")")
+        }
+        OwnedLiteral::Float { value, .. } => format!("{value}D"),
     }
 }
 
@@ -854,6 +1087,73 @@ fn java_float_type(size: FloatSize, imports: &mut BTreeSet<String>) -> &'static 
             "BigDecimal"
         }
     }
+}
+
+/// The array element type shared by every literal, or `None` when the
+/// literals cannot live in one non-`Object` array.
+fn common_java_literal_type(
+    literals: &[&Literal],
+    imports: &mut BTreeSet<String>,
+) -> Option<String> {
+    let mut common: Option<String> = None;
+    for literal in literals {
+        let java_type = match literal {
+            Literal::String(_, _) => "String".to_string(),
+            Literal::Boolean(_, _) => "Boolean".to_string(),
+            Literal::Int(integer) => java_integer_type(integer.representation, imports).to_string(),
+            Literal::Float(float) => {
+                java_float_type(float.representation.size, imports).to_string()
+            }
+        };
+        common = Some(match common {
+            None => java_type,
+            Some(current) => widen_java_type(&current, &java_type)?,
+        });
+    }
+    common
+}
+
+fn common_java_owned_literal_type(
+    literals: &[&OwnedLiteral],
+    imports: &mut BTreeSet<String>,
+) -> Option<String> {
+    let mut common: Option<String> = None;
+    for literal in literals {
+        let java_type = match literal {
+            OwnedLiteral::String(_) => "String".to_string(),
+            OwnedLiteral::Boolean(_) => "Boolean".to_string(),
+            OwnedLiteral::Integer { representation, .. } => {
+                java_integer_type(*representation, imports).to_string()
+            }
+            OwnedLiteral::Float { representation, .. } => {
+                java_float_type(representation.size, imports).to_string()
+            }
+        };
+        common = Some(match common {
+            None => java_type,
+            Some(current) => widen_java_type(&current, &java_type)?,
+        });
+    }
+    common
+}
+
+/// Widens two literal types within the same family, e.g. `Byte` and `Short`
+/// become `Short`. Crossing families has no common array type.
+fn widen_java_type(left: &str, right: &str) -> Option<String> {
+    if left == right {
+        return Some(left.to_string());
+    }
+    const INTEGERS: &[&str] = &["Byte", "Short", "Integer", "Long", "BigInteger"];
+    const FLOATS: &[&str] = &["Float", "Double", "BigDecimal"];
+    for family in [INTEGERS, FLOATS] {
+        if let (Some(left), Some(right)) = (
+            family.iter().position(|candidate| *candidate == left),
+            family.iter().position(|candidate| *candidate == right),
+        ) {
+            return Some(family[left.max(right)].to_string());
+        }
+    }
+    None
 }
 
 fn common_java_integer_type<'a>(
@@ -1242,6 +1542,83 @@ mod tests {
     }
 
     #[test]
+    fn struct_utilities_generate_a_resolved_class() {
+        let ast = parse(
+            "type A = { field1: string, field2: i32, field3: ?bool }; type Keys = |\"field1\"|\"field3\"; type B = Pick<A, Keys>;",
+        );
+        let mut generator = generator_with_declarations(&ast);
+
+        generator.on_before_ast(&ast, &mut Vec::new());
+
+        let (_, class) = generator
+            .files
+            .iter()
+            .find(|(name, _)| name == "B")
+            .expect("struct utilities generate a class");
+        assert!(class.contains("public class B {"));
+        assert!(class.contains("    @NonNull\n    private String field1;"));
+        assert!(class.contains("    private Boolean field3;"));
+        assert!(!class.contains("field2"));
+        assert!(!class.contains("Pick"));
+    }
+
+    #[test]
+    fn homogeneous_literal_collections_become_xenomorph_array_constants() {
+        let ast = parse(
+            "type Colors = set [\"red\", \"green\"]; type Sizes = [1, 300]; type Holder = { colors: Colors };",
+        );
+        let mut generator = generator_with_declarations(&ast);
+
+        generator.on_before_ast(&ast, &mut Vec::new());
+
+        let constants = generator
+            .constants_file()
+            .expect("literal collections produce constants");
+        assert!(constants.contains("public class Xenomorph {"));
+        assert!(constants.contains("public static final String[] Colors = {\"red\", \"green\"};"));
+        assert!(constants.contains("public static final Short[] Sizes = {1, 300};"));
+        assert!(
+            !generator.files.iter().any(|(name, _)| name == "Colors"),
+            "constant collections do not get their own class"
+        );
+        assert!(generator
+            .files
+            .iter()
+            .any(|(name, contents)| name == "Holder"
+                && contents.contains("private String[] colors;")));
+    }
+
+    #[test]
+    fn heterogeneous_literal_tuples_keep_their_tuple_class() {
+        let ast = parse("type Mixed = [\"a\", 1];");
+        let mut generator = generator_with_builtins();
+
+        generator.on_before_ast(&ast, &mut Vec::new());
+
+        assert!(generator.constants_file().is_none());
+        assert!(generator.files.iter().any(|(name, contents)| {
+            name == "Mixed"
+                && contents.contains("@JsonTuple")
+                && contents.contains("private final String item0 = \"a\";")
+        }));
+    }
+
+    #[test]
+    fn sets_without_a_prefill_map_to_java_sets() {
+        let ast = parse("type Tags = set<string>; type Holder = { tags: Tags };");
+        let mut generator = generator_with_declarations(&ast);
+
+        generator.on_before_ast(&ast, &mut Vec::new());
+
+        assert!(generator.constants_file().is_none());
+        assert!(generator.files.iter().any(|(name, contents)| {
+            name == "Holder"
+                && contents.contains("import java.util.Set;")
+                && contents.contains("private Set<String> tags;")
+        }));
+    }
+
+    #[test]
     fn test_type_and_field_docs_are_preserved() {
         let key = xenomorph_common::TokenData {
             v: "displayName",
@@ -1391,6 +1768,7 @@ mod tests {
             TypeDeclarationInfo {
                 generic_params: vec![generic("T")],
                 parents: vec![OwnedType::named("T")],
+                body: OwnedType::named("T"),
                 transparent_alias: true,
             },
         );
@@ -1431,6 +1809,7 @@ mod tests {
             TypeDeclarationInfo {
                 generic_params: vec![generic("T")],
                 parents: vec![OwnedType::named("T")],
+                body: OwnedType::named("T"),
                 transparent_alias: true,
             },
         );
@@ -1443,6 +1822,10 @@ mod tests {
                     name: "Positive".to_string(),
                     arguments: vec![OwnedType::named("T")],
                 }))],
+                body: OwnedType::Array(Box::new(OwnedType::Named {
+                    name: "Positive".to_string(),
+                    arguments: vec![OwnedType::named("T")],
+                })),
                 transparent_alias: true,
             },
         );
@@ -1479,6 +1862,7 @@ mod tests {
             TypeDeclarationInfo {
                 generic_params: vec![generic("T")],
                 parents: vec![OwnedType::named("dict")],
+                body: OwnedType::named("dict"),
                 transparent_alias: false,
             },
         );
@@ -1514,6 +1898,7 @@ mod tests {
             TypeDeclarationInfo {
                 generic_params: vec![generic("T")],
                 parents: vec![OwnedType::named("T")],
+                body: OwnedType::named("T"),
                 transparent_alias: true,
             },
         );
@@ -1523,6 +1908,7 @@ mod tests {
             TypeDeclarationInfo {
                 generic_params: vec![],
                 parents: vec![OwnedType::named("u8")],
+                body: OwnedType::named("u8"),
                 transparent_alias: true,
             },
         );
@@ -1688,6 +2074,7 @@ mod tests {
             TypeDeclarationInfo {
                 generic_params: Vec::new(),
                 parents: vec![OwnedType::named("symbol")],
+                body: OwnedType::named("symbol"),
                 transparent_alias: true,
             },
         );
@@ -1782,6 +2169,23 @@ mod tests {
         generator.type_hierarchy.register_module("test", Vec::new());
         for semantic_type in BUILTIN_TYPES {
             generator.type_hierarchy.insert_semantic_type(semantic_type);
+        }
+        generator
+    }
+
+    fn generator_with_declarations(ast: &[Declaration<'_>]) -> JavaGenerator {
+        let mut generator = generator_with_builtins();
+        for declaration in ast {
+            if let Declaration::Type {
+                name, generics, ty, ..
+            } = declaration
+            {
+                generator.type_hierarchy.insert_declaration(
+                    "test",
+                    name.v,
+                    TypeDeclarationInfo::from_ast(generics.as_deref(), &ty.0),
+                );
+            }
         }
         generator
     }

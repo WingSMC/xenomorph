@@ -6,7 +6,7 @@ use crate::plugins::ListenerFactory;
 use crate::{
     config::PluginConfigs,
     module::ModuleData,
-    parser::{Annotation, Declaration, Expr, KeyValExpr, SimpleType, Type, XenoType},
+    parser::{Annotation, Declaration, Expr, KeyValExpr, SetType, SimpleType, Type, XenoType},
     plugins::XenoPlugin,
     semantic::{
         annotation_validator::AnnotationValidator, if_validator::IfChainValidator,
@@ -210,14 +210,8 @@ pub trait AnalyzerListener<'src> {
     ) {
     }
 
-    fn on_before_set(
-        &mut self,
-        inner: &[SimpleType<'src>],
-        errors: &mut Vec<XenoDiagnostic<'src>>,
-    ) {
-    }
-    fn on_after_set(&mut self, inner: &[SimpleType<'src>], errors: &mut Vec<XenoDiagnostic<'src>>) {
-    }
+    fn on_before_set(&mut self, set: &SetType<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {}
+    fn on_after_set(&mut self, set: &SetType<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {}
 
     fn on_simple_type(&mut self, ty: &SimpleType<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {}
 
@@ -606,15 +600,18 @@ fn walk_type_expr<'src>(
                 l.on_after_list(inner, errors);
             }
         }
-        Type::Set(inner) => {
+        Type::Set(set) => {
             for l in ls.iter_mut() {
-                l.on_before_set(inner, errors);
+                l.on_before_set(set, errors);
             }
-            for simple in inner {
-                walk_simple_type(ls, simple, errors);
+            if let Some(element_type) = &set.element_type {
+                walk_simple_type(ls, element_type, errors);
+            }
+            for literal in set.values.as_deref().unwrap_or_default() {
+                walk_simple_type(ls, &SimpleType::Literal(literal.clone()), errors);
             }
             for l in ls.iter_mut() {
-                l.on_after_set(inner, errors);
+                l.on_after_set(set, errors);
             }
         }
         Type::Sum(inner) | Type::Intersection(inner) => {
@@ -787,6 +784,7 @@ mod tests {
             TypeDeclarationInfo {
                 generic_params: vec![generic.clone()],
                 parents: vec![OwnedType::named("T")],
+                body: OwnedType::named("T"),
                 transparent_alias: true,
             },
         );
@@ -798,6 +796,10 @@ mod tests {
                     name: "Wrapped".to_string(),
                     arguments: vec![OwnedType::named("T")],
                 }],
+                body: OwnedType::Named {
+                    name: "Wrapped".to_string(),
+                    arguments: vec![OwnedType::named("T")],
+                },
                 transparent_alias: true,
             },
         );

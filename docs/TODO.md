@@ -1,8 +1,4 @@
-- [ ] This is just a concern: Make sure not to recompute the global types/traits hierarchy to keep the code performant, and keep a per-module local hierarchy that joins the global one. And importing modules can rely on other modules' local hierarchy. Also place declaration local hierarchies below this one (generics). This also makes validation easier. Although I think there is a notification feature missing from the LSP that tells importing modules that the current module changed and they need to recompute their own type constraints (and other validation). (if you implement this make sure not to run into recursive imports, modules can be exported by modules which are imported by a module)
-
-- Make sure sets actually mean a list of unique constants or types in the language so the same string literal twice in a set should error. Although it should be possible to make a set type via `set<T>` (no [...] here) without the prefill content, but `set (<T>)? [...SimpleTypeExpr]` should just yield a list/array of unique items where each item should be bound by the T constraint if `<T>` is defined, e.g. `set<string>["a", "b"]` -> fine `set<string>["a", "a", 123]` -> fails because duplicate "a" and 123 fails string/string literal constraint.
-
-- check if &A&B implies constraints are inherited from both (union) while |A|B implies only common types/traits are applicable at all times (intersecion).
+- This is just a concern: Make sure not to recompute the global types/traits hierarchy to keep the code performant, and keep a per-module local hierarchy that joins the global one. And importing modules can rely on other modules' local hierarchy. Also place declaration local hierarchies below this one (generics). This also makes validation easier.
 
 - Add gh actions on main tagging (manually enter version and replace all package.json & Cargo.toml versions with that, generate/build exe/dll/so/dylib/other executables and vsce package, publish the vscode extension to marketplace and individual binaries to npm with the given version) e.g. @xenomorph/cli @xenomorph/lsp @xenomorph/typescript @xenomorph/json-schema @xenomorph/java-dto
 
@@ -15,13 +11,10 @@
 
 - Utility to find duplicate types (ones which semantically map to the same thing after complete resolution (recursion!!!))
 
-* make a struct constraint
-* make some builtin type utilities like
-    - Pick<T: Struct, K: StringLiterals> (where string literals is a type like |"a"|"b"|"fieldc")
-    - Omit<T: Struct, K: StringLiterals>
-    - Keyof<T: Struct> => sum type of all keynames as string literals
-    - Optional<T> => makes ?T => T and ?T => ?T
-    - Required<T> => makes ?T => T and T => T
-    - Partial<T: Struct> => Optional on all fields
-    - Complete<T: Struct> => Required on all fields
-    - ToList<T: SumType<Literal>> => turns a sumtype of literals into a tuple/list (which will be a const in TS)
+- Decorator "result/return" types
+
+- Check if &A&B implies constraints are inherited from both (union because both A's and B's features are in the resulting type) while |A|B implies only common types/traits are applicable at all times (intersection) because only the intersection of A and B can be guaranteed on an A or B type (anything outside the intersection is only "optionally" present). And make sure completely incompatible types can't be &'d together.
+
+- Benchmarks and optimizations
+- !T for Required<T>
+- Deep literals (for structs & arrays)

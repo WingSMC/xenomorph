@@ -147,14 +147,12 @@ pub enum Type<'src> {
     /** e.g. [Type1, Type2, Type3] */
     Tuple(Vec<SimpleType<'src>>),
     /**
-    A set which can contain any number of types (or literals)
-    where types must be partially ordered to ensure uniqueness,
-    try to not rely on ordering.
-    The inferred set type will be the lowest common supertype of all the types in the set.
+    A unique collection with an optional element type and optional constant prefill.
 
-    e.g. set ["Blue", "Red", "Green"] // if this is translated to TS this will become a Set<string>
+    e.g. `set<string>`, `set ["Blue", "Red"]`, or
+    `set<string> ["Blue", "Red"]`.
     */
-    Set(Vec<SimpleType<'src>>),
+    Set(SetType<'src>),
 
     /** e.g. { field1: Type1, field2: Type2 } */
     Struct(Vec<KeyValExpr<'src>>),
@@ -168,6 +166,19 @@ pub enum Type<'src> {
     Sum(Vec<SimpleType<'src>>),
     /** e.g. & Type1 & Type2 & Type3 */
     Intersection(Vec<SimpleType<'src>>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetType<'src> {
+    /// The `set` keyword, retained for diagnostics and source navigation.
+    pub keyword: &'src TokenData<'src>,
+    /// An explicit element type from `set<T>`.
+    pub element_type: Option<SimpleType<'src>>,
+    /// A literal-only prefill. `None` means no prefill; `Some([])` is an
+    /// explicitly empty prefill.
+    pub values: Option<Vec<Literal<'src>>>,
+    /// The closing `>` or `]`, or the keyword when parsing cannot advance.
+    pub last_token: &'src TokenData<'src>,
 }
 
 /** Used for struct fields, sets, tuples */
@@ -373,9 +384,10 @@ impl<'src> Type<'src> {
         match self {
             Type::Simple(ty) => Some(ty.get_last_token()),
             Type::Struct(fs) | Type::Enum(fs) => fs.last().map(|f| f.1.get_last_token()),
-            Type::Tuple(ts) | Type::Set(ts) | Type::Intersection(ts) | Type::Sum(ts) => {
+            Type::Tuple(ts) | Type::Intersection(ts) | Type::Sum(ts) => {
                 ts.last().map(|t| t.get_last_token())
             }
+            Type::Set(set) => Some(set.last_token),
         }
     }
 
@@ -405,10 +417,66 @@ impl<'src> Type<'src> {
     }
 
     fn parse_set(parser: &mut Parser<'src>) -> Option<Type<'src>> {
-        parser.expect(TokenVariant::Set)?;
+        let keyword = parser.expect(TokenVariant::Set)?;
+        let mut last_token = keyword;
 
-        let fs = Self::parse_tuple(parser)?;
-        Some(Type::Set(fs))
+        let element_type = if parser.skip_if(TokenVariant::Lt) {
+            let element_type = SimpleType::parse(parser)?;
+            last_token = parser.expect(TokenVariant::Gt)?;
+            Some(element_type)
+        } else {
+            None
+        };
+
+        let values = if parser.peek_is(TokenVariant::LBracket) {
+            let values = parser.parse_list(
+                TokenVariant::LBracket,
+                TokenVariant::Comma,
+                Some(TokenVariant::RBracket),
+                Self::parse_set_value,
+            )?;
+            last_token = parser.previous().unwrap_or(last_token);
+            Some(values)
+        } else {
+            None
+        };
+
+        if element_type.is_none() && values.is_none() {
+            parser.diagnostics.push(XenoDiagnostic {
+                location: keyword.clone(),
+                message: "A set requires an element type, a literal prefill, or both.".to_string(),
+                severity: XenoDiagSeverity::Err,
+            });
+            return None;
+        }
+
+        Some(Type::Set(SetType {
+            keyword,
+            element_type,
+            values,
+            last_token,
+        }))
+    }
+
+    fn parse_set_value(parser: &mut Parser<'src>) -> Option<Literal<'src>> {
+        let token = parser.peek()?;
+        let literal = Literal::parse(parser, token);
+        if literal.is_none()
+            && !matches!(
+                token.0,
+                TokenVariant::Number
+                    | TokenVariant::String
+                    | TokenVariant::True
+                    | TokenVariant::False
+            )
+        {
+            parser.diagnostics.push(XenoDiagnostic {
+                location: token.1.clone(),
+                message: "Set prefills can contain only literals.".to_string(),
+                severity: XenoDiagSeverity::Err,
+            });
+        }
+        literal
     }
 
     fn parse_tuple(parser: &mut Parser<'src>) -> Option<Vec<SimpleType<'src>>> {
@@ -489,6 +557,16 @@ impl<'src> Type<'src> {
 }
 
 impl<'src> SimpleType<'src> {
+    /// Whether the type carries the `?` prefix.
+    pub fn is_optional(&self) -> bool {
+        matches!(
+            self,
+            SimpleType::OptionalLiteral(_)
+                | SimpleType::OptionalIdentifier(_, _)
+                | SimpleType::OptionalArray(_, _)
+        )
+    }
+
     pub fn get_last_token(&self) -> &'src TokenData<'src> {
         match self {
             SimpleType::Literal(l) | SimpleType::OptionalLiteral(l) => l.get_last_token(),

@@ -1,9 +1,14 @@
 use std::collections::HashSet;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub enum XenoTraitKind {
     /// A trait implemented by semantic types and inherited through parents.
     Semantic,
+    /// A structural trait implemented by source struct declarations.
+    Struct,
+    /// A structural trait implemented by sum types whose members satisfy the
+    /// embedded trait.
+    Sum(&'static XenoTrait),
     /// A trait implemented by every annotation argument expression.
     Expression,
     /// A trait implemented by literal annotation arguments.
@@ -74,6 +79,13 @@ pub static KEY_TRAIT: XenoTrait = XenoTrait {
     parents: None,
 };
 
+pub static STRUCT: XenoTrait = XenoTrait {
+    name: "Struct",
+    documentation: Some("Implemented by source struct declarations and their aliases."),
+    kind: XenoTraitKind::Struct,
+    parents: None,
+};
+
 pub static EXPRESSION: XenoTrait = XenoTrait {
     name: "Expression",
     documentation: Some("Implemented by every annotation argument expression."),
@@ -121,6 +133,20 @@ pub static BOOL_LITERAL: XenoTrait = XenoTrait {
     documentation: Some("Implemented by boolean literals."),
     kind: XenoTraitKind::LiteralType,
     parents: Some(&[&LITERAL]),
+};
+
+pub static STRING_LITERAL_SUM: XenoTrait = XenoTrait {
+    name: "Sum<StringLiteral>",
+    documentation: Some("Implemented by sum types whose members are all string literals."),
+    kind: XenoTraitKind::Sum(&STRING_LITERAL),
+    parents: None,
+};
+
+pub static LITERAL_SUM: XenoTrait = XenoTrait {
+    name: "Sum<Literal>",
+    documentation: Some("Implemented by sum types whose members are all literals."),
+    kind: XenoTraitKind::Sum(&LITERAL),
+    parents: None,
 };
 
 pub static IDENTIFIER: XenoTrait = XenoTrait {
@@ -620,6 +646,86 @@ static ARRAY: XenoType = XenoType {
     parents: Some(LENGTH_PARENT),
 };
 
+static STRUCT_PARAMETER: GenericParam = GenericParam {
+    name: "T",
+    constraint: Some(XenoConstraint::Trait(&STRUCT)),
+};
+
+static STRING_LITERAL_KEYS_PARAMETER: GenericParam = GenericParam {
+    name: "K",
+    constraint: Some(XenoConstraint::Trait(&STRING_LITERAL_SUM)),
+};
+
+static UNCONSTRAINED_PARAMETER: GenericParam = GenericParam {
+    name: "T",
+    constraint: None,
+};
+
+static PICK: XenoType = XenoType {
+    name: "Pick",
+    documentation: Some(
+        "Creates a struct containing only the selected fields from another struct.",
+    ),
+    generic_params: Some(&[&STRUCT_PARAMETER, &STRING_LITERAL_KEYS_PARAMETER]),
+    parents: Some(ANY_PARENT),
+};
+
+static OMIT: XenoType = XenoType {
+    name: "Omit",
+    documentation: Some("Creates a struct without the selected fields from another struct."),
+    generic_params: Some(&[&STRUCT_PARAMETER, &STRING_LITERAL_KEYS_PARAMETER]),
+    parents: Some(ANY_PARENT),
+};
+
+static KEYOF: XenoType = XenoType {
+    name: "Keyof",
+    documentation: Some("Creates a sum type containing a struct's field names as string literals."),
+    generic_params: Some(&[&STRUCT_PARAMETER]),
+    parents: Some(ANY_PARENT),
+};
+
+static REQUIRED: XenoType = XenoType {
+    name: "Required",
+    documentation: Some(
+        "Removes outer optionality from a type. Applying it to a required type is idempotent.",
+    ),
+    generic_params: Some(&[&UNCONSTRAINED_PARAMETER]),
+    parents: Some(ANY_PARENT),
+};
+
+static PARTIAL: XenoType = XenoType {
+    name: "Partial",
+    documentation: Some("Creates a struct in which every field is optional."),
+    generic_params: Some(&[&STRUCT_PARAMETER]),
+    parents: Some(ANY_PARENT),
+};
+
+static COMPLETE: XenoType = XenoType {
+    name: "Complete",
+    documentation: Some("Creates a struct in which every field is required."),
+    generic_params: Some(&[&STRUCT_PARAMETER]),
+    parents: Some(ANY_PARENT),
+};
+
+/// Type utilities are operations written with generic syntax rather than
+/// declared types. A target either spells one natively, like TypeScript's
+/// `Pick`, or has to evaluate it into a concrete type.
+#[rustfmt::skip]
+pub static BUILTIN_TYPE_UTILITIES: &[&XenoType] = &[
+    &PICK,
+    &OMIT,
+    &KEYOF,
+    &REQUIRED,
+    &PARTIAL,
+    &COMPLETE,
+];
+
+pub fn is_type_utility(name: &str) -> bool {
+    BUILTIN_TYPE_UTILITIES
+        .iter()
+        .any(|utility| utility.name == name)
+}
+
 #[rustfmt::skip]
 pub static BUILTIN_TYPES: &[&XenoType] = &[
     &TYPE,
@@ -666,12 +772,21 @@ pub static BUILTIN_TYPES: &[&XenoType] = &[
     &SEMVER,
     &DICT,
     &ARRAY,
+    &PICK,
+    &OMIT,
+    &KEYOF,
+    &REQUIRED,
+    &PARTIAL,
+    &COMPLETE,
 ];
 
 pub static BUILTIN_TRAITS: &[&XenoTrait] = &[
     &NUMERIC,
     &HAS_LENGTH,
     &KEY_TRAIT,
+    &STRUCT,
+    &STRING_LITERAL_SUM,
+    &LITERAL_SUM,
     &EXPRESSION,
     &LITERAL,
     &NUMBER_LITERAL,

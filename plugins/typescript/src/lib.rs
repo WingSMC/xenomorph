@@ -12,7 +12,7 @@ use xenomorph_common::semantic::{
     unsupported_target_type_diagnostic, AnalyzerListener, ScopeInfo, TypeHierarchy, XenoParent,
     XenoType as SemanticType, KEY_TRAIT,
 };
-use xenomorph_common::utils::extract_documentation;
+use xenomorph_common::utils::{extract_documentation, relative_module_path};
 use xenomorph_common::{TokenData, XenoDiagSeverity, XenoDiagnostic};
 
 // ── Plugin registration ─────────────────────────────────────────────
@@ -259,15 +259,35 @@ fn generate_type_decl(
         return;
     }
 
-    if let Type::Set(inner) = &t.0 {
-        if is_all_literals(inner) {
-            let elems: Vec<String> = inner.iter().map(simple_type_to_ts).collect();
+    if let Type::Set(set) = &t.0 {
+        if let Some(values) = &set.values {
+            let elems = values.iter().map(literal_to_ts).collect::<Vec<_>>();
+            let constraint = set
+                .element_type
+                .as_ref()
+                .map_or_else(String::new, |element| {
+                    format!(" satisfies readonly {}[]", simple_type_to_ts(element))
+                });
             out.push_str(&format!(
-                "export const {name} = new Set([{}] as const);\n",
+                "export const {name}_TYPE_VALUES = [{}] as const{constraint};\n",
                 elems.join(", ")
             ));
             out.push_str(&format!(
-                "export type {name} = typeof {name} extends Set<infer T> ? T : never;\n\n"
+                "export type {name} = (typeof {name}_TYPE_VALUES)[number];\n\n"
+            ));
+            return;
+        }
+    }
+
+    if let Type::Tuple(items) = &t.0 {
+        if is_all_required_literals(items) {
+            let values = items.iter().map(simple_type_to_ts).collect::<Vec<_>>();
+            out.push_str(&format!(
+                "export const {name}_TYPE_VALUES = [{}] as const;\n",
+                values.join(", ")
+            ));
+            out.push_str(&format!(
+                "export type {name} = typeof {name}_TYPE_VALUES;\n\n"
             ));
             return;
         }
@@ -333,23 +353,25 @@ fn generate_enum(out: &mut String, name: &str, variants: &[KeyValExpr]) {
 
 fn type_to_ts(ty: &Type) -> String {
     match ty {
-        Type::Simple(simple) => simple_type_to_ts(simple),
+        Type::Simple(simple) => optional_aware_ts(simple),
         Type::Tuple(items) => format!(
             "[{}]",
             items
                 .iter()
-                .map(simple_type_to_ts)
+                .map(optional_aware_ts)
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        Type::Set(items) => format!(
-            "Set<{}>",
-            items
+        Type::Set(set) => match (&set.element_type, &set.values) {
+            (_, Some(values)) if values.is_empty() => "never".to_string(),
+            (_, Some(values)) => values
                 .iter()
-                .map(simple_type_to_ts)
+                .map(literal_to_ts)
                 .collect::<Vec<_>>()
-                .join(" | ")
-        ),
+                .join(" | "),
+            (Some(element), None) => format!("Set<{}>", simple_type_to_ts(element)),
+            (None, None) => unreachable!("the parser rejects sets without a type or prefill"),
+        },
         Type::Struct(fields) => format!(
             "{{ {} }}",
             fields
@@ -377,7 +399,7 @@ fn type_to_ts(ty: &Type) -> String {
             .join(" | "),
         Type::Sum(items) => items
             .iter()
-            .map(simple_type_to_ts)
+            .map(optional_aware_ts)
             .collect::<Vec<_>>()
             .join(" | "),
         Type::Intersection(items) => items
@@ -385,6 +407,15 @@ fn type_to_ts(ty: &Type) -> String {
             .map(simple_type_to_ts)
             .collect::<Vec<_>>()
             .join(" & "),
+    }
+}
+
+/// Struct fields spell optionality with `?:`. Aliases, tuples, and unions have
+/// no such marker, so it has to become an explicit `| undefined`.
+fn optional_aware_ts(ty: &SimpleType) -> String {
+    match ty.is_optional() {
+        true => format!("{} | undefined", simple_type_to_ts(ty)),
+        false => simple_type_to_ts(ty),
     }
 }
 
@@ -414,6 +445,17 @@ fn named_type_to_ts(name: &str, arguments: Option<&[SimpleType]>) -> String {
             ),
             _ => "Map<string, unknown>".to_string(),
         };
+    }
+
+    // Utilities are operations: TypeScript spells several of them differently.
+    if let Some([target, ..]) = arguments {
+        let target = simple_type_to_ts(target);
+        match name {
+            "Keyof" => return format!("keyof {target}"),
+            "Required" => return format!("NonNullable<{target}>"),
+            "Complete" => return format!("Required<{target}>"),
+            _ => {}
+        }
     }
 
     let base = native_type_to_ts(name).unwrap_or(name);
@@ -518,18 +560,11 @@ fn expr_to_ts(expr: &Expr) -> String {
 }
 
 fn is_optional(ty: &SimpleType) -> bool {
-    matches!(
-        ty,
-        SimpleType::OptionalLiteral(_)
-            | SimpleType::OptionalIdentifier(_, _)
-            | SimpleType::OptionalArray(_, _)
-    )
+    ty.is_optional()
 }
 
-fn is_all_literals(types: &[SimpleType]) -> bool {
-    types
-        .iter()
-        .all(|ty| matches!(ty, SimpleType::Literal(_) | SimpleType::OptionalLiteral(_)))
+fn is_all_required_literals(types: &[SimpleType]) -> bool {
+    types.iter().all(|ty| matches!(ty, SimpleType::Literal(_)))
 }
 
 fn push_jsdoc(out: &mut String, docs: &str, indent: &str) {
@@ -559,39 +594,14 @@ fn inline_jsdoc(docs: Option<&xenomorph_common::TokenData>) -> String {
 }
 
 fn ts_import_specifier(from_module_path: &str, to_module_path: &str) -> String {
-    let mut from_dir = module_path_parts(from_module_path);
-    from_dir.pop();
-
-    let to_parts = module_path_parts(to_module_path);
-    let common_len = from_dir
-        .iter()
-        .zip(&to_parts)
-        .take_while(|(left, right)| left == right)
-        .count();
-
-    let mut relative_parts = vec![".."; from_dir.len().saturating_sub(common_len)];
-    relative_parts.extend(to_parts[common_len..].iter().copied());
-
-    let path = relative_parts.join("/");
-    if path.starts_with("..") {
-        path
-    } else {
-        format!("./{path}")
-    }
-}
-
-fn module_path_parts(module_path: &str) -> Vec<&str> {
-    module_path
-        .split(['/', '\\'])
-        .filter(|part| !part.is_empty())
-        .collect()
+    relative_module_path(from_module_path, to_module_path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use xenomorph_common::parser::{
-        FloatLiteral, FloatRepresentation, IntegerRepresentation, IntegerSize,
+        FloatLiteral, FloatRepresentation, IntegerRepresentation, IntegerSize, SetType,
     };
     use xenomorph_common::semantic::{
         OwnedType, TypeDeclarationInfo, TypeHierarchy, BUILTIN_TYPES,
@@ -718,6 +728,113 @@ mod tests {
         assert_eq!(
             out,
             "/**\n * @match(/^[A-Z]+$/)\n */\nexport type Uppercase = string;\n\n"
+        );
+    }
+
+    fn token(value: &str) -> TokenData<'_> {
+        TokenData {
+            v: value,
+            l: 0,
+            c: 0,
+        }
+    }
+
+    #[test]
+    fn prefilled_sets_emit_a_value_constant_and_a_member_union() {
+        let keyword = token("set");
+        let first = token("\"a\"");
+        let second = token("\"b\"");
+        let closing = token("]");
+        let ty = (
+            Type::Set(SetType {
+                keyword: &keyword,
+                element_type: None,
+                values: Some(vec![
+                    Literal::String("a".to_string(), &first),
+                    Literal::String("b".to_string(), &second),
+                ]),
+                last_token: &closing,
+            }),
+            vec![],
+        );
+        let mut out = String::new();
+
+        generate_type_decl(&mut out, &None, "A", None, &ty);
+
+        assert_eq!(
+            out,
+            "export const A_TYPE_VALUES = [\"a\", \"b\"] as const;\nexport type A = (typeof A_TYPE_VALUES)[number];\n\n"
+        );
+    }
+
+    #[test]
+    fn typed_prefilled_sets_constrain_their_values() {
+        let keyword = token("set");
+        let element = token("string");
+        let first = token("\"a\"");
+        let second = token("\"b\"");
+        let closing = token("]");
+        let ty = (
+            Type::Set(SetType {
+                keyword: &keyword,
+                element_type: Some(SimpleType::Identifier(&element, None)),
+                values: Some(vec![
+                    Literal::String("a".to_string(), &first),
+                    Literal::String("b".to_string(), &second),
+                ]),
+                last_token: &closing,
+            }),
+            vec![],
+        );
+        let mut out = String::new();
+
+        generate_type_decl(&mut out, &None, "A", None, &ty);
+
+        assert_eq!(
+            out,
+            "export const A_TYPE_VALUES = [\"a\", \"b\"] as const satisfies readonly string[];\nexport type A = (typeof A_TYPE_VALUES)[number];\n\n"
+        );
+    }
+
+    #[test]
+    fn sets_without_a_prefill_stay_collection_types() {
+        let keyword = token("set");
+        let element = token("string");
+        let closing = token(">");
+        let ty = (
+            Type::Set(SetType {
+                keyword: &keyword,
+                element_type: Some(SimpleType::Identifier(&element, None)),
+                values: None,
+                last_token: &closing,
+            }),
+            vec![],
+        );
+        let mut out = String::new();
+
+        generate_type_decl(&mut out, &None, "A", None, &ty);
+
+        assert_eq!(out, "export type A = Set<string>;\n\n");
+    }
+
+    #[test]
+    fn literal_tuples_emit_a_value_constant_and_keep_their_tuple_type() {
+        let first = token("\"a\"");
+        let second = token("\"b\"");
+        let ty = (
+            Type::Tuple(vec![
+                SimpleType::Literal(Literal::String("a".to_string(), &first)),
+                SimpleType::Literal(Literal::String("b".to_string(), &second)),
+            ]),
+            vec![],
+        );
+        let mut out = String::new();
+
+        generate_type_decl(&mut out, &None, "P", None, &ty);
+
+        assert_eq!(
+            out,
+            "export const P_TYPE_VALUES = [\"a\", \"b\"] as const;\nexport type P = typeof P_TYPE_VALUES;\n\n"
         );
     }
 
@@ -856,6 +973,7 @@ mod tests {
             TypeDeclarationInfo {
                 generic_params: Vec::new(),
                 parents: vec![OwnedType::named("Marker")],
+                body: OwnedType::named("Marker"),
                 transparent_alias: true,
             },
         );

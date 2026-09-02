@@ -99,7 +99,52 @@ impl AnnotationValidator {
             OwnedType::Array(inner) => {
                 OwnedType::Array(Box::new(self.resolve_generic_references(*inner)))
             }
-            OwnedType::Generic { .. } => candidate,
+            OwnedType::Optional(inner) => {
+                OwnedType::Optional(Box::new(self.resolve_generic_references(*inner)))
+            }
+            OwnedType::Tuple(items) => OwnedType::Tuple(
+                items
+                    .into_iter()
+                    .map(|item| self.resolve_generic_references(item))
+                    .collect(),
+            ),
+            OwnedType::Set(mut set) => {
+                set.element_type = set
+                    .element_type
+                    .map(|element| Box::new(self.resolve_generic_references(*element)));
+                OwnedType::Set(set)
+            }
+            OwnedType::Struct(fields) => OwnedType::Struct(
+                fields
+                    .into_iter()
+                    .map(|mut field| {
+                        field.ty = self.resolve_generic_references(field.ty);
+                        field
+                    })
+                    .collect(),
+            ),
+            OwnedType::Enum(variants) => OwnedType::Enum(
+                variants
+                    .into_iter()
+                    .map(|mut variant| {
+                        variant.ty = self.resolve_generic_references(variant.ty);
+                        variant
+                    })
+                    .collect(),
+            ),
+            OwnedType::Sum(items) => OwnedType::Sum(
+                items
+                    .into_iter()
+                    .map(|item| self.resolve_generic_references(item))
+                    .collect(),
+            ),
+            OwnedType::Intersection(items) => OwnedType::Intersection(
+                items
+                    .into_iter()
+                    .map(|item| self.resolve_generic_references(item))
+                    .collect(),
+            ),
+            OwnedType::Literal(_) | OwnedType::Generic { .. } => candidate,
         }
     }
 
@@ -259,6 +304,13 @@ impl AnnotationValidator {
                     .type_implements_trait(&simple_to_owned_type(simple), required),
                 _ => false,
             },
+            XenoTraitKind::Struct => matches!(arg, Expr::Type(Type::Struct(_))),
+            XenoTraitKind::Sum(member) => match arg {
+                Expr::Type(Type::Sum(items)) => items.iter().all(|item| {
+                    self.arg_matches_trait(&Expr::Type(Type::Simple(item.clone())), member)
+                }),
+                _ => false,
+            },
         }
     }
 
@@ -273,13 +325,11 @@ impl AnnotationValidator {
     fn type_location<'src>(ty: &Type<'src>) -> TokenData<'src> {
         match ty {
             Type::Simple(simple) => simple.get_last_token().clone(),
-            Type::Tuple(items)
-            | Type::Set(items)
-            | Type::Sum(items)
-            | Type::Intersection(items) => items
+            Type::Tuple(items) | Type::Sum(items) | Type::Intersection(items) => items
                 .first()
                 .map(|item| item.get_last_token().clone())
                 .unwrap_or_default(),
+            Type::Set(set) => set.last_token.clone(),
             Type::Struct(fields) | Type::Enum(fields) => fields
                 .first()
                 .map(|(key, _, _)| (*key).clone())

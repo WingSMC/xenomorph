@@ -96,11 +96,13 @@ fn find_arguments_in_xeno_type(
 fn find_arguments_in_type(ty: &Type<'_>, target: &TokenData<'_>) -> Option<Vec<String>> {
     match ty {
         Type::Simple(simple) => find_arguments_in_simple_type(simple, target),
-        Type::Tuple(items) | Type::Set(items) | Type::Sum(items) | Type::Intersection(items) => {
-            items
-                .iter()
-                .find_map(|simple| find_arguments_in_simple_type(simple, target))
-        }
+        Type::Tuple(items) | Type::Sum(items) | Type::Intersection(items) => items
+            .iter()
+            .find_map(|simple| find_arguments_in_simple_type(simple, target)),
+        Type::Set(set) => set
+            .element_type
+            .as_ref()
+            .and_then(|element| find_arguments_in_simple_type(element, target)),
         Type::Struct(fields) | Type::Enum(fields) => fields
             .iter()
             .find_map(|(_, simple, _)| find_arguments_in_simple_type(simple, target)),
@@ -158,7 +160,24 @@ fn format_type(ty: &Type<'_>, substitutions: &HashMap<&str, &str>) -> String {
     match ty {
         Type::Simple(simple) => format_simple_type(simple, substitutions),
         Type::Tuple(items) => format!("[{}]", format_simple_types(items, substitutions, ", ")),
-        Type::Set(items) => format!("set [{}]", format_simple_types(items, substitutions, ", ")),
+        Type::Set(set) => {
+            let element = set
+                .element_type
+                .as_ref()
+                .map(|element| format!("<{}>", format_simple_type(element, substitutions)))
+                .unwrap_or_default();
+            let values = set.values.as_ref().map_or_else(String::new, |values| {
+                format!(
+                    "[{}]",
+                    values
+                        .iter()
+                        .map(|literal| literal.source_text())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            });
+            format!("set{element}{values}")
+        }
         Type::Struct(fields) => format_fields("", fields, substitutions),
         Type::Enum(fields) => format_fields("enum ", fields, substitutions),
         Type::Sum(items) => format!("| {}", format_simple_types(items, substitutions, " | ")),

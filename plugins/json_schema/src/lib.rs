@@ -6,11 +6,12 @@ use std::str::FromStr;
 use serde_json::{json, Map, Value};
 use xenomorph_common::config::{Config, ConfigValue, PluginConfigs};
 use xenomorph_common::parser::{
-    Annotation, Declaration, Expr, KeyValExpr, Literal, SimpleType, Type, XenoType,
+    Annotation, Declaration, Expr, KeyValExpr, Literal, SetType, SimpleType, Type, XenoType,
 };
 use xenomorph_common::plugins::XenoPlugin;
 use xenomorph_common::semantic::{
-    unsupported_target_type_diagnostic, AnalyzerListener, ScopeInfo, TypeHierarchy,
+    is_type_utility, literal_to_owned, simple_to_owned_type, unsupported_target_type_diagnostic,
+    AnalyzerListener, OwnedLiteral, OwnedType, ScopeInfo, TypeHierarchy,
 };
 use xenomorph_common::utils::extract_documentation;
 use xenomorph_common::{TokenData, XenoDiagnostic};
@@ -259,7 +260,7 @@ impl JsonSchemaGenerator {
         match ty {
             Type::Simple(simple) => self.simple_type_to_schema(simple, context),
             Type::Tuple(items) => self.list_to_schema(items, context),
-            Type::Set(items) => self.set_to_schema(items, context),
+            Type::Set(set) => self.set_to_schema(set, context),
             Type::Struct(fields) => self.struct_to_schema(fields, context),
             Type::Enum(variants) => self.enum_to_schema(variants, context),
             Type::Sum(items) => json!({
@@ -324,6 +325,12 @@ impl JsonSchemaGenerator {
             }
         }
 
+        if is_type_utility(name) {
+            if let Some(schema) = self.utility_to_schema(name, arguments.unwrap_or_default()) {
+                return schema;
+            }
+        }
+
         let Some(arguments) = arguments.filter(|arguments| !arguments.is_empty()) else {
             return self.identifier_to_schema(name);
         };
@@ -366,6 +373,133 @@ impl JsonSchemaGenerator {
         self.ref_with_arguments(name, argument_schemas)
     }
 
+    /// Type utilities are operations, so they are evaluated into a concrete
+    /// schema rather than referenced by name.
+    fn utility_to_schema(&self, name: &str, arguments: &[SimpleType<'_>]) -> Option<Value> {
+        let candidate = OwnedType::Named {
+            name: name.to_string(),
+            arguments: arguments.iter().map(simple_to_owned_type).collect(),
+        };
+        let evaluated = self.type_hierarchy.evaluate_type(&candidate).ok()?;
+        (evaluated != candidate).then(|| self.owned_type_to_schema(&evaluated))
+    }
+
+    fn owned_type_to_schema(&self, ty: &OwnedType) -> Value {
+        match ty {
+            OwnedType::Named { name, arguments }
+            | OwnedType::Qualified {
+                name, arguments, ..
+            } => match builtin_to_schema(name) {
+                Some(schema) => schema,
+                None if arguments.is_empty() => self.ref_for(name),
+                None => self.ref_with_arguments(
+                    name,
+                    arguments
+                        .iter()
+                        .map(|argument| self.owned_type_to_schema(argument))
+                        .collect(),
+                ),
+            },
+            OwnedType::Array(inner) => json!({
+                "type": "array",
+                "items": self.owned_type_to_schema(inner),
+            }),
+            OwnedType::Optional(inner) => json!({
+                "anyOf": [self.owned_type_to_schema(inner), { "type": "null" }]
+            }),
+            OwnedType::Literal(literal) => owned_literal_to_schema(literal),
+            OwnedType::Tuple(items) => {
+                let items = items
+                    .iter()
+                    .map(|item| self.owned_type_to_schema(item))
+                    .collect::<Vec<_>>();
+                let count = items.len();
+                json!({
+                    "type": "array",
+                    "prefixItems": items,
+                    "minItems": count,
+                    "maxItems": count,
+                })
+            }
+            OwnedType::Set(set) => {
+                let items = set.element_type.as_deref().map_or_else(
+                    || {
+                        combine_type_schemas(
+                            set.values
+                                .as_deref()
+                                .unwrap_or_default()
+                                .iter()
+                                .map(owned_literal_to_schema)
+                                .collect(),
+                        )
+                    },
+                    |element| self.owned_type_to_schema(element),
+                );
+                let mut schema = json!({
+                    "type": "array",
+                    "uniqueItems": true,
+                    "items": items,
+                });
+                if let Some(values) = &set.values {
+                    schema["const"] =
+                        Value::Array(values.iter().map(owned_literal_to_json).collect());
+                }
+                schema
+            }
+            OwnedType::Struct(fields) => {
+                let mut properties = Map::new();
+                let mut required = Vec::new();
+                for field in fields {
+                    let mut schema = self.owned_type_to_schema(&field.ty);
+                    if let (Value::Object(map), Some(documentation)) =
+                        (&mut schema, field.documentation.as_deref())
+                    {
+                        map.insert("description".to_string(), json!(documentation));
+                    }
+                    properties.insert(field.name.clone(), schema);
+                    if !matches!(field.ty, OwnedType::Optional(_)) {
+                        required.push(json!(field.name));
+                    }
+                }
+                let mut schema = Map::new();
+                schema.insert("type".to_string(), json!("object"));
+                schema.insert("properties".to_string(), Value::Object(properties));
+                if !required.is_empty() {
+                    schema.insert("required".to_string(), Value::Array(required));
+                }
+                schema.insert("additionalProperties".to_string(), json!(false));
+                Value::Object(schema)
+            }
+            OwnedType::Enum(variants) => json!({
+                "oneOf": variants
+                    .iter()
+                    .map(|variant| json!({
+                        "type": "object",
+                        "properties": {
+                            "kind": { "const": variant.name },
+                            "value": self.owned_type_to_schema(&variant.ty),
+                        },
+                        "required": ["kind", "value"],
+                        "additionalProperties": false,
+                    }))
+                    .collect::<Vec<_>>()
+            }),
+            OwnedType::Sum(items) => json!({
+                "anyOf": items
+                    .iter()
+                    .map(|item| self.owned_type_to_schema(item))
+                    .collect::<Vec<_>>()
+            }),
+            OwnedType::Intersection(items) => json!({
+                "allOf": items
+                    .iter()
+                    .map(|item| self.owned_type_to_schema(item))
+                    .collect::<Vec<_>>()
+            }),
+            OwnedType::Generic { name, .. } => json!({ "x-xenomorph-generic-parameter": name }),
+        }
+    }
+
     fn identifier_to_schema(&self, name: &str) -> Value {
         match builtin_to_schema(name) {
             Some(schema) => schema,
@@ -379,25 +513,52 @@ impl JsonSchemaGenerator {
             .map(|item| self.simple_type_to_schema(item, context))
             .collect();
         let count = items.len();
-        json!({
+        let mut schema = json!({
             "type": "array",
             "prefixItems": items,
             "minItems": count,
             "maxItems": count,
-        })
+        });
+        if inner
+            .iter()
+            .all(|item| matches!(item, SimpleType::Literal(_)))
+        {
+            schema["const"] = Value::Array(
+                inner
+                    .iter()
+                    .filter_map(|item| match item {
+                        SimpleType::Literal(literal) => Some(literal_to_json(literal)),
+                        _ => None,
+                    })
+                    .collect(),
+            );
+        }
+        schema
     }
 
-    fn set_to_schema(&self, inner: &[SimpleType], context: &mut SchemaContext<'_, '_>) -> Value {
-        let schemas: Vec<Value> = inner
-            .iter()
-            .map(|item| self.simple_type_to_schema(item, context))
-            .collect();
-        let items = combine_type_schemas(schemas);
-        json!({
+    fn set_to_schema(&self, set: &SetType, context: &mut SchemaContext<'_, '_>) -> Value {
+        let items = set.element_type.as_ref().map_or_else(
+            || {
+                combine_type_schemas(
+                    set.values
+                        .as_deref()
+                        .unwrap_or_default()
+                        .iter()
+                        .map(literal_to_schema)
+                        .collect(),
+                )
+            },
+            |element| self.simple_type_to_schema(element, context),
+        );
+        let mut schema = json!({
             "type": "array",
             "uniqueItems": true,
             "items": items,
-        })
+        });
+        if let Some(values) = &set.values {
+            schema["const"] = Value::Array(values.iter().map(literal_to_json).collect());
+        }
+        schema
     }
 
     fn struct_to_schema(
@@ -784,16 +945,28 @@ fn literal_to_json(lit: &Literal) -> Value {
     }
 }
 
-fn literal_to_schema(literal: &Literal) -> Value {
-    let mut schema = match literal
-        .cast_target()
-        .and_then(|target| integer_schema(target.v).or_else(|| builtin_to_schema(target.v)))
+fn owned_literal_to_json(literal: &OwnedLiteral) -> Value {
+    match literal {
+        OwnedLiteral::Integer { value, .. } => exact_json_number(value),
+        OwnedLiteral::Float { value, .. } => exact_json_number(value),
+        OwnedLiteral::String(value) => json!(value),
+        OwnedLiteral::Boolean(value) => json!(value),
+    }
+}
+
+fn owned_literal_to_schema(literal: &OwnedLiteral) -> Value {
+    let mut schema = match integer_schema(literal.semantic_type_name())
+        .or_else(|| builtin_to_schema(literal.semantic_type_name()))
     {
         Some(Value::Object(schema)) => schema,
         _ => Map::new(),
     };
-    schema.insert("const".to_string(), literal_to_json(literal));
+    schema.insert("const".to_string(), owned_literal_to_json(literal));
     Value::Object(schema)
+}
+
+fn literal_to_schema(literal: &Literal) -> Value {
+    owned_literal_to_schema(&literal_to_owned(literal))
 }
 
 fn exact_json_number(value: &impl ToString) -> Value {
@@ -913,6 +1086,26 @@ mod tests {
     fn generate_defs(source: &str) -> Map<String, Value> {
         let ast = parse(source);
         let mut generator = JsonSchemaGenerator::new();
+        generator.type_hierarchy.set_current_module("test");
+        generator.type_hierarchy.register_module("test", Vec::new());
+        for semantic_type in xenomorph_common::semantic::BUILTIN_TYPES {
+            generator.type_hierarchy.insert_semantic_type(semantic_type);
+        }
+        for declaration in &ast {
+            if let Declaration::Type {
+                name, generics, ty, ..
+            } = declaration
+            {
+                generator.type_hierarchy.insert_declaration(
+                    "test",
+                    name.v,
+                    xenomorph_common::semantic::TypeDeclarationInfo::from_ast(
+                        generics.as_deref(),
+                        &ty.0,
+                    ),
+                );
+            }
+        }
         generator.on_before_ast(&ast, &mut Vec::new());
         generator.defs
     }
@@ -939,6 +1132,24 @@ mod tests {
             }
             _ => {}
         }
+    }
+
+    #[test]
+    fn struct_utilities_resolve_to_whole_schemas() {
+        let defs = generate_defs(
+            "type A = { field1: string, field2: i32, field3: ?bool }; type Keys = |\"field1\"|\"field3\"; type B = Pick<A, Keys>;",
+        );
+
+        let schema = &defs["B"];
+        assert_eq!(schema["type"], json!("object"));
+        assert_eq!(schema["properties"]["field1"]["type"], json!("string"));
+        assert!(schema["properties"]["field3"]["anyOf"].is_array());
+        assert!(schema["properties"].get("field2").is_none());
+        assert_eq!(schema["required"], json!(["field1"]));
+        assert!(
+            schema.get("$ref").is_none(),
+            "utilities must not reference a Pick definition"
+        );
     }
 
     #[test]

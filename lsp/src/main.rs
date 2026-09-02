@@ -158,9 +158,17 @@ fn collect_generic_references_from_type<'src>(
 ) {
     match ty {
         Type::Simple(ty) => collect_generic_references_from_simple_type(ty, name, references),
-        Type::Tuple(types) | Type::Set(types) | Type::Sum(types) | Type::Intersection(types) => {
+        Type::Tuple(types) | Type::Sum(types) | Type::Intersection(types) => {
             for ty in types {
                 collect_generic_references_from_simple_type(ty, name, references);
+            }
+        }
+        Type::Set(set) => {
+            if let Some(element_type) = &set.element_type {
+                collect_generic_references_from_simple_type(element_type, name, references);
+            }
+            for literal in set.values.as_deref().unwrap_or_default() {
+                collect_generic_references_from_literal(literal, name, references);
             }
         }
         Type::Struct(fields) | Type::Enum(fields) => {
@@ -499,7 +507,7 @@ impl Backend {
 
     fn literal_completions(&self, required: &XenoTrait) -> Vec<CompletionItem> {
         let accepts = |name: &str| {
-            required.kind == XenoTraitKind::Literal
+            matches!(required.kind, XenoTraitKind::Literal)
                 || self
                     .semantic_types()
                     .find(|candidate| candidate.name == name)
@@ -597,6 +605,8 @@ impl Backend {
                 items.extend(self.literal_completions(&xenomorph_common::semantic::LITERAL));
                 deduplicate_completions(items)
             }
+            XenoTraitKind::Struct => all_types(),
+            XenoTraitKind::Sum(member) => self.literal_completions(member),
         }
     }
 
