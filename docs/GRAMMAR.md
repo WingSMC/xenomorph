@@ -49,6 +49,33 @@ An explicit `as f32` or `as f64` must pass the corresponding round-trip check. `
 - Lists/Tuples: `[a, b, c]` with literals or types, for example `[string, i32]`
 - Arrays use postfix syntax: `Type[]`, for example `string[]` or `User[]`
 
+### Quoted field names
+
+Struct and enum keys can be quoted when their wire name is not a Xenomorph
+identifier or conflicts with a Xenomorph keyword:
+
+```xen
+type ExecutionMode = {
+        "ecu.test": ?Automation,
+        "type": string,
+};
+```
+
+The parser normalizes quoted keys to their unquoted value. Targets retain that
+value as the serialized property name:
+
+- JSON Schema uses the exact key in `properties`.
+- TypeScript emits an identifier property when legal and a quoted property
+    otherwise.
+- Java replaces characters that are not legal in a Java member name with `_`
+    and adds Gson `@SerializedName` with the exact wire key. For example,
+    `"ecu.test"` becomes `@SerializedName("ecu.test")` on `ecu_test`.
+
+Language targets report an error when a schema identifier conflicts with a
+native reserved keyword in a context that requires a native identifier. Java
+also reports keyword clashes for fields and enum variants. Quoted wire keys do
+not bypass these checks when the target must emit them as native identifiers.
+
 ## Builtin validators:
 
 The validators that are function-like that have the signiture `name(...args)` need a `@` prefix in the schema.

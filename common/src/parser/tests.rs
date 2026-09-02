@@ -265,7 +265,7 @@ fn postfix_arrays_do_not_conflict_with_tuples() {
 
 #[test]
 fn parses_nested_generic_specializations_as_simple_types() {
-    let text = "type Box<T> = T; type Example = Box<dict<string, Box<u8>>>; type Fields = { value: Box<string>, values: Box<u8>[], };";
+    let text = "type Box<T> = T; type Example = Box<Dict<string, Box<u8>>>; type Fields = { value: Box<string>, values: Box<u8>[], };";
     let tokens = Lexer::tokenize(text).expect("generic specializations must lex");
     let (ast, diagnostics) = parse(&tokens);
 
@@ -276,7 +276,7 @@ fn parses_nested_generic_specializations_as_simple_types() {
         Type::Simple(SimpleType::Identifier(name, Some(arguments)))
             if name.v == "Box"
                 && matches!(&arguments[0], SimpleType::Identifier(name, Some(arguments))
-                    if name.v == "dict" && arguments.len() == 2)
+                    if name.v == "Dict" && arguments.len() == 2)
     ));
     assert!(matches!(
         type_declaration(&ast[2]).1,
@@ -452,6 +452,34 @@ fn warning_only_struct_still_returns_its_declaration() {
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic.severity == XenoDiagSeverity::Warn
             && diagnostic.message.contains(source::DANGLING_DOCS_WARNING)
+    }));
+}
+
+#[test]
+fn quoted_strings_are_normalized_to_struct_field_identifiers() {
+    let text = "type Payload = { \"type\": string, \"ecu.test\": bool };";
+    let tokens = Lexer::tokenize(text).expect("quoted fields must lex");
+    let (ast, diagnostics) = parse(&tokens);
+
+    assert_no_errors(&diagnostics);
+    assert!(matches!(
+        type_declaration(&ast[0]).1,
+        Type::Struct(fields)
+            if fields.len() == 2
+                && fields[0].0.v == "type"
+                && fields[1].0.v == "ecu.test"
+    ));
+}
+
+#[test]
+fn unquoted_type_keyword_is_not_a_struct_field_identifier() {
+    let text = "type Payload = { type: string };";
+    let tokens = Lexer::tokenize(text).expect("keyword-shaped field must lex");
+    let (_, diagnostics) = parse(&tokens);
+
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.severity == XenoDiagSeverity::Err
+            && diagnostic.message.contains("Expected Identifier")
     }));
 }
 

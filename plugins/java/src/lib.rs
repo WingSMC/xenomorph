@@ -257,6 +257,31 @@ impl<'src> AnalyzerListener<'src> for JavaGenerator {
         }
     }
 
+    fn on_before_decl(&mut self, decl: &Declaration<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {
+        if let Declaration::Type { name, generics, .. } = decl {
+            report_java_keyword(name, "type", errors);
+            for (generic, _) in generics.as_deref().unwrap_or_default() {
+                report_java_keyword(generic, "generic parameter", errors);
+            }
+        }
+    }
+
+    fn on_before_struct(
+        &mut self,
+        fields: &[KeyValExpr<'src>],
+        errors: &mut Vec<XenoDiagnostic<'src>>,
+    ) {
+        validate_java_member_names(fields, "field", errors);
+    }
+
+    fn on_before_enum(
+        &mut self,
+        variants: &[KeyValExpr<'src>],
+        errors: &mut Vec<XenoDiagnostic<'src>>,
+    ) {
+        validate_java_member_names(variants, "enum variant", errors);
+    }
+
     fn on_simple_type(&mut self, ty: &SimpleType<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {
         if self.annotation_depth == 0 {
             if let Some(diagnostic) = unsupported_target_type_diagnostic(
@@ -528,6 +553,7 @@ impl JavaGenerator {
         let mut field_block = String::new();
         for field in fields {
             let java_type = self.owned_type_to_java(&field.ty, &mut imports);
+            let java_name = java_member_name(&field.name);
             let literal = match &field.ty {
                 OwnedType::Literal(literal) => Some(literal),
                 _ => None,
@@ -536,6 +562,7 @@ impl JavaGenerator {
             if let Some(documentation) = field.documentation.as_deref() {
                 push_indented_javadoc(&mut field_block, documentation, "    ");
             }
+            push_serialized_name(&mut field_block, &mut imports, &field.name, &java_name);
             if !matches!(field.ty, OwnedType::Optional(_)) && literal.is_none() {
                 field_block.push_str("    @NonNull\n");
                 register_lombok_import(&mut imports, "NonNull");
@@ -543,11 +570,11 @@ impl JavaGenerator {
             if let Some(literal) = literal {
                 field_block.push_str(&format!(
                     "    private final {java_type} {} = {};\n",
-                    field.name,
+                    java_name,
                     owned_literal_to_java(literal, &java_type)
                 ));
             } else {
-                field_block.push_str(&format!("    private {java_type} {};\n", field.name));
+                field_block.push_str(&format!("    private {java_type} {java_name};\n"));
             }
         }
 
@@ -618,12 +645,14 @@ impl JavaGenerator {
         let mut field_block = String::new();
         for (key, value, docs) in fields {
             let java_type = self.type_to_java(value, &mut imports);
+            let java_name = java_member_name(key.v);
             let nullable = self.is_nullable(value);
             let literal = required_literal(value);
 
             if let Some(docs) = docs {
                 push_indented_javadoc(&mut field_block, extract_documentation(docs), "    ");
             }
+            push_serialized_name(&mut field_block, &mut imports, key.v, &java_name);
             if !nullable && literal.is_none() {
                 field_block.push_str("    @NonNull\n");
                 register_lombok_import(&mut imports, "NonNull");
@@ -631,11 +660,11 @@ impl JavaGenerator {
             if let Some(literal) = literal {
                 field_block.push_str(&format!(
                     "    private final {java_type} {} = {};\n",
-                    key.v,
+                    java_name,
                     literal_to_java(literal, &java_type)
                 ));
             } else {
-                field_block.push_str(&format!("    private {java_type} {};\n", key.v));
+                field_block.push_str(&format!("    private {java_type} {java_name};\n"));
             }
         }
 
@@ -733,6 +762,12 @@ impl JavaGenerator {
                 .all(|(_, value, _)| matches!(value, SimpleType::Literal(Literal::Int(_))));
 
         let mut imports = BTreeSet::new();
+        if variants
+            .iter()
+            .any(|(key, _, _)| java_member_name(key.v) != key.v)
+        {
+            imports.insert("com.google.gson.annotations.SerializedName".to_string());
+        }
         let enum_value_type = if all_int {
             let literals = variants.iter().filter_map(|(_, value, _)| match value {
                 SimpleType::Literal(Literal::Int(integer)) => Some(integer),
@@ -772,7 +807,9 @@ impl JavaGenerator {
                 if let Some(docs) = docs {
                     push_indented_javadoc(&mut out, extract_documentation(docs), "    ");
                 }
-                out.push_str(&format!("    {}({value}){sep}\n", key.v));
+                let java_name = java_member_name(key.v);
+                push_serialized_name_line(&mut out, key.v, &java_name, "    ");
+                out.push_str(&format!("    {java_name}({value}){sep}\n"));
             }
             out.push('\n');
             out.push_str(&format!("    private final {java_type} value;\n\n"));
@@ -788,7 +825,9 @@ impl JavaGenerator {
                 if let Some(docs) = docs {
                     push_indented_javadoc(&mut out, extract_documentation(docs), "    ");
                 }
-                out.push_str(&format!("    {}{sep}\n", key.v));
+                let java_name = java_member_name(key.v);
+                push_serialized_name_line(&mut out, key.v, &java_name, "    ");
+                out.push_str(&format!("    {java_name}{sep}\n"));
             }
         }
 
@@ -879,7 +918,7 @@ impl JavaGenerator {
                 .unwrap_or_else(|| "Object".to_string());
             return format!("List<{element}>");
         }
-        if name == "dict" {
+        if name == "Dict" {
             imports.insert("java.util.Map".to_string());
             return match arguments {
                 [] => "Map<String, Object>".to_string(),
@@ -965,7 +1004,7 @@ fn native_type_to_java(name: &str, imports: &mut BTreeSet<String>) -> Option<Str
             imports.insert("java.util.List".to_string());
             "List<Object>".to_string()
         }
-        "dict" => {
+        "Dict" => {
             imports.insert("java.util.Map".to_string());
             "Map<String, Object>".to_string()
         }
@@ -1197,6 +1236,172 @@ fn java_string_literal(value: &str) -> String {
     }
     output.push('"');
     output
+}
+
+fn java_member_name(wire_name: &str) -> String {
+    let mut output = String::with_capacity(wire_name.len().max(1) + 1);
+    for (index, character) in wire_name.chars().enumerate() {
+        if index == 0 && !is_java_identifier_start(character) {
+            output.push('_');
+        }
+        output.push(if is_java_identifier_part(character) {
+            character
+        } else {
+            '_'
+        });
+    }
+    if output.is_empty() {
+        output.push('_');
+    }
+    if is_java_keyword(&output) {
+        output.push('_');
+    }
+    output
+}
+
+fn is_java_identifier_start(character: char) -> bool {
+    character == '_' || character == '$' || character.is_alphabetic()
+}
+
+fn is_java_identifier_part(character: char) -> bool {
+    is_java_identifier_start(character) || character.is_numeric()
+}
+
+fn is_java_keyword(candidate: &str) -> bool {
+    matches!(
+        candidate,
+        "abstract"
+            | "assert"
+            | "boolean"
+            | "break"
+            | "byte"
+            | "case"
+            | "catch"
+            | "char"
+            | "class"
+            | "const"
+            | "continue"
+            | "default"
+            | "do"
+            | "double"
+            | "else"
+            | "enum"
+            | "extends"
+            | "final"
+            | "finally"
+            | "float"
+            | "for"
+            | "goto"
+            | "if"
+            | "implements"
+            | "import"
+            | "instanceof"
+            | "int"
+            | "interface"
+            | "long"
+            | "native"
+            | "new"
+            | "package"
+            | "private"
+            | "protected"
+            | "public"
+            | "return"
+            | "short"
+            | "static"
+            | "strictfp"
+            | "super"
+            | "switch"
+            | "synchronized"
+            | "this"
+            | "throw"
+            | "throws"
+            | "transient"
+            | "try"
+            | "void"
+            | "volatile"
+            | "while"
+            | "_"
+            | "true"
+            | "false"
+            | "null"
+            | "var"
+            | "yield"
+            | "record"
+            | "sealed"
+            | "permits"
+            | "non-sealed"
+    )
+}
+
+fn report_java_keyword<'src>(
+    identifier: &TokenData<'src>,
+    kind: &str,
+    errors: &mut Vec<XenoDiagnostic<'src>>,
+) {
+    if is_java_keyword(identifier.v) {
+        errors.push(XenoDiagnostic {
+            location: identifier.clone(),
+            message: format!(
+                "Java {kind} identifier '{}' conflicts with a reserved keyword.",
+                identifier.v
+            ),
+            severity: XenoDiagSeverity::Err,
+        });
+    }
+}
+
+fn push_serialized_name(
+    output: &mut String,
+    imports: &mut BTreeSet<String>,
+    wire_name: &str,
+    java_name: &str,
+) {
+    if wire_name != java_name {
+        imports.insert("com.google.gson.annotations.SerializedName".to_string());
+        push_serialized_name_line(output, wire_name, java_name, "    ");
+    }
+}
+
+fn push_serialized_name_line(output: &mut String, wire_name: &str, java_name: &str, indent: &str) {
+    if wire_name != java_name {
+        output.push_str(&format!(
+            "{indent}@SerializedName({})\n",
+            java_string_literal(wire_name)
+        ));
+    }
+}
+
+fn validate_java_member_names<'src>(
+    members: &[KeyValExpr<'src>],
+    member_kind: &str,
+    errors: &mut Vec<XenoDiagnostic<'src>>,
+) {
+    let mut seen = std::collections::BTreeMap::<String, &str>::new();
+    for (key, _, _) in members {
+        if is_java_keyword(key.v) {
+            errors.push(XenoDiagnostic {
+                location: key.clone(),
+                message: format!(
+                    "Java {member_kind} identifier '{}' conflicts with a reserved keyword.",
+                    key.v
+                ),
+                severity: XenoDiagSeverity::Err,
+            });
+        }
+        let java_name = java_member_name(key.v);
+        if let Some(previous) = seen.insert(java_name.clone(), key.v) {
+            if previous != key.v {
+                errors.push(XenoDiagnostic {
+                    location: key.clone(),
+                    message: format!(
+                        "Java {member_kind} names '{}' and '{}' both normalize to '{java_name}'.",
+                        previous, key.v
+                    ),
+                    severity: XenoDiagSeverity::Err,
+                });
+            }
+        }
+    }
 }
 
 fn format_generic_params(generics: Option<&[(&TokenData, Option<&TokenData>)]>) -> String {
@@ -1637,7 +1842,7 @@ mod tests {
         };
         let ty = (
             Type::Struct(vec![(
-                &key,
+                key,
                 SimpleType::Identifier(&field_type, None),
                 Some(&field_docs),
             )]),
@@ -1651,6 +1856,92 @@ mod tests {
         assert!(output.contains(" * A user-facing profile."));
         assert!(output.contains("     * Name shown to users."));
         assert!(output.contains("    private String displayName;"));
+    }
+
+    #[test]
+    fn quoted_wire_names_use_safe_java_fields_and_gson_names() {
+        let ast = parse(r#"type Payload = { "ecu.test": string };"#);
+        let mut generator = generator_with_declarations(&ast);
+
+        generator.on_before_ast(&ast, &mut Vec::new());
+
+        let (_, class) = generator
+            .files
+            .iter()
+            .find(|(name, _)| name == "Payload")
+            .expect("struct generates a Java class");
+        assert!(class.contains("import com.google.gson.annotations.SerializedName;"));
+        assert!(class.contains("@SerializedName(\"ecu.test\")"));
+        assert!(class.contains("private String ecu_test;"));
+    }
+
+    #[test]
+    fn quoted_enum_names_use_safe_java_constants_and_gson_names() {
+        let ast = parse(r#"type Mode = enum { "ecu.test": 1, normal: 2 };"#);
+        let mut generator = generator_with_declarations(&ast);
+
+        generator.on_before_ast(&ast, &mut Vec::new());
+
+        let (_, generated_enum) = generator
+            .files
+            .iter()
+            .find(|(name, _)| name == "Mode")
+            .expect("enum generates a Java enum");
+        assert!(generated_enum.contains("@SerializedName(\"ecu.test\")"));
+        assert!(generated_enum.contains("ecu_test(1),"));
+    }
+
+    #[test]
+    fn java_name_normalization_collisions_are_rejected() {
+        let ast = parse(r#"type Payload = { "ecu.test": string, ecu_test: string };"#);
+        let Declaration::Type {
+            ty: (Type::Struct(fields), _),
+            ..
+        } = &ast[0]
+        else {
+            panic!("expected struct declaration");
+        };
+        let mut errors = Vec::new();
+
+        JavaGenerator::new().on_before_struct(fields, &mut errors);
+
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].message.contains("both normalize to 'ecu_test'"));
+    }
+
+    #[test]
+    fn java_keywords_are_rejected_for_field_identifiers() {
+        let ast = parse(r#"type Payload = { "class": string };"#);
+        let Declaration::Type {
+            ty: (Type::Struct(fields), _),
+            ..
+        } = &ast[0]
+        else {
+            panic!("expected struct declaration");
+        };
+        let mut errors = Vec::new();
+
+        JavaGenerator::new().on_before_struct(fields, &mut errors);
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            errors[0].message,
+            "Java field identifier 'class' conflicts with a reserved keyword."
+        );
+    }
+
+    #[test]
+    fn java_keywords_are_rejected_for_native_declaration_names() {
+        let ast = parse("type class = string;");
+        let mut errors = Vec::new();
+
+        JavaGenerator::new().on_before_decl(&ast[0], &mut errors);
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            errors[0].message,
+            "Java type identifier 'class' conflicts with a reserved keyword."
+        );
     }
 
     #[test]
@@ -1781,7 +2072,7 @@ mod tests {
         let generics = [(&type_parameter, Some(&constraint))];
         let ty = (
             Type::Struct(vec![(
-                &field_name,
+                field_name,
                 SimpleType::Identifier(
                     &alias_name,
                     Some(vec![SimpleType::Identifier(&argument, None)]),
@@ -1835,7 +2126,7 @@ mod tests {
         let argument = token("u8");
         let ty = (
             Type::Struct(vec![(
-                &field_name,
+                field_name,
                 SimpleType::Identifier(
                     &alias_name,
                     Some(vec![SimpleType::Identifier(&argument, None)]),
@@ -1861,8 +2152,8 @@ mod tests {
             "Box",
             TypeDeclarationInfo {
                 generic_params: vec![generic("T")],
-                parents: vec![OwnedType::named("dict")],
-                body: OwnedType::named("dict"),
+                parents: vec![OwnedType::named("Dict")],
+                body: OwnedType::named("Dict"),
                 transparent_alias: false,
             },
         );
@@ -1872,7 +2163,7 @@ mod tests {
         let argument = token("string");
         let ty = (
             Type::Struct(vec![(
-                &field_name,
+                field_name,
                 SimpleType::Identifier(
                     &box_name,
                     Some(vec![SimpleType::Identifier(&argument, None)]),
@@ -2001,7 +2292,7 @@ mod tests {
         let literal_token = token("\"#nv\\\"Store\"");
         let ty = (
             Type::Struct(vec![(
-                &field_name,
+                field_name,
                 SimpleType::Literal(Literal::String("#nv\"Store".to_string(), &literal_token)),
                 None,
             )]),
@@ -2020,7 +2311,7 @@ mod tests {
     fn test_parameterized_dict_maps_directly_to_java_map() {
         let generator = generator_with_builtins();
         let dict = OwnedType::Named {
-            name: "dict".to_string(),
+            name: "Dict".to_string(),
             arguments: vec![OwnedType::named("string"), OwnedType::named("u8")],
         };
         let mut i = imports();

@@ -71,6 +71,17 @@ type AllInterfaces = SomeOtherInterface + set ActuatorInterface
 
 ## Structs & Enums
 
+Quote serialized keys that contain punctuation or overlap with Xenomorph
+keywords. The Java target preserves the wire key with Gson metadata while
+using a legal Java member name.
+
+```xen
+type ExecutionMode = {
+	"ecu.test": ?Automation,
+	"type": string,
+};
+```
+
 ```ts
 
 type User = {

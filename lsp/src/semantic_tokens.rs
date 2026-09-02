@@ -242,7 +242,7 @@ fn visit_type(
         Type::Struct(fields) => {
             for (name, ty, _) in fields {
                 roles.insert(
-                    TokenPosition::from(*name),
+                    TokenPosition::from(name),
                     TokenStyle::declaration(TokenKind::Property),
                 );
                 visit_simple_type(roles, ty, type_parameters);
@@ -251,7 +251,7 @@ fn visit_type(
         Type::Enum(fields) => {
             for (name, ty, _) in fields {
                 roles.insert(
-                    TokenPosition::from(*name),
+                    TokenPosition::from(name),
                     TokenStyle::declaration(TokenKind::EnumMember),
                 );
                 visit_simple_type(roles, ty, type_parameters);

@@ -152,11 +152,20 @@ impl<'src> AnalyzerListener<'src> for TsGenerator {
         }
     }
 
+    fn on_before_decl(&mut self, decl: &Declaration<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {
+        if let Declaration::Type { name, generics, .. } = decl {
+            report_typescript_keyword(name, "type", errors);
+            for (generic, _) in generics.as_deref().unwrap_or_default() {
+                report_typescript_keyword(generic, "generic parameter", errors);
+            }
+        }
+    }
+
     fn on_simple_type(&mut self, ty: &SimpleType<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {
         if self.annotation_depth == 0 {
             if let Some(diagnostic) =
                 unsupported_target_type_diagnostic("TypeScript", ty, &self.type_hierarchy, |name| {
-                    native_type_to_ts(name).is_some()
+                    has_native_typescript_mapping(name)
                 })
             {
                 errors.push(diagnostic);
@@ -309,7 +318,10 @@ fn generate_interface(out: &mut String, name: &str, generic_params: &str, fields
             push_jsdoc(out, extract_documentation(docs), "  ");
         }
         let opt = if optional { "?" } else { "" };
-        out.push_str(&format!("  {}{opt}: {ts_type};\n", key.v));
+        out.push_str(&format!(
+            "  {}{opt}: {ts_type};\n",
+            typescript_property_name(key.v)
+        ));
     }
     out.push_str("}\n\n");
 }
@@ -329,7 +341,11 @@ fn generate_enum(out: &mut String, name: &str, variants: &[KeyValExpr]) {
             if let Some(docs) = docs {
                 push_jsdoc(out, extract_documentation(docs), "  ");
             }
-            out.push_str(&format!("  {} = {},\n", key.v, simple_type_to_ts(value)));
+            out.push_str(&format!(
+                "  {} = {},\n",
+                typescript_property_name(key.v),
+                simple_type_to_ts(value)
+            ));
         }
         out.push_str("}\n\n");
     } else {
@@ -379,7 +395,7 @@ fn type_to_ts(ty: &Type) -> String {
                 .map(|(key, value, docs)| format!(
                     "{}{}: {}",
                     inline_jsdoc(*docs),
-                    key.v,
+                    typescript_property_name(key.v),
                     simple_type_to_ts(value)
                 ))
                 .collect::<Vec<_>>()
@@ -433,15 +449,12 @@ fn simple_type_to_ts(ty: &SimpleType) -> String {
 }
 
 fn named_type_to_ts(name: &str, arguments: Option<&[SimpleType]>) -> String {
-    if name == "dict" {
-        return match arguments {
-            Some([key, value]) => format!(
-                "Map<{}, {}>",
-                simple_type_to_ts(key),
-                simple_type_to_ts(value)
-            ),
-            _ => "Map<string, unknown>".to_string(),
-        };
+    if let ("Dict", Some([key, value])) = (name, arguments) {
+        return format!(
+            "Record<{}, {}>",
+            simple_type_to_ts(key),
+            simple_type_to_ts(value)
+        );
     }
 
     // Utilities are operations: TypeScript spells several of them differently.
@@ -507,9 +520,12 @@ fn native_type_to_ts(name: &str) -> Option<&'static str> {
         "any" => "any",
         "null" => "null",
         "symbol" => "symbol",
-        "dict" => "Map<string, unknown>",
         _ => return None,
     })
+}
+
+fn has_native_typescript_mapping(name: &str) -> bool {
+    name == "Dict" || native_type_to_ts(name).is_some()
 }
 
 fn literal_to_ts(lit: &Literal) -> String {
@@ -594,6 +610,138 @@ fn ts_import_specifier(from_module_path: &str, to_module_path: &str) -> String {
     relative_module_path(from_module_path, to_module_path)
 }
 
+fn typescript_property_name(wire_name: &str) -> String {
+    if is_typescript_identifier_name(wire_name) {
+        wire_name.to_string()
+    } else {
+        typescript_string_literal(wire_name)
+    }
+}
+
+fn is_typescript_identifier_name(candidate: &str) -> bool {
+    let mut characters = candidate.chars();
+    let Some(first) = characters.next() else {
+        return false;
+    };
+    (first == '_' || first == '$' || first.is_alphabetic())
+        && characters
+            .all(|character| character == '_' || character == '$' || character.is_alphanumeric())
+}
+
+fn typescript_string_literal(value: &str) -> String {
+    let mut output = String::from("\"");
+    for character in value.chars() {
+        match character {
+            '\\' => output.push_str("\\\\"),
+            '"' => output.push_str("\\\""),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            control if control.is_control() => {
+                output.push_str(&format!("\\u{:04X}", control as u32));
+            }
+            character => output.push(character),
+        }
+    }
+    output.push('"');
+    output
+}
+
+fn is_typescript_keyword(candidate: &str) -> bool {
+    matches!(
+        candidate,
+        "break"
+            | "case"
+            | "catch"
+            | "class"
+            | "const"
+            | "continue"
+            | "debugger"
+            | "default"
+            | "delete"
+            | "do"
+            | "else"
+            | "enum"
+            | "export"
+            | "extends"
+            | "false"
+            | "finally"
+            | "for"
+            | "function"
+            | "if"
+            | "import"
+            | "in"
+            | "instanceof"
+            | "new"
+            | "null"
+            | "return"
+            | "super"
+            | "switch"
+            | "this"
+            | "throw"
+            | "true"
+            | "try"
+            | "typeof"
+            | "var"
+            | "void"
+            | "while"
+            | "with"
+            | "as"
+            | "implements"
+            | "interface"
+            | "let"
+            | "package"
+            | "private"
+            | "protected"
+            | "public"
+            | "static"
+            | "yield"
+            | "any"
+            | "boolean"
+            | "constructor"
+            | "declare"
+            | "get"
+            | "infer"
+            | "is"
+            | "keyof"
+            | "module"
+            | "namespace"
+            | "never"
+            | "readonly"
+            | "require"
+            | "number"
+            | "object"
+            | "set"
+            | "string"
+            | "symbol"
+            | "type"
+            | "undefined"
+            | "unique"
+            | "unknown"
+            | "from"
+            | "of"
+            | "override"
+            | "satisfies"
+    )
+}
+
+fn report_typescript_keyword<'src>(
+    identifier: &TokenData<'src>,
+    kind: &str,
+    errors: &mut Vec<XenoDiagnostic<'src>>,
+) {
+    if is_typescript_keyword(identifier.v) {
+        errors.push(XenoDiagnostic {
+            location: identifier.clone(),
+            message: format!(
+                "TypeScript {kind} identifier '{}' conflicts with a reserved keyword.",
+                identifier.v
+            ),
+            severity: XenoDiagSeverity::Err,
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -623,7 +771,7 @@ mod tests {
         };
         let ty = (
             Type::Struct(vec![(
-                &key,
+                key,
                 SimpleType::Identifier(&field_type, None),
                 Some(&field_docs),
             )]),
@@ -678,7 +826,7 @@ mod tests {
         let generics = [(&first_parameter, None), (&second_parameter, None)];
         let ty = (
             Type::Struct(vec![(
-                &field_name,
+                field_name,
                 SimpleType::Identifier(&field_type, None),
                 None,
             )]),
@@ -691,6 +839,45 @@ mod tests {
         assert_eq!(
             out,
             "export interface Container<T, U> {\n  value: T;\n}\n\n"
+        );
+    }
+
+    #[test]
+    fn punctuation_in_wire_property_names_is_quoted() {
+        let key = token("ecu.test");
+        let field_type = token("string");
+        let ty = (
+            Type::Struct(vec![(key, SimpleType::Identifier(&field_type, None), None)]),
+            vec![],
+        );
+        let mut out = String::new();
+
+        generate_type_decl(&mut out, &None, "Payload", None, &ty);
+
+        assert!(out.contains("  \"ecu.test\": string;"));
+    }
+
+    #[test]
+    fn typescript_keywords_are_rejected_for_native_declaration_names() {
+        let name = token("class");
+        let from = token("type");
+        let value = token("string");
+        let declaration = Declaration::Type {
+            docs: None,
+            name: &name,
+            generics: None,
+            ty: (Type::Simple(SimpleType::Identifier(&value, None)), vec![]),
+            from: &from,
+            to: &value,
+        };
+        let mut errors = Vec::new();
+
+        TsGenerator::new().on_before_decl(&declaration, &mut errors);
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            errors[0].message,
+            "TypeScript type identifier 'class' conflicts with a reserved keyword."
         );
     }
 
@@ -846,6 +1033,9 @@ mod tests {
         assert_eq!(native_type_to_ts("json"), Some("string"));
         assert_eq!(native_type_to_ts("null"), Some("null"));
         assert_eq!(native_type_to_ts("symbol"), Some("symbol"));
+        assert_eq!(native_type_to_ts("Dict"), None);
+        assert!(has_native_typescript_mapping("Dict"));
+        assert!(!has_native_typescript_mapping("dict"));
         assert_eq!(native_type_to_ts("MyCustomType"), None);
     }
 
@@ -866,21 +1056,21 @@ mod tests {
                 .iter()
                 .any(|candidate| candidate.name == "KeyTrait")));
         let key_parameter = hierarchy
-            .generic_parameters("dict")
+            .generic_parameters("Dict")
             .and_then(|parameters| parameters.into_iter().next())
-            .expect("dict should have a key parameter");
+            .expect("Dict should have a key parameter");
         assert_eq!(key_parameter.constraint.as_deref(), Some("KeyTrait"));
         assert!(hierarchy.satisfies_constraint(
             &OwnedType::named("symbol"),
             key_parameter
                 .constraint
                 .as_deref()
-                .expect("dict keys should be constrained"),
+                .expect("Dict keys should be constrained"),
             key_parameter.constraint_scope.as_deref(),
         ));
 
         let dict = TokenData {
-            v: "dict",
+            v: "Dict",
             l: 0,
             c: 0,
         };
@@ -902,7 +1092,7 @@ mod tests {
             ]),
         );
 
-        assert_eq!(simple_type_to_ts(&ty), "Map<symbol, string>");
+        assert_eq!(simple_type_to_ts(&ty), "Record<symbol, string>");
 
         let wide_integer = TokenData {
             v: "u64",
@@ -916,7 +1106,10 @@ mod tests {
                 SimpleType::Identifier(&value, None),
             ]),
         );
-        assert_eq!(simple_type_to_ts(&wide_integer_dict), "Map<bigint, string>");
+        assert_eq!(
+            simple_type_to_ts(&wide_integer_dict),
+            "Record<bigint, string>"
+        );
     }
 
     #[test]

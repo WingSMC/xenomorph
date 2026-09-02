@@ -294,6 +294,13 @@ pub static ANY: XenoType = XenoType {
     parents: None,
 };
 
+static NULL: XenoType = XenoType {
+    name: "null",
+    documentation: Some("The null type represents the absence of a value."),
+    generic_params: None,
+    parents: Some(ANY_PARENT),
+};
+
 static BOOL: XenoType = XenoType {
     name: "bool",
     documentation: Some(
@@ -615,9 +622,9 @@ static SEMVER: XenoType = XenoType {
 };
 
 static DICT: XenoType = XenoType {
-    name: "dict",
+    name: "Dict",
     documentation: Some(
-        "The dict type represents a collection of key-value pairs, where each key is unique and maps to a corresponding value.",
+        "The Dict type represents a collection of key-value pairs, where each key is unique and maps to a corresponding value.",
     ),
     generic_params: Some(&[
         &GenericParam {
@@ -730,6 +737,7 @@ pub fn is_type_utility(name: &str) -> bool {
 pub static BUILTIN_TYPES: &[&XenoType] = &[
     &TYPE,
     &ANY,
+    &NULL,
     &BOOL,
     &NUMBER,
     &INTEGER,

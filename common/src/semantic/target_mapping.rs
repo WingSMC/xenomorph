@@ -208,7 +208,7 @@ mod tests {
             "User",
             TypeDeclarationInfo {
                 generic_params: Vec::new(),
-                parents: vec![OwnedType::named("dict")],
+                parents: vec![OwnedType::named("Dict")],
                 body: OwnedType::Struct(vec![crate::semantic::OwnedField {
                     name: "id".to_string(),
                     ty: OwnedType::named("string"),
@@ -227,7 +227,7 @@ mod tests {
 
         assert!(
             unsupported_target_type_diagnostic("Target", &ty, &hierarchy, |name| {
-                matches!(name, "string" | "dict")
+                matches!(name, "string" | "Dict")
             })
             .is_none()
         );

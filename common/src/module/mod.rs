@@ -1443,14 +1443,14 @@ mod tests {
 
     #[test]
     fn dictionary_keys_must_implement_key_trait() {
-        let source = "type TextKey = dict<string, bool>; type NumberKey = dict<u8, string>; type Alias = string; type AliasKey = dict<Alias, u8>; type Bad = dict<bool, string>;";
+        let source = "type TextKey = Dict<string, bool>; type NumberKey = Dict<u8, string>; type Alias = string; type AliasKey = Dict<Alias, u8>; type Bad = Dict<bool, string>;";
         let mut cache = HashMap::new();
         cache.insert("test".to_string(), parsed_module("test", source));
 
         let errors = analyze(&cache, "test");
         assert_eq!(errors.len(), 1, "unexpected errors: {errors:#?}");
         assert!(errors[0].contains("bool"));
-        assert!(errors[0].contains("dict.K"));
+        assert!(errors[0].contains("Dict.K"));
         assert!(errors[0].contains("constraint 'KeyTrait'"));
     }
 

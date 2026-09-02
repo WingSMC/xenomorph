@@ -256,8 +256,9 @@ pub struct FloatLiteral<'src> {
 }
 
 pub type KeyValExpr<'src> = (
-    // field identifier
-    &'src TokenData<'src>,
+    // Field identifier. Quoted source keys are normalized to their unquoted
+    // contents by the parser, so this token is owned rather than borrowed.
+    TokenData<'src>,
     // field type
     SimpleType<'src>,
     // documentation comment for the field
@@ -519,9 +520,19 @@ impl<'src> Type<'src> {
             }
 
             let field = 'field: {
-                let Some(key) = parser.expect_at_current(TokenVariant::Identifier) else {
-                    break 'field None;
+                let key = match parser.peek() {
+                    Some((TokenVariant::Identifier, key)) => key.clone(),
+                    Some((TokenVariant::String, key)) => TokenData {
+                        v: &key.v[1..key.v.len() - 1],
+                        l: key.l,
+                        c: key.c + 1,
+                    },
+                    _ => {
+                        let _ = parser.expect_at_current(TokenVariant::Identifier);
+                        break 'field None;
+                    }
                 };
+                parser.step_forward();
                 if parser.expect_at_current(TokenVariant::Colon).is_none() {
                     break 'field None;
                 }

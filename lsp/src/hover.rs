@@ -187,7 +187,7 @@ fn format_type(ty: &Type<'_>, substitutions: &HashMap<&str, &str>) -> String {
 
 fn format_fields(
     prefix: &str,
-    fields: &[(&TokenData<'_>, SimpleType<'_>, Option<&TokenData<'_>>)],
+    fields: &[xenomorph_common::parser::KeyValExpr<'_>],
     substitutions: &HashMap<&str, &str>,
 ) -> String {
     if fields.is_empty() {
@@ -294,13 +294,13 @@ mod tests {
     #[test]
     fn specialized_hover_substitutes_generics_in_one_declaration_layer() {
         let ast = parse(
-            "type Ty<T> = { field1: T, field2: Ty2[], nested: dict<string, T> } @ann1 @ann2(P1, P2, \"asd\");",
+            "type Ty<T> = { field1: T, field2: Ty2[], nested: Dict<string, T> } @ann1 @ann2(P1, P2, \"asd\");",
         );
 
         assert_eq!(
             format_type_declaration(&ast[0], &["string".to_string()]).as_deref(),
             Some(
-                "type Ty<string> = {\n  field1: string,\n  field2: Ty2[],\n  nested: dict<string, string>,\n} @ann1 @ann2(P1, P2, \"asd\");"
+                "type Ty<string> = {\n  field1: string,\n  field2: Ty2[],\n  nested: Dict<string, string>,\n} @ann1 @ann2(P1, P2, \"asd\");"
             )
         );
     }
@@ -317,7 +317,7 @@ mod tests {
 
     #[test]
     fn hover_finds_arguments_on_the_exact_nested_reference() {
-        let ast = parse("type Use = dict<Ty<string>, Ty<u8>>;");
+        let ast = parse("type Use = Dict<Ty<string>, Ty<u8>>;");
         let Declaration::Type { ty, .. } = &ast[0] else {
             panic!("expected a type declaration");
         };

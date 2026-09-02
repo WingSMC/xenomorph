@@ -1082,7 +1082,7 @@ impl TypeHierarchy {
                     return true;
                 }
                 return self.type_implements_trait_inner(
-                    &OwnedType::named("dict"),
+                    &OwnedType::named("Dict"),
                     context,
                     required,
                     visited,
@@ -1349,7 +1349,7 @@ impl TypeHierarchy {
             }
             OwnedType::Struct(_) => {
                 return self.is_type_compatible_inner(
-                    &OwnedType::named("dict"),
+                    &OwnedType::named("Dict"),
                     context,
                     target,
                     visited,
@@ -1614,7 +1614,7 @@ pub fn type_parents(ty: &Type<'_>) -> Vec<OwnedType> {
         Type::Intersection(types) => types.iter().map(simple_to_owned_type).collect(),
         Type::Sum(_) => vec![OwnedType::named("any")],
         Type::Tuple(_) | Type::Set(_) => vec![OwnedType::named("array")],
-        Type::Struct(_) => vec![OwnedType::named("dict")],
+        Type::Struct(_) => vec![OwnedType::named("Dict")],
         Type::Enum(_) => vec![OwnedType::named("any")],
     }
 }
@@ -1942,7 +1942,7 @@ mod tests {
             "Box",
             TypeDeclarationInfo {
                 generic_params: vec![generic("T")],
-                parents: vec![OwnedType::named("dict")],
+                parents: vec![OwnedType::named("Dict")],
                 body: OwnedType::Struct(Vec::new()),
                 transparent_alias: false,
             },
@@ -2131,7 +2131,7 @@ mod tests {
         TypeDeclarationInfo {
             generic_params: Vec::new(),
             parents: match &body {
-                OwnedType::Struct(_) => vec![OwnedType::named("dict")],
+                OwnedType::Struct(_) => vec![OwnedType::named("Dict")],
                 OwnedType::Sum(_) => vec![OwnedType::named("any")],
                 _ => vec![body.clone()],
             },

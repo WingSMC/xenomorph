@@ -45,7 +45,7 @@ impl AnnotationValidator {
                 }
             }
             Type::Tuple(_) | Type::Set(_) => types.push(OwnedType::named("array")),
-            Type::Struct(_) => types.push(OwnedType::named("dict")),
+            Type::Struct(_) => types.push(OwnedType::named("Dict")),
             Type::Enum(_) => types.push(OwnedType::named("any")),
         }
     }

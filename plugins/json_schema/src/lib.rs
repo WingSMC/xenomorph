@@ -316,6 +316,13 @@ impl JsonSchemaGenerator {
             }
         }
 
+        if let ("Dict", Some([_, value])) = (name, arguments) {
+            return json!({
+                "type": "object",
+                "additionalProperties": self.simple_type_to_schema(value, context),
+            });
+        }
+
         let Some(arguments) = arguments.filter(|arguments| !arguments.is_empty()) else {
             return self.identifier_to_schema(name);
         };
@@ -371,6 +378,16 @@ impl JsonSchemaGenerator {
 
     fn owned_type_to_schema(&self, ty: &OwnedType) -> Value {
         match ty {
+            OwnedType::Named { name, arguments }
+            | OwnedType::Qualified {
+                name, arguments, ..
+            } if name == "Dict" => match arguments.as_slice() {
+                [_, value] => json!({
+                    "type": "object",
+                    "additionalProperties": self.owned_type_to_schema(value),
+                }),
+                _ => json!({ "type": "object" }),
+            },
             OwnedType::Named { name, arguments }
             | OwnedType::Qualified {
                 name, arguments, ..
@@ -879,7 +896,7 @@ fn builtin_to_schema(name: &str) -> Option<Value> {
         "integer" | "bigint" => json!({ "type": "integer" }),
         "any" => json!({}),
         "null" => json!({ "type": "null" }),
-        "dict" => json!({ "type": "object" }),
+        "Dict" => json!({ "type": "object" }),
         _ => return integer_schema(name),
     };
     Some(schema)
@@ -1151,7 +1168,7 @@ mod tests {
         };
         let ty = (
             Type::Struct(vec![(
-                &key,
+                key,
                 SimpleType::Identifier(&field_type, None),
                 Some(&field_docs),
             )]),
@@ -1188,7 +1205,7 @@ mod tests {
             c: 0,
         };
         let variants = vec![(
-            &key,
+            key,
             SimpleType::Literal(Literal::Int(IntLiteral {
                 value: 1.into(),
                 representation: IntegerRepresentation {
@@ -1236,6 +1253,23 @@ mod tests {
                     { "type": "number" },
                 ]
             }))
+        );
+    }
+
+    #[test]
+    fn generic_dict_uses_its_value_schema_for_additional_properties() {
+        let defs = generate_defs("type NamesById = Dict<string, uuid>;");
+
+        assert_eq!(
+            defs["NamesById"],
+            json!({
+                "type": "object",
+                "additionalProperties": {
+                    "type": "string",
+                    "format": "uuid",
+                },
+                "title": "NamesById",
+            })
         );
     }
 
