@@ -1008,6 +1008,7 @@ fn native_type_to_java(name: &str, imports: &mut BTreeSet<String>) -> Option<Str
             imports.insert("java.util.Map".to_string());
             "Map<String, Object>".to_string()
         }
+        "NEVER" => "Void".to_string(),
         "any" | "null" => "Object".to_string(),
         _ => return None,
     })
@@ -1981,6 +1982,10 @@ mod tests {
             native_type_to_java("binary", &mut i).as_deref(),
             Some("byte[]")
         );
+        assert_eq!(
+            native_type_to_java("NEVER", &mut i).as_deref(),
+            Some("Void")
+        );
         assert_eq!(native_type_to_java("MyType", &mut i), None);
         assert!(i.contains("java.math.BigInteger"));
         assert!(i.contains("java.util.UUID"));
@@ -2435,7 +2440,9 @@ mod tests {
             .all(|semantic_type| semantic_type.implements(&LOMBOK_TRAIT)));
         assert!(xenomorph_common::semantic::BUILTIN_TYPES
             .iter()
+            .filter(|semantic_type| semantic_type.name != "NEVER")
             .all(|semantic_type| !semantic_type.implements(&LOMBOK_TRAIT)));
+        assert!(xenomorph_common::semantic::NEVER.implements(&LOMBOK_TRAIT));
     }
 
     fn token(value: &'static str) -> TokenData<'static> {

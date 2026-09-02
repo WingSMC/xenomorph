@@ -1182,6 +1182,93 @@ mod tests {
     }
 
     #[test]
+    fn semantic_pass_exposes_never_as_a_source_type() {
+        let source = "type Impossible = NEVER; type StillImpossible = Impossible;";
+        let mut cache = HashMap::new();
+        cache.insert("test".to_string(), parsed_module("test", source));
+
+        assert!(analyze(&cache, "test").is_empty());
+    }
+
+    #[test]
+    fn semantic_pass_rejects_disjoint_intersections_as_never() {
+        let source = "type Impossible = &u8&string;";
+        let mut cache = HashMap::new();
+        cache.insert("test".to_string(), parsed_module("test", source));
+
+        assert_eq!(
+            analyze(&cache, "test"),
+            vec![
+                "Types 'u8' and 'string' cannot be intersected because their intersection is NEVER."
+            ]
+        );
+    }
+
+    #[test]
+    fn intersection_constraints_are_inherited_from_either_member() {
+        let source = "type Text = &uuid&any @match(/^[a-f]+$/);";
+        let mut cache = HashMap::new();
+        cache.insert("test".to_string(), parsed_module("test", source));
+
+        assert!(analyze(&cache, "test").is_empty());
+    }
+
+    #[test]
+    fn sum_constraints_must_be_guaranteed_by_every_member() {
+        let source = "type Text = |uuid|string @match(/^[a-f]+$/); type Mixed = |uuid|u8 @match(/^[a-f]+$/);";
+        let mut cache = HashMap::new();
+        cache.insert("test".to_string(), parsed_module("test", source));
+
+        assert_eq!(
+            analyze(&cache, "test"),
+            vec![
+                "Annotation '@match' is not applicable to type 'uuid | u8'. Required type(s): string."
+            ]
+        );
+    }
+
+    #[test]
+    fn standalone_optional_types_keep_present_value_constraints() {
+        let source = "type MaybeCount = ?u8 @min(0);";
+        let mut cache = HashMap::new();
+        cache.insert("test".to_string(), parsed_module("test", source));
+
+        assert!(analyze(&cache, "test").is_empty());
+    }
+
+    #[test]
+    fn intersection_validation_resolves_imported_aliases() {
+        let mut cache = HashMap::new();
+        cache.insert(
+            "base".to_string(),
+            parsed_module("base", "type Text = string;"),
+        );
+        cache.insert(
+            "test".to_string(),
+            parsed_module("test", "import base; type Impossible = &Text&u8;"),
+        );
+
+        assert_eq!(
+            analyze(&cache, "test"),
+            vec![
+                "Types 'Text' and 'u8' cannot be intersected because their intersection is NEVER."
+            ]
+        );
+    }
+
+    #[test]
+    fn intersection_validation_uses_generic_type_constraints() {
+        let source = "type Impossible<T: string> = &T&u8; type Possible<T: number> = &T&u8;";
+        let mut cache = HashMap::new();
+        cache.insert("test".to_string(), parsed_module("test", source));
+
+        assert_eq!(
+            analyze(&cache, "test"),
+            vec!["Types 'T' and 'u8' cannot be intersected because their intersection is NEVER."]
+        );
+    }
+
+    #[test]
     fn unknown_annotations_warn_while_unknown_types_error() {
         let mut cache = HashMap::new();
         cache.insert(

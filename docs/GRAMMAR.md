@@ -49,6 +49,33 @@ An explicit `as f32` or `as f64` must pass the corresponding round-trip check. `
 - Lists/Tuples: `[a, b, c]` with literals or types, for example `[string, i32]`
 - Arrays use postfix syntax: `Type[]`, for example `string[]` or `User[]`
 
+### Union, intersection, and bottom types
+
+A sum type starts with `|`. A value of `|A|B` can be either `A` or `B`, so only
+constraints and ancestors guaranteed by **both** members are available on the
+sum. A constraint implemented by only one member is optional and cannot be
+applied to the sum as a whole.
+
+An intersection type starts with `&`. A value of `&A&B` must be both `A` and
+`B`, so it inherits the union of the constraints and ancestors provided by its
+members. A constraint guaranteed by either member is therefore available on
+the intersection.
+
+```xen
+type Text = |uuid|string @match(/[a-f]+/); // both members derive from string
+type Mixed = |uuid|u8;                    // string-only constraints are unsafe
+type NumericText = &f32&integer;          // inherits constraints from both
+```
+
+`NEVER` is the bottom type. It has no possible values and is a subtype of every
+type, including source-declared types. Its universal parentage is resolved by
+the source type hierarchy; it is not stored as a generated static parent list.
+
+The analyzer proves incompatibility conservatively. A provably empty
+intersection such as `&u8&string` resolves to `NEVER` and produces an error at
+the source intersection. Intersections that might overlap are retained when
+the hierarchy cannot prove that they are empty.
+
 ### Quoted field names
 
 Struct and enum keys can be quoted when their wire name is not a Xenomorph
@@ -66,10 +93,10 @@ value as the serialized property name:
 
 - JSON Schema uses the exact key in `properties`.
 - TypeScript emits an identifier property when legal and a quoted property
-    otherwise.
+  otherwise.
 - Java replaces characters that are not legal in a Java member name with `_`
-    and adds Gson `@SerializedName` with the exact wire key. For example,
-    `"ecu.test"` becomes `@SerializedName("ecu.test")` on `ecu_test`.
+  and adds Gson `@SerializedName` with the exact wire key. For example,
+  `"ecu.test"` becomes `@SerializedName("ecu.test")` on `ecu_test`.
 
 Language targets report an error when a schema identifier conflicts with a
 native reserved keyword in a context that requires a native identifier. Java

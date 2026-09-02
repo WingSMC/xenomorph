@@ -872,6 +872,7 @@ fn schema_type_is(schema: &Value, expected: &str) -> bool {
 
 fn builtin_to_schema(name: &str) -> Option<Value> {
     let schema = match name {
+        "NEVER" => json!(false),
         "string" | "strong_password" => json!({ "type": "string" }),
         "char" => json!({ "type": "string", "minLength": 1, "maxLength": 1 }),
         "uuid" => json!({ "type": "string", "format": "uuid" }),
@@ -1237,6 +1238,7 @@ mod tests {
             builtin_to_schema("uuid"),
             Some(json!({ "type": "string", "format": "uuid" }))
         );
+        assert_eq!(builtin_to_schema("NEVER"), Some(json!(false)));
         assert_eq!(
             builtin_to_schema("bool"),
             Some(json!({ "type": "boolean" }))

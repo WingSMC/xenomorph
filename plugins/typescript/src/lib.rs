@@ -517,6 +517,7 @@ fn native_type_to_ts(name: &str) -> Option<&'static str> {
         "i64" | "i128" | "u64" | "u128" | "bigint" | "integer" => "bigint",
         "binary" => "Uint8Array",
         "regex" => "RegExp",
+        "NEVER" => "never",
         "any" => "any",
         "null" => "null",
         "symbol" => "symbol",
@@ -1032,6 +1033,7 @@ mod tests {
         assert_eq!(native_type_to_ts("binary"), Some("Uint8Array"));
         assert_eq!(native_type_to_ts("json"), Some("string"));
         assert_eq!(native_type_to_ts("null"), Some("null"));
+        assert_eq!(native_type_to_ts("NEVER"), Some("never"));
         assert_eq!(native_type_to_ts("symbol"), Some("symbol"));
         assert_eq!(native_type_to_ts("Dict"), None);
         assert!(has_native_typescript_mapping("Dict"));

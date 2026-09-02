@@ -13,8 +13,6 @@
 
 - Decorator "result/return" types
 
-- Check if &A&B implies constraints are inherited from both (union because both A's and B's features are in the resulting type) while |A|B implies only common types/traits are applicable at all times (intersection) because only the intersection of A and B can be guaranteed on an A or B type (anything outside the intersection is only "optionally" present). And make sure completely incompatible types can't be &'d together.
-
 - Benchmarks and optimizations
 - !T for Required<T>
 - Deep literals (for structs & arrays)

@@ -10,8 +10,9 @@ use crate::{
     plugins::XenoPlugin,
     semantic::{
         annotation_validator::AnnotationValidator, if_validator::IfChainValidator,
-        name_validator::NameValidator, GenericParameterInfo, OwnedType, TypeHierarchy,
-        BUILTIN_ANNOTATIONS, BUILTIN_TRAITS, BUILTIN_TYPES,
+        intersection_validator::IntersectionValidator, name_validator::NameValidator,
+        GenericParameterInfo, OwnedType, TypeHierarchy, BUILTIN_ANNOTATIONS, BUILTIN_TRAITS,
+        BUILTIN_TYPES,
     },
     TokenData, XenoDiagnostic,
 };
@@ -389,6 +390,7 @@ impl Analyzer {
 
         // Add the name validator (always present)
         listeners.push(Box::new(NameValidator::new(&scope)));
+        listeners.push(Box::new(IntersectionValidator::new(&scope)));
         listeners.push(Box::new(AnnotationValidator::new(&scope)));
         listeners.push(Box::new(IfChainValidator::new()));
 

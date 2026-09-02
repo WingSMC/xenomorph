@@ -341,6 +341,44 @@ struct TypeKey {
     name: String,
 }
 
+#[derive(Debug, Clone)]
+enum SemanticDomain {
+    /// The type can inhabit any domain, or its domain cannot be proven.
+    Unknown,
+    /// Known runtime domains. An empty set is the bottom type.
+    Known(HashSet<String>),
+}
+
+impl SemanticDomain {
+    fn union(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
+            (Self::Known(mut left), Self::Known(right)) => {
+                left.extend(right);
+                Self::Known(left)
+            }
+        }
+    }
+
+    fn intersection(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Unknown, domain) | (domain, Self::Unknown) => domain,
+            (Self::Known(mut left), Self::Known(right)) => {
+                left.retain(|domain| right.contains(domain));
+                Self::Known(left)
+            }
+        }
+    }
+
+    fn is_disjoint_from(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Known(domains), _) | (_, Self::Known(domains)) if domains.is_empty() => true,
+            (Self::Known(left), Self::Known(right)) => left.is_disjoint(right),
+            (Self::Unknown, _) | (_, Self::Unknown) => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct TypeHierarchy {
     types: HashMap<TypeKey, TypeDefinition>,
@@ -578,12 +616,17 @@ impl TypeHierarchy {
                     .map(|item| self.evaluate_type_inner(item, context, resolving))
                     .collect::<Result<_, _>>()?,
             )),
-            OwnedType::Intersection(items) => Ok(OwnedType::Intersection(
-                items
+            OwnedType::Intersection(items) => {
+                let items = items
                     .iter()
                     .map(|item| self.evaluate_type_inner(item, context, resolving))
-                    .collect::<Result<_, _>>()?,
-            )),
+                    .collect::<Result<Vec<_>, _>>()?;
+                if self.intersection_is_never_in(&items, context) {
+                    Ok(OwnedType::named("NEVER"))
+                } else {
+                    Ok(OwnedType::Intersection(items))
+                }
+            }
             OwnedType::Literal(_) | OwnedType::Generic { .. } => Ok(candidate.clone()),
         }
     }
@@ -634,6 +677,23 @@ impl TypeHierarchy {
                 arguments: evaluated_arguments,
             });
         };
+        if matches!(definition.body, Some(OwnedType::Intersection(_))) {
+            let substitutions = definition
+                .generic_params
+                .iter()
+                .zip(&evaluated_arguments)
+                .map(|(parameter, argument)| (parameter.name.as_str(), argument))
+                .collect::<HashMap<_, _>>();
+            if let Some(OwnedType::Intersection(items)) = definition
+                .body
+                .as_ref()
+                .map(|body| substitute_owned_type(body, &substitutions))
+            {
+                if self.intersection_is_never_in(&items, definition.module_path.as_deref()) {
+                    return Ok(OwnedType::named("NEVER"));
+                }
+            }
+        }
         if definition.transparent_alias {
             let visit_key = format!(
                 "{:?}:{}<{}>",
@@ -1044,6 +1104,200 @@ impl TypeHierarchy {
         )
     }
 
+    /// Returns the first pair of members whose intersection is provably empty.
+    /// Unknown or structurally open domains are intentionally treated as
+    /// potentially compatible to avoid rejecting valid source declarations.
+    pub fn first_disjoint_intersection_pair(&self, items: &[OwnedType]) -> Option<(usize, usize)> {
+        self.first_disjoint_intersection_pair_in(items, self.current_module.as_deref())
+    }
+
+    fn first_disjoint_intersection_pair_in(
+        &self,
+        items: &[OwnedType],
+        context: Option<&str>,
+    ) -> Option<(usize, usize)> {
+        for left in 0..items.len() {
+            for right in left + 1..items.len() {
+                if self.types_are_disjoint_in(&items[left], &items[right], context) {
+                    return Some((left, right));
+                }
+            }
+        }
+        None
+    }
+
+    pub fn intersection_is_never(&self, items: &[OwnedType]) -> bool {
+        self.intersection_is_never_in(items, self.current_module.as_deref())
+    }
+
+    fn intersection_is_never_in(&self, items: &[OwnedType], context: Option<&str>) -> bool {
+        if self
+            .first_disjoint_intersection_pair_in(items, context)
+            .is_some()
+        {
+            return true;
+        }
+        matches!(
+            items.iter().fold(SemanticDomain::Unknown, |domain, item| {
+                domain.intersection(self.semantic_domain(item, context, &mut HashSet::new()))
+            }),
+            SemanticDomain::Known(domains) if domains.is_empty()
+        )
+    }
+
+    fn types_are_disjoint_in(
+        &self,
+        left: &OwnedType,
+        right: &OwnedType,
+        context: Option<&str>,
+    ) -> bool {
+        if let (OwnedType::Literal(left), OwnedType::Literal(right)) = (left, right) {
+            return !left.same_constant_value(right);
+        }
+
+        let left = self.semantic_domain(left, context, &mut HashSet::new());
+        let right = self.semantic_domain(right, context, &mut HashSet::new());
+        left.is_disjoint_from(&right)
+    }
+
+    fn semantic_domain(
+        &self,
+        candidate: &OwnedType,
+        context: Option<&str>,
+        visiting: &mut HashSet<TypeKey>,
+    ) -> SemanticDomain {
+        match candidate {
+            OwnedType::Optional(inner) => {
+                let domain = self.semantic_domain(inner, context, visiting);
+                domain.union(self.semantic_domain(&OwnedType::named("null"), context, visiting))
+            }
+            OwnedType::Literal(literal) => self.semantic_domain(
+                &OwnedType::named(literal.semantic_type_name()),
+                context,
+                visiting,
+            ),
+            OwnedType::Tuple(_) | OwnedType::Set(_) | OwnedType::Array(_) => {
+                self.semantic_domain(&OwnedType::named("array"), context, visiting)
+            }
+            OwnedType::Struct(_) => {
+                self.semantic_domain(&OwnedType::named("Dict"), context, visiting)
+            }
+            OwnedType::Enum(_) => {
+                self.semantic_domain(&OwnedType::named("Dict"), context, visiting)
+            }
+            OwnedType::Sum(items) => items
+                .iter()
+                .fold(SemanticDomain::Known(HashSet::new()), |domain, item| {
+                    domain.union(self.semantic_domain(item, context, visiting))
+                }),
+            OwnedType::Intersection(items) => {
+                items.iter().fold(SemanticDomain::Unknown, |domain, item| {
+                    domain.intersection(self.semantic_domain(item, context, visiting))
+                })
+            }
+            OwnedType::Generic {
+                constraint,
+                constraint_scope,
+                ..
+            } => constraint
+                .as_deref()
+                .map_or(SemanticDomain::Unknown, |constraint| {
+                    if self.has_trait(constraint) {
+                        SemanticDomain::Unknown
+                    } else {
+                        self.semantic_domain(
+                            &OwnedType::named(constraint),
+                            constraint_scope.as_deref(),
+                            visiting,
+                        )
+                    }
+                }),
+            OwnedType::Named { name, arguments } => {
+                let Some(key) = self.resolve_key(name, context) else {
+                    return SemanticDomain::Unknown;
+                };
+                self.named_semantic_domain(&key, arguments, context, visiting)
+            }
+            OwnedType::Qualified {
+                module_path,
+                name,
+                arguments,
+            } => self.named_semantic_domain(
+                &TypeKey {
+                    module_path: module_path.clone(),
+                    name: name.clone(),
+                },
+                arguments,
+                context,
+                visiting,
+            ),
+        }
+    }
+
+    fn named_semantic_domain(
+        &self,
+        key: &TypeKey,
+        arguments: &[OwnedType],
+        argument_context: Option<&str>,
+        visiting: &mut HashSet<TypeKey>,
+    ) -> SemanticDomain {
+        if key.module_path.is_none() && key.name == "NEVER" {
+            return SemanticDomain::Known(HashSet::new());
+        }
+        if key.module_path.is_none() && key.name == "any" {
+            return SemanticDomain::Unknown;
+        }
+        let Some(definition) = self.types.get(key) else {
+            return SemanticDomain::Unknown;
+        };
+        if !visiting.insert(key.clone()) {
+            return SemanticDomain::Unknown;
+        }
+
+        let qualified_arguments = arguments
+            .iter()
+            .map(|argument| self.qualify_type(argument, argument_context))
+            .collect::<Vec<_>>();
+        let substitutions = definition
+            .generic_params
+            .iter()
+            .zip(&qualified_arguments)
+            .map(|(parameter, argument)| (parameter.name.as_str(), argument))
+            .collect::<HashMap<_, _>>();
+
+        let domain = if let Some(body) = &definition.body {
+            let body = substitute_owned_type(body, &substitutions);
+            self.semantic_domain(&body, definition.module_path.as_deref(), visiting)
+        } else {
+            let mut domain = SemanticDomain::Unknown;
+            let mut has_specific_parent = false;
+            for parent in &definition.parents {
+                if matches!(parent, OwnedType::Named { name, .. } if name == "any") {
+                    continue;
+                }
+                has_specific_parent = true;
+                let parent = substitute_owned_type(parent, &substitutions);
+                domain = domain.intersection(self.semantic_domain(
+                    &parent,
+                    definition.module_path.as_deref(),
+                    visiting,
+                ));
+            }
+            if has_specific_parent {
+                domain
+            } else {
+                SemanticDomain::Known(HashSet::from([format!(
+                    "{}:{}",
+                    key.module_path.as_deref().unwrap_or("$builtin"),
+                    key.name
+                )]))
+            }
+        };
+
+        visiting.remove(key);
+        domain
+    }
+
     fn type_implements_trait_inner(
         &self,
         candidate: &OwnedType,
@@ -1089,25 +1343,40 @@ impl TypeHierarchy {
                 );
             }
             OwnedType::Sum(items) => {
-                let XenoTraitKind::Sum(member) = required.kind else {
-                    return false;
-                };
                 return !items.is_empty()
                     && items.iter().all(|item| {
                         let Ok(item) = self.evaluate_type_inner(item, context, &mut HashSet::new())
                         else {
                             return false;
                         };
-                        matches!(item, OwnedType::Literal(_))
-                            && self.type_implements_trait_inner(
+                        match required.kind {
+                            XenoTraitKind::Sum(member) => {
+                                matches!(item, OwnedType::Literal(_))
+                                    && self.type_implements_trait_inner(
+                                        &item,
+                                        context,
+                                        member,
+                                        &mut visited.clone(),
+                                    )
+                            }
+                            _ => self.type_implements_trait_inner(
                                 &item,
                                 context,
-                                member,
+                                required,
                                 &mut visited.clone(),
-                            )
+                            ),
+                        }
                     });
             }
-            OwnedType::Enum(_) | OwnedType::Intersection(_) => return false,
+            OwnedType::Intersection(items) => {
+                if self.intersection_is_never_in(items, context) {
+                    return true;
+                }
+                return items.iter().any(|item| {
+                    self.type_implements_trait_inner(item, context, required, &mut visited.clone())
+                });
+            }
+            OwnedType::Enum(_) => return false,
             OwnedType::Named { .. }
             | OwnedType::Qualified { .. }
             | OwnedType::Array(_)
@@ -1157,6 +1426,9 @@ impl TypeHierarchy {
         let Some(definition) = self.types.get(&key) else {
             return false;
         };
+        if key.module_path.is_none() && key.name == "NEVER" {
+            return true;
+        }
         if definition
             .traits
             .iter()
@@ -1175,17 +1447,26 @@ impl TypeHierarchy {
             .zip(&qualified_arguments)
             .map(|(parameter, argument)| (parameter.name.as_str(), argument))
             .collect::<HashMap<_, _>>();
-        if matches!(required.kind, XenoTraitKind::Struct | XenoTraitKind::Sum(_))
-            && definition.body.as_ref().is_some_and(|body| {
+        if definition.body.as_ref().is_some_and(|body| {
+            let inspect_body = matches!(body, OwnedType::Sum(_) | OwnedType::Intersection(_))
+                || matches!(required.kind, XenoTraitKind::Struct | XenoTraitKind::Sum(_));
+            inspect_body && {
                 let body = substitute_owned_type(body, &substitutions);
+                let body = self
+                    .evaluate_type_inner(
+                        &body,
+                        definition.module_path.as_deref(),
+                        &mut HashSet::new(),
+                    )
+                    .unwrap_or(body);
                 self.type_implements_trait_inner(
                     &body,
                     definition.module_path.as_deref(),
                     required,
-                    visited,
+                    &mut visited.clone(),
                 )
-            })
-        {
+            }
+        }) {
             return true;
         }
         definition
@@ -1215,25 +1496,45 @@ impl TypeHierarchy {
     /// target expression, including transparent aliases and constrained
     /// generic parameters.
     pub fn is_assignable_to(&self, candidate: &OwnedType, target: &OwnedType) -> bool {
+        if self.is_never(candidate) {
+            return true;
+        }
+        let candidate = self
+            .evaluate_type(candidate)
+            .unwrap_or_else(|_| candidate.clone());
+        match &candidate {
+            OwnedType::Optional(inner) => {
+                return self.is_assignable_to(inner, target)
+                    && self.is_assignable_to(&OwnedType::named("null"), target);
+            }
+            OwnedType::Sum(items) => {
+                return !items.is_empty()
+                    && items.iter().all(|item| self.is_assignable_to(item, target));
+            }
+            _ => {}
+        }
         let target = self
             .evaluate_type(target)
             .unwrap_or_else(|_| target.clone());
         match target {
-            OwnedType::Optional(inner) => self.is_assignable_to(candidate, &inner),
+            OwnedType::Optional(inner) => {
+                self.is_assignable_to(&candidate, &inner)
+                    || self.is_assignable_to(&candidate, &OwnedType::named("null"))
+            }
             OwnedType::Named { name, .. } => {
                 self.integer_literal_fits_named_type(
-                    candidate,
+                    &candidate,
                     &name,
                     self.current_module.as_deref(),
-                ) || self.is_type_compatible(candidate, &name)
+                ) || self.is_type_compatible(&candidate, &name)
             }
             OwnedType::Qualified {
                 module_path, name, ..
             } => {
                 let target = TypeKey { module_path, name };
-                self.integer_literal_fits_type(candidate, &target)
+                self.integer_literal_fits_type(&candidate, &target)
                     || self.is_type_compatible_inner(
-                        candidate,
+                        &candidate,
                         self.current_module.as_deref(),
                         &target,
                         &mut HashSet::new(),
@@ -1244,19 +1545,17 @@ impl TypeHierarchy {
                 constraint_scope,
                 ..
             } => constraint.as_deref().is_some_and(|constraint| {
-                self.satisfies_constraint(candidate, constraint, constraint_scope.as_deref())
+                self.satisfies_constraint(&candidate, constraint, constraint_scope.as_deref())
             }),
-            OwnedType::Literal(target) => matches!(candidate,
+            OwnedType::Literal(target) => matches!(&candidate,
                 OwnedType::Literal(value) if value.same_constant_value(&target)),
             OwnedType::Sum(targets) => targets
                 .iter()
-                .any(|target| self.is_assignable_to(candidate, target)),
+                .any(|target| self.is_assignable_to(&candidate, target)),
             OwnedType::Intersection(targets) => targets
                 .iter()
-                .all(|target| self.is_assignable_to(candidate, target)),
-            target => self
-                .evaluate_type(candidate)
-                .is_ok_and(|candidate| candidate == target),
+                .all(|target| self.is_assignable_to(&candidate, target)),
+            target => candidate == target,
         }
     }
 
@@ -1268,6 +1567,12 @@ impl TypeHierarchy {
     ) -> bool {
         self.resolve_key(target, context)
             .is_some_and(|target| self.integer_literal_fits_type(candidate, &target))
+    }
+
+    fn is_never(&self, candidate: &OwnedType) -> bool {
+        self.evaluate_type(candidate).is_ok_and(
+            |candidate| matches!(candidate, OwnedType::Named { name, .. } if name == "NEVER"),
+        )
     }
 
     fn integer_literal_fits_type(&self, candidate: &OwnedType, target: &TypeKey) -> bool {
@@ -1329,7 +1634,13 @@ impl TypeHierarchy {
 
         match candidate {
             OwnedType::Optional(inner) => {
-                return self.is_type_compatible_inner(inner, context, target, visited);
+                return self.is_type_compatible_inner(inner, context, target, &mut visited.clone())
+                    && self.is_type_compatible_inner(
+                        &OwnedType::named("null"),
+                        context,
+                        target,
+                        &mut visited.clone(),
+                    );
             }
             OwnedType::Literal(literal) => {
                 return self.is_type_compatible_inner(
@@ -1355,7 +1666,21 @@ impl TypeHierarchy {
                     visited,
                 );
             }
-            OwnedType::Enum(_) | OwnedType::Sum(_) | OwnedType::Intersection(_) => return false,
+            OwnedType::Sum(items) => {
+                return !items.is_empty()
+                    && items.iter().all(|item| {
+                        self.is_type_compatible_inner(item, context, target, &mut visited.clone())
+                    });
+            }
+            OwnedType::Intersection(items) => {
+                if self.intersection_is_never_in(items, context) {
+                    return true;
+                }
+                return items.iter().any(|item| {
+                    self.is_type_compatible_inner(item, context, target, &mut visited.clone())
+                });
+            }
+            OwnedType::Enum(_) => return false,
             OwnedType::Named { .. }
             | OwnedType::Qualified { .. }
             | OwnedType::Array(_)
@@ -1401,6 +1726,9 @@ impl TypeHierarchy {
         if key == *target {
             return true;
         }
+        if key.module_path.is_none() && key.name == "NEVER" {
+            return true;
+        }
         let visit_key = format!("{:?}:{}", key.module_path, candidate.display_name());
         if key.module_path.is_none() && key.name == "any" || !visited.insert(visit_key) {
             return false;
@@ -1418,6 +1746,27 @@ impl TypeHierarchy {
             .zip(&qualified_arguments)
             .map(|(parameter, argument)| (parameter.name.as_str(), argument))
             .collect::<HashMap<_, _>>();
+        if definition.body.as_ref().is_some_and(|body| {
+            if !matches!(body, OwnedType::Sum(_) | OwnedType::Intersection(_)) {
+                return false;
+            }
+            let body = substitute_owned_type(body, &substitutions);
+            let body = self
+                .evaluate_type_inner(
+                    &body,
+                    definition.module_path.as_deref(),
+                    &mut HashSet::new(),
+                )
+                .unwrap_or(body);
+            self.is_type_compatible_inner(
+                &body,
+                definition.module_path.as_deref(),
+                target,
+                &mut visited.clone(),
+            )
+        }) {
+            return true;
+        }
         definition
             .parents
             .iter()
@@ -1834,7 +2183,10 @@ fn substitute_owned_type(ty: &OwnedType, substitutions: &HashMap<&str, &OwnedTyp
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::semantic::{ANY, BUILTIN_TYPES, LITERAL_SUM, STRING_LITERAL_SUM, STRUCT};
+    use crate::semantic::{
+        ANY, BUILTIN_TRAITS, BUILTIN_TYPES, INTEGER_LITERAL, KEY_TRAIT, LITERAL_SUM, NUMERIC,
+        STRING_LITERAL_SUM, STRUCT,
+    };
 
     #[test]
     fn integer_literals_are_assignable_when_their_values_fit_the_target() {
@@ -1994,6 +2346,148 @@ mod tests {
             .type_implements_trait(&OwnedType::named("MixedLiterals"), &STRING_LITERAL_SUM));
         assert!(hierarchy.type_implements_trait(&OwnedType::named("MixedLiterals"), &LITERAL_SUM));
         assert!(!hierarchy.type_implements_trait(&OwnedType::named("string"), &STRING_LITERAL_SUM));
+    }
+
+    #[test]
+    fn composites_expose_exactly_their_guaranteed_traits_and_ancestors() {
+        let hierarchy = utility_hierarchy();
+        let intersection =
+            OwnedType::Intersection(vec![OwnedType::named("f32"), OwnedType::named("integer")]);
+        let sum = OwnedType::Sum(vec![OwnedType::named("u8"), OwnedType::named("f32")]);
+
+        assert!(hierarchy.type_implements_trait(&intersection, &INTEGER_LITERAL));
+        assert!(hierarchy.type_implements_trait(&intersection, &NUMERIC));
+        assert!(hierarchy.type_implements_trait(&sum, &NUMERIC));
+        assert!(hierarchy.type_implements_trait(&sum, &KEY_TRAIT));
+        assert!(!hierarchy.type_implements_trait(&sum, &INTEGER_LITERAL));
+
+        assert!(hierarchy.is_type_compatible(&intersection, "f32"));
+        assert!(hierarchy.is_type_compatible(&intersection, "integer"));
+        assert!(hierarchy.is_type_compatible(&sum, "number"));
+        assert!(!hierarchy.is_type_compatible(&sum, "u8"));
+    }
+
+    #[test]
+    fn optional_members_change_composite_guarantees() {
+        let hierarchy = utility_hierarchy();
+        let optional_u8 = OwnedType::Optional(Box::new(OwnedType::named("u8")));
+        let sum = OwnedType::Sum(vec![optional_u8.clone(), OwnedType::named("u8")]);
+        let intersection =
+            OwnedType::Intersection(vec![optional_u8.clone(), OwnedType::named("u8")]);
+
+        assert!(hierarchy.is_type_compatible(&optional_u8, "any"));
+        assert!(!hierarchy.is_type_compatible(&optional_u8, "number"));
+        assert!(!hierarchy.type_implements_trait(&sum, &NUMERIC));
+        assert!(!hierarchy.is_type_compatible(&sum, "number"));
+        assert!(hierarchy.type_implements_trait(&intersection, &NUMERIC));
+        assert!(hierarchy.is_type_compatible(&intersection, "u8"));
+
+        let optional_never = OwnedType::Optional(Box::new(OwnedType::named("NEVER")));
+        assert!(hierarchy.is_type_compatible(&optional_never, "null"));
+    }
+
+    #[test]
+    fn optional_assignment_checks_present_and_absent_values() {
+        let hierarchy = utility_hierarchy();
+        let optional_u8 = OwnedType::Optional(Box::new(OwnedType::named("u8")));
+        let optional_number = OwnedType::Optional(Box::new(OwnedType::named("number")));
+        let optional_string = OwnedType::Optional(Box::new(OwnedType::named("string")));
+
+        assert!(hierarchy.is_assignable_to(&optional_u8, &optional_u8));
+        assert!(hierarchy.is_assignable_to(&optional_u8, &optional_number));
+        assert!(hierarchy.is_assignable_to(&OwnedType::named("u8"), &optional_u8));
+        assert!(hierarchy.is_assignable_to(&OwnedType::named("null"), &optional_u8));
+        assert!(!hierarchy.is_assignable_to(&optional_u8, &OwnedType::named("u8")));
+        assert!(!hierarchy.is_assignable_to(&optional_string, &optional_u8));
+
+        let explicit_optional =
+            OwnedType::Sum(vec![OwnedType::named("null"), OwnedType::named("u8")]);
+        assert!(hierarchy.is_assignable_to(&explicit_optional, &optional_number));
+    }
+
+    #[test]
+    fn named_composites_preserve_the_same_guarantees_as_their_bodies() {
+        let mut hierarchy = utility_hierarchy();
+        hierarchy.insert_declaration(
+            "test",
+            "Both",
+            TypeDeclarationInfo {
+                generic_params: Vec::new(),
+                parents: vec![OwnedType::named("f32"), OwnedType::named("integer")],
+                body: OwnedType::Intersection(vec![
+                    OwnedType::named("f32"),
+                    OwnedType::named("integer"),
+                ]),
+                transparent_alias: false,
+            },
+        );
+        hierarchy.insert_declaration(
+            "test",
+            "Either",
+            TypeDeclarationInfo {
+                generic_params: Vec::new(),
+                parents: vec![OwnedType::named("any")],
+                body: OwnedType::Sum(vec![OwnedType::named("u8"), OwnedType::named("f32")]),
+                transparent_alias: false,
+            },
+        );
+
+        assert!(hierarchy.type_implements_trait(&OwnedType::named("Both"), &INTEGER_LITERAL));
+        assert!(hierarchy.is_type_compatible(&OwnedType::named("Both"), "f32"));
+        assert!(hierarchy.type_implements_trait(&OwnedType::named("Either"), &NUMERIC));
+        assert!(!hierarchy.type_implements_trait(&OwnedType::named("Either"), &INTEGER_LITERAL));
+        assert!(hierarchy.is_type_compatible(&OwnedType::named("Either"), "number"));
+        assert!(!hierarchy.is_type_compatible(&OwnedType::named("Either"), "u8"));
+    }
+
+    #[test]
+    fn empty_intersections_normalize_to_never() {
+        let mut hierarchy = utility_hierarchy();
+        let impossible =
+            OwnedType::Intersection(vec![OwnedType::named("u8"), OwnedType::named("string")]);
+        assert_eq!(
+            hierarchy
+                .evaluate_type(&impossible)
+                .expect("intersection evaluates"),
+            OwnedType::named("NEVER")
+        );
+
+        hierarchy.insert_declaration(
+            "test",
+            "Impossible",
+            TypeDeclarationInfo {
+                generic_params: Vec::new(),
+                parents: vec![OwnedType::named("u8"), OwnedType::named("string")],
+                body: impossible,
+                transparent_alias: false,
+            },
+        );
+        assert_eq!(
+            hierarchy
+                .evaluate_type(&OwnedType::named("Impossible"))
+                .expect("named intersection evaluates"),
+            OwnedType::named("NEVER")
+        );
+    }
+
+    #[test]
+    fn never_is_a_subtype_of_every_runtime_type_and_satisfies_every_constraint() {
+        let hierarchy = utility_hierarchy();
+        let never = OwnedType::named("NEVER");
+
+        for target in BUILTIN_TYPES {
+            assert!(hierarchy.descends_from_static_type(&never, target));
+        }
+        for required in BUILTIN_TRAITS {
+            assert!(hierarchy.type_implements_trait(&never, required));
+        }
+        assert!(hierarchy.is_type_compatible(&never, "User"));
+        assert!(hierarchy.is_assignable_to(
+            &never,
+            &OwnedType::Struct(vec![field("id", OwnedType::named("string"))])
+        ));
+        assert!(!hierarchy.is_type_compatible(&OwnedType::named("User"), "NEVER"));
+        assert!(!hierarchy.is_assignable_to(&OwnedType::named("string"), &never));
     }
 
     #[test]

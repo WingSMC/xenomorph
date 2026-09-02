@@ -9,6 +9,14 @@ provides fallback highlighting while the server starts and colors Xenomorph
 code blocks embedded in hover and completion documentation, where semantic
 tokens are not available.
 
+## What is Xenomorph?
+
+It is a schema description language written for polyglot projects, like a microservice architecture. It lets you generate language and library specific codes for DTOs, serializers, database schemas or form validators from a **_single source of TRUTH_**.
+
+Find out more at [https://github.com/WingSMC/xenomorph](https://github.com/WingSMC/xenomorph).
+
+The repo is also the place where you can download the required binaries for your operating system. Make sure to place them on the `$PATH`/`$env:PATH`/`%PATH%`.
+
 ## Requirements
 
 The extension runs the globally installed executables directly from `PATH`:

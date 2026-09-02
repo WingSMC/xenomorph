@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use crate::{
     parser::{Declaration, Expr, Literal, SimpleType, Type, XenoType as AstType},
     semantic::{
-        simple_to_owned_type, AnalyzerListener, OwnedType, ScopeInfo, XenoAnnotation,
-        XenoConstraint, XenoTrait, XenoTraitKind,
+        simple_to_owned_type, type_to_owned_type, AnalyzerListener, OwnedType, ScopeInfo,
+        XenoAnnotation, XenoConstraint, XenoTrait, XenoTraitKind,
     },
     TokenData, XenoDiagnostic,
 };
@@ -31,33 +31,15 @@ impl AnnotationValidator {
     }
 
     fn resolve_types(&self, ty: &AstType<'_>) -> Vec<OwnedType> {
-        let mut types = Vec::new();
-        self.collect_types(&ty.0, &mut types);
-        types
-    }
-
-    fn collect_types(&self, ty: &Type<'_>, types: &mut Vec<OwnedType>) {
-        match ty {
-            Type::Simple(simple) => self.collect_simple_types(simple, types),
-            Type::Sum(items) | Type::Intersection(items) => {
-                for item in items {
-                    self.collect_simple_types(item, types);
-                }
-            }
-            Type::Tuple(_) | Type::Set(_) => types.push(OwnedType::named("array")),
-            Type::Struct(_) => types.push(OwnedType::named("Dict")),
-            Type::Enum(_) => types.push(OwnedType::named("any")),
-        }
-    }
-
-    fn collect_simple_types(&self, simple: &SimpleType<'_>, types: &mut Vec<OwnedType>) {
-        match simple.inner() {
-            SimpleType::Identifier(_, _) | SimpleType::Array(_, _) => {
-                types.push(self.resolve_generic_references(simple_to_owned_type(simple)));
-            }
-            SimpleType::Literal(literal) => Self::collect_literal_type(literal, types),
-            SimpleType::Optional(_) => {}
-        }
+        let candidate = match &ty.0 {
+            // Validators on a standalone optional type apply to its present
+            // value, preserving the established source behavior. Composite
+            // types retain optionality because it changes what `|` and `&`
+            // can guarantee as a whole.
+            Type::Simple(simple) => simple_to_owned_type(simple.inner()),
+            ty => type_to_owned_type(ty),
+        };
+        vec![self.resolve_generic_references(candidate)]
     }
 
     fn resolve_generic_references(&self, candidate: OwnedType) -> OwnedType {
@@ -141,16 +123,6 @@ impl AnnotationValidator {
                     .collect(),
             ),
             OwnedType::Literal(_) | OwnedType::Generic { .. } => candidate,
-        }
-    }
-
-    fn collect_literal_type(literal: &Literal<'_>, types: &mut Vec<OwnedType>) {
-        match literal {
-            Literal::Int(_) | Literal::Float(_) => {
-                types.push(OwnedType::named(literal.semantic_type_name()))
-            }
-            Literal::String(_, _) => types.push(OwnedType::named("string")),
-            Literal::Boolean(_, _) => types.push(OwnedType::named("bool")),
         }
     }
 

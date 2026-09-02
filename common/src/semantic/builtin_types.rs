@@ -207,6 +207,9 @@ pub enum XenoParent {
 
 impl XenoType {
     pub fn implements(&self, xeno_trait: &XenoTrait) -> bool {
+        if self.name == NEVER.name {
+            return true;
+        }
         self.implements_inner(xeno_trait, &mut HashSet::new())
     }
 
@@ -234,6 +237,10 @@ pub fn is_type_compatible(
     target: &XenoType,
     visited: &mut HashSet<*const XenoType>,
 ) -> bool {
+    if candidate.name == NEVER.name {
+        return true;
+    }
+
     if target.name == ANY.name {
         return true;
     }
@@ -281,6 +288,15 @@ static LENGTH_PARENT: &[XenoParent] = &[XenoParent::Type(&ANY), XenoParent::Trai
 static TYPE: XenoType = XenoType {
     name: "TYPE",
     documentation: Some("The TYPE type represents a type in the XenoType system."),
+    generic_params: None,
+    parents: None,
+};
+
+/// The bottom type. Its universal parentage is resolved by `TypeHierarchy`
+/// instead of being materialized as a leaked static parent slice.
+pub static NEVER: XenoType = XenoType {
+    name: "NEVER",
+    documentation: Some("The NEVER type has no values and is a subtype of every other type."),
     generic_params: None,
     parents: None,
 };
@@ -736,6 +752,7 @@ pub fn is_type_utility(name: &str) -> bool {
 #[rustfmt::skip]
 pub static BUILTIN_TYPES: &[&XenoType] = &[
     &TYPE,
+    &NEVER,
     &ANY,
     &NULL,
     &BOOL,
@@ -863,5 +880,16 @@ mod tests {
         assert!(!is_type_compatible(&U8, &I8, &mut HashSet::new()));
         assert!(!is_type_compatible(&U128, &I128, &mut HashSet::new()));
         assert!(!is_type_compatible(&I8, &U8, &mut HashSet::new()));
+    }
+
+    #[test]
+    fn never_is_the_bottom_static_type() {
+        for target in BUILTIN_TYPES {
+            assert!(is_type_compatible(&NEVER, target, &mut HashSet::new()));
+        }
+        for xeno_trait in BUILTIN_TRAITS {
+            assert!(NEVER.implements(xeno_trait));
+        }
+        assert!(!is_type_compatible(&STRING, &NEVER, &mut HashSet::new()));
     }
 }
