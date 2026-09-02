@@ -243,11 +243,8 @@ impl<'src> AnalyzerListener<'src> for NameValidator {
     }
 
     fn on_simple_type(&mut self, ty: &SimpleType<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {
-        match ty {
-            SimpleType::Identifier(id, arguments)
-            | SimpleType::OptionalIdentifier(id, arguments)
-            | SimpleType::Array(id, arguments)
-            | SimpleType::OptionalArray(id, arguments) => {
+        match ty.inner() {
+            SimpleType::Identifier(id, arguments) | SimpleType::Array(id, arguments) => {
                 if !self.validate_known_type(id, errors) {
                     return;
                 }
@@ -264,7 +261,7 @@ impl<'src> AnalyzerListener<'src> for NameValidator {
                     self.validate_specialization(id, arguments.as_deref(), errors);
                 }
             }
-            SimpleType::Literal(_) | SimpleType::OptionalLiteral(_) => {}
+            SimpleType::Literal(_) | SimpleType::Optional(_) => {}
         }
     }
 

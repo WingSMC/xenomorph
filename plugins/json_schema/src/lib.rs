@@ -279,34 +279,19 @@ impl JsonSchemaGenerator {
     }
 
     fn simple_type_to_schema(&self, ty: &SimpleType, context: &mut SchemaContext<'_, '_>) -> Value {
-        let (base, optional) = match ty {
-            SimpleType::Literal(literal) => (literal_to_schema(literal), false),
-            SimpleType::OptionalLiteral(literal) => (literal_to_schema(literal), true),
-            SimpleType::Identifier(identifier, arguments) => (
-                self.named_type_to_schema(identifier.v, arguments.as_deref(), context),
-                false,
-            ),
-            SimpleType::OptionalIdentifier(identifier, arguments) => (
-                self.named_type_to_schema(identifier.v, arguments.as_deref(), context),
-                true,
-            ),
-            SimpleType::Array(identifier, arguments) => (
-                json!({
-                    "type": "array",
-                    "items": self.named_type_to_schema(identifier.v, arguments.as_deref(), context),
-                }),
-                false,
-            ),
-            SimpleType::OptionalArray(identifier, arguments) => (
-                json!({
-                    "type": "array",
-                    "items": self.named_type_to_schema(identifier.v, arguments.as_deref(), context),
-                }),
-                true,
-            ),
+        let base = match ty.inner() {
+            SimpleType::Literal(literal) => literal_to_schema(literal),
+            SimpleType::Identifier(identifier, arguments) => {
+                self.named_type_to_schema(identifier.v, arguments.as_deref(), context)
+            }
+            SimpleType::Array(identifier, arguments) => json!({
+                "type": "array",
+                "items": self.named_type_to_schema(identifier.v, arguments.as_deref(), context),
+            }),
+            SimpleType::Optional(_) => unreachable!("inner() unwraps every optional layer"),
         };
 
-        if optional {
+        if ty.is_optional() {
             json!({ "anyOf": [base, { "type": "null" }] })
         } else {
             base
@@ -987,12 +972,7 @@ fn regex_source(raw: &str) -> String {
 }
 
 fn is_optional(ty: &SimpleType) -> bool {
-    matches!(
-        ty,
-        SimpleType::OptionalLiteral(_)
-            | SimpleType::OptionalIdentifier(_, _)
-            | SimpleType::OptionalArray(_, _)
-    )
+    ty.is_optional()
 }
 
 fn with_description(mut schema: Value, docs: Option<&xenomorph_common::TokenData>) -> Value {

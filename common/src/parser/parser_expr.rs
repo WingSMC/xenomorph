@@ -186,15 +186,15 @@ pub struct SetType<'src> {
 pub enum SimpleType<'src> {
     /** e.g. 42, 3.141592653, true, "hello" */
     Literal(Literal<'src>),
-    OptionalLiteral(Literal<'src>),
 
     /** name of a type */
     Identifier(&'src TokenData<'src>, Option<Vec<SimpleType<'src>>>),
-    OptionalIdentifier(&'src TokenData<'src>, Option<Vec<SimpleType<'src>>>),
 
     /** Postfix array syntax, e.g. u32[] */
     Array(&'src TokenData<'src>, Option<Vec<SimpleType<'src>>>),
-    OptionalArray(&'src TokenData<'src>, Option<Vec<SimpleType<'src>>>),
+
+    /** Prefix optional syntax, e.g. ?u32 */
+    Optional(Box<SimpleType<'src>>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -559,21 +559,22 @@ impl<'src> Type<'src> {
 impl<'src> SimpleType<'src> {
     /// Whether the type carries the `?` prefix.
     pub fn is_optional(&self) -> bool {
-        matches!(
-            self,
-            SimpleType::OptionalLiteral(_)
-                | SimpleType::OptionalIdentifier(_, _)
-                | SimpleType::OptionalArray(_, _)
-        )
+        matches!(self, SimpleType::Optional(_))
+    }
+
+    /// The type without its optional wrapper.
+    pub fn inner(&self) -> &SimpleType<'src> {
+        match self {
+            SimpleType::Optional(inner) => inner.inner(),
+            ty => ty,
+        }
     }
 
     pub fn get_last_token(&self) -> &'src TokenData<'src> {
         match self {
-            SimpleType::Literal(l) | SimpleType::OptionalLiteral(l) => l.get_last_token(),
-            SimpleType::Identifier(d, arguments)
-            | SimpleType::OptionalIdentifier(d, arguments)
-            | SimpleType::Array(d, arguments)
-            | SimpleType::OptionalArray(d, arguments) => arguments
+            SimpleType::Optional(inner) => inner.get_last_token(),
+            SimpleType::Literal(l) => l.get_last_token(),
+            SimpleType::Identifier(d, arguments) | SimpleType::Array(d, arguments) => arguments
                 .as_deref()
                 .and_then(|arguments| arguments.last())
                 .map(SimpleType::get_last_token)
@@ -583,7 +584,14 @@ impl<'src> SimpleType<'src> {
 
     pub fn parse(parser: &mut Parser<'src>) -> Option<SimpleType<'src>> {
         let is_optional = parser.skip_if(TokenVariant::Question);
+        let base = Self::parse_base(parser)?;
+        Some(match is_optional {
+            true => SimpleType::Optional(Box::new(base)),
+            false => base,
+        })
+    }
 
+    fn parse_base(parser: &mut Parser<'src>) -> Option<SimpleType<'src>> {
         let t = parser.peek()?;
         match t.0 {
             TokenVariant::Identifier => {
@@ -608,28 +616,14 @@ impl<'src> SimpleType<'src> {
                 };
 
                 if is_array {
-                    return if is_optional {
-                        Some(SimpleType::OptionalArray(&t.1, arguments))
-                    } else {
-                        Some(SimpleType::Array(&t.1, arguments))
-                    };
-                }
-
-                if is_optional {
-                    Some(SimpleType::OptionalIdentifier(&t.1, arguments))
+                    Some(SimpleType::Array(&t.1, arguments))
                 } else {
                     Some(SimpleType::Identifier(&t.1, arguments))
                 }
             }
 
             _ => Literal::parse(parser, t)
-                .map(|l| {
-                    if is_optional {
-                        SimpleType::OptionalLiteral(l)
-                    } else {
-                        SimpleType::Literal(l)
-                    }
-                })
+                .map(SimpleType::Literal)
                 .or_else(|| {
                     parser.diagnostics.push(XenoDiagnostic {
                         location: t.1.clone(),

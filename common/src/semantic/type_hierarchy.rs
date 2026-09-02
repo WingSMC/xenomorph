@@ -1624,6 +1624,7 @@ fn fields_to_owned(fields: &[crate::parser::KeyValExpr<'_>]) -> Vec<OwnedField> 
 
 pub fn simple_to_owned_type(simple: &SimpleType<'_>) -> OwnedType {
     match simple {
+        SimpleType::Optional(inner) => optional_type(simple_to_owned_type(inner)),
         SimpleType::Identifier(identifier, arguments) => OwnedType::Named {
             name: identifier.v.to_string(),
             arguments: arguments
@@ -1633,17 +1634,6 @@ pub fn simple_to_owned_type(simple: &SimpleType<'_>) -> OwnedType {
                 .map(simple_to_owned_type)
                 .collect(),
         },
-        SimpleType::OptionalIdentifier(identifier, arguments) => {
-            OwnedType::Optional(Box::new(OwnedType::Named {
-                name: identifier.v.to_string(),
-                arguments: arguments
-                    .as_deref()
-                    .unwrap_or(&[])
-                    .iter()
-                    .map(simple_to_owned_type)
-                    .collect(),
-            }))
-        }
         SimpleType::Array(identifier, arguments) => OwnedType::Array(Box::new(OwnedType::Named {
             name: identifier.v.to_string(),
             arguments: arguments
@@ -1653,21 +1643,7 @@ pub fn simple_to_owned_type(simple: &SimpleType<'_>) -> OwnedType {
                 .map(simple_to_owned_type)
                 .collect(),
         })),
-        SimpleType::OptionalArray(identifier, arguments) => {
-            OwnedType::Optional(Box::new(OwnedType::Array(Box::new(OwnedType::Named {
-                name: identifier.v.to_string(),
-                arguments: arguments
-                    .as_deref()
-                    .unwrap_or(&[])
-                    .iter()
-                    .map(simple_to_owned_type)
-                    .collect(),
-            }))))
-        }
         SimpleType::Literal(literal) => OwnedType::Literal(literal_to_owned(literal)),
-        SimpleType::OptionalLiteral(literal) => {
-            OwnedType::Optional(Box::new(OwnedType::Literal(literal_to_owned(literal))))
-        }
     }
 }
 

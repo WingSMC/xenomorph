@@ -269,8 +269,8 @@ impl<'src> AnalyzerListener<'src> for JavaGenerator {
             }
         }
 
-        let literal = match ty {
-            SimpleType::Literal(literal) | SimpleType::OptionalLiteral(literal) => literal,
+        let literal = match ty.inner() {
+            SimpleType::Literal(literal) => literal,
             _ => return,
         };
         let unrepresentable = match literal {

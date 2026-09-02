@@ -348,8 +348,13 @@ fn type_node(ty: &Type<'_>) -> AstNode {
 
 fn simple_type_node(ty: &SimpleType<'_>) -> AstNode {
     match ty {
+        SimpleType::Optional(inner) => node(
+            "OptionalType",
+            None,
+            Some(token_range(ty.get_last_token())),
+            vec![simple_type_node(inner)],
+        ),
         SimpleType::Literal(literal) => literal_node("Literal", literal),
-        SimpleType::OptionalLiteral(literal) => literal_node("OptionalLiteral", literal),
         SimpleType::Identifier(token, arguments) => node(
             "IdentifierType",
             Some(token.v.to_string()),
@@ -364,36 +369,8 @@ fn simple_type_node(ty: &SimpleType<'_>) -> AstNode {
                 .map(simple_type_node)
                 .collect(),
         ),
-        SimpleType::OptionalIdentifier(token, arguments) => node(
-            "OptionalIdentifierType",
-            Some(token.v.to_string()),
-            Some(InspectRange {
-                start: token_range(token).start,
-                end: token_range(ty.get_last_token()).end,
-            }),
-            arguments
-                .as_deref()
-                .unwrap_or(&[])
-                .iter()
-                .map(simple_type_node)
-                .collect(),
-        ),
         SimpleType::Array(token, arguments) => node(
             "ArrayType",
-            Some(token.v.to_string()),
-            Some(InspectRange {
-                start: token_range(token).start,
-                end: token_range(ty.get_last_token()).end,
-            }),
-            arguments
-                .as_deref()
-                .unwrap_or(&[])
-                .iter()
-                .map(simple_type_node)
-                .collect(),
-        ),
-        SimpleType::OptionalArray(token, arguments) => node(
-            "OptionalArrayType",
             Some(token.v.to_string()),
             Some(InspectRange {
                 start: token_range(token).start,

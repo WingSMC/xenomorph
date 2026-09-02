@@ -51,16 +51,12 @@ impl AnnotationValidator {
     }
 
     fn collect_simple_types(&self, simple: &SimpleType<'_>, types: &mut Vec<OwnedType>) {
-        match simple {
-            SimpleType::Identifier(_, _) | SimpleType::OptionalIdentifier(_, _) => {
+        match simple.inner() {
+            SimpleType::Identifier(_, _) | SimpleType::Array(_, _) => {
                 types.push(self.resolve_generic_references(simple_to_owned_type(simple)));
             }
-            SimpleType::Array(_, _) | SimpleType::OptionalArray(_, _) => {
-                types.push(self.resolve_generic_references(simple_to_owned_type(simple)));
-            }
-            SimpleType::Literal(literal) | SimpleType::OptionalLiteral(literal) => {
-                Self::collect_literal_type(literal, types)
-            }
+            SimpleType::Literal(literal) => Self::collect_literal_type(literal, types),
+            SimpleType::Optional(_) => {}
         }
     }
 
@@ -349,12 +345,9 @@ impl AnnotationValidator {
             Expr::Type(Type::Simple(SimpleType::Literal(Literal::Boolean(_, _)))) => {
                 "boolean literal"
             }
-            Expr::Type(Type::Simple(SimpleType::OptionalLiteral(_))) => "optional literal",
+            Expr::Type(Type::Simple(SimpleType::Optional(_))) => "optional type",
             Expr::Type(Type::Simple(SimpleType::Identifier(_, _))) => "identifier",
-            Expr::Type(Type::Simple(SimpleType::OptionalIdentifier(_, _))) => "optional identifier",
-            Expr::Type(Type::Simple(SimpleType::Array(_, _) | SimpleType::OptionalArray(_, _))) => {
-                "array"
-            }
+            Expr::Type(Type::Simple(SimpleType::Array(_, _))) => "array",
             Expr::Type(Type::Tuple(_)) => "list",
             Expr::Type(Type::Set(_)) => "set",
             Expr::Type(Type::Struct(_)) => "struct",

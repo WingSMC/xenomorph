@@ -163,8 +163,8 @@ impl<'src> AnalyzerListener<'src> for TsGenerator {
             }
         }
 
-        let literal = match ty {
-            SimpleType::Literal(literal) | SimpleType::OptionalLiteral(literal) => literal,
+        let literal = match ty.inner() {
+            SimpleType::Literal(literal) => literal,
             _ => return,
         };
         if let Literal::Float(float) = literal {
@@ -420,18 +420,15 @@ fn optional_aware_ts(ty: &SimpleType) -> String {
 }
 
 fn simple_type_to_ts(ty: &SimpleType) -> String {
-    match ty {
-        SimpleType::Literal(literal) | SimpleType::OptionalLiteral(literal) => {
-            literal_to_ts(literal)
-        }
-        SimpleType::Identifier(identifier, arguments)
-        | SimpleType::OptionalIdentifier(identifier, arguments) => {
+    match ty.inner() {
+        SimpleType::Literal(literal) => literal_to_ts(literal),
+        SimpleType::Identifier(identifier, arguments) => {
             named_type_to_ts(identifier.v, arguments.as_deref())
         }
-        SimpleType::Array(identifier, arguments)
-        | SimpleType::OptionalArray(identifier, arguments) => {
+        SimpleType::Array(identifier, arguments) => {
             format!("{}[]", named_type_to_ts(identifier.v, arguments.as_deref()))
         }
+        SimpleType::Optional(_) => unreachable!("inner() unwraps every optional layer"),
     }
 }
 

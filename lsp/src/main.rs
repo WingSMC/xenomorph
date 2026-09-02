@@ -185,13 +185,13 @@ fn collect_generic_references_from_simple_type<'src>(
     references: &mut Vec<&'src TokenData<'src>>,
 ) {
     match ty {
-        SimpleType::Literal(literal) | SimpleType::OptionalLiteral(literal) => {
+        SimpleType::Optional(inner) => {
+            collect_generic_references_from_simple_type(inner, name, references)
+        }
+        SimpleType::Literal(literal) => {
             collect_generic_references_from_literal(literal, name, references);
         }
-        SimpleType::Identifier(token, arguments)
-        | SimpleType::OptionalIdentifier(token, arguments)
-        | SimpleType::Array(token, arguments)
-        | SimpleType::OptionalArray(token, arguments) => {
+        SimpleType::Identifier(token, arguments) | SimpleType::Array(token, arguments) => {
             if token.v == name {
                 references.push(token);
             }

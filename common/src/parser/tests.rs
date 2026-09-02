@@ -108,7 +108,7 @@ fn parses_every_simple_type_and_literal_case() {
     ));
     assert!(matches!(
         type_declaration(&ast[1]).1,
-        Type::Simple(SimpleType::OptionalIdentifier(_, _))
+        Type::Simple(SimpleType::Optional(inner)) if matches!(**inner, SimpleType::Identifier(_, _))
     ));
     assert!(matches!(
         type_declaration(&ast[2]).1,
@@ -116,7 +116,7 @@ fn parses_every_simple_type_and_literal_case() {
     ));
     assert!(matches!(
         type_declaration(&ast[3]).1,
-        Type::Simple(SimpleType::OptionalArray(_, _))
+        Type::Simple(SimpleType::Optional(inner)) if matches!(**inner, SimpleType::Array(_, _))
     ));
     assert!(matches!(
         type_declaration(&ast[4]).1,
@@ -124,7 +124,8 @@ fn parses_every_simple_type_and_literal_case() {
     ));
     assert!(matches!(
         type_declaration(&ast[5]).1,
-        Type::Simple(SimpleType::OptionalLiteral(Literal::Int(_)))
+        Type::Simple(SimpleType::Optional(inner))
+            if matches!(**inner, SimpleType::Literal(Literal::Int(_)))
     ));
     assert!(matches!(
         type_declaration(&ast[6]).1,
@@ -255,8 +256,9 @@ fn postfix_arrays_do_not_conflict_with_tuples() {
     ));
     assert!(matches!(
         type_declaration(&ast[1]).1,
-        Type::Simple(SimpleType::OptionalArray(identifier, arguments))
-            if identifier.v == source::IDENTIFIER && arguments.is_none()
+        Type::Simple(SimpleType::Optional(inner))
+            if matches!(&**inner, SimpleType::Array(identifier, arguments)
+                if identifier.v == source::IDENTIFIER && arguments.is_none())
     ));
     assert!(matches!(type_declaration(&ast[2]).1, Type::Tuple(items) if items.len() == 1));
 }

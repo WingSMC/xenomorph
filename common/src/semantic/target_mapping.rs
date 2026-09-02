@@ -28,12 +28,11 @@ pub fn unsupported_target_type_diagnostic<'src>(
 }
 
 fn simple_type_identifier<'src>(ty: &SimpleType<'src>) -> Option<&'src TokenData<'src>> {
-    match ty {
-        SimpleType::Identifier(identifier, _)
-        | SimpleType::OptionalIdentifier(identifier, _)
-        | SimpleType::Array(identifier, _)
-        | SimpleType::OptionalArray(identifier, _) => Some(identifier),
-        SimpleType::Literal(_) | SimpleType::OptionalLiteral(_) => None,
+    match ty.inner() {
+        SimpleType::Identifier(identifier, _) | SimpleType::Array(identifier, _) => {
+            Some(identifier)
+        }
+        SimpleType::Literal(_) | SimpleType::Optional(_) => None,
     }
 }
 

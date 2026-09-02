@@ -113,12 +113,10 @@ fn find_arguments_in_simple_type(
     simple: &SimpleType<'_>,
     target: &TokenData<'_>,
 ) -> Option<Vec<String>> {
-    let (identifier, arguments) = match simple {
+    let (identifier, arguments) = match simple.inner() {
         SimpleType::Identifier(identifier, arguments)
-        | SimpleType::OptionalIdentifier(identifier, arguments)
-        | SimpleType::Array(identifier, arguments)
-        | SimpleType::OptionalArray(identifier, arguments) => (*identifier, arguments.as_deref()),
-        SimpleType::Literal(_) | SimpleType::OptionalLiteral(_) => return None,
+        | SimpleType::Array(identifier, arguments) => (*identifier, arguments.as_deref()),
+        SimpleType::Literal(_) | SimpleType::Optional(_) => return None,
     };
 
     if same_token(identifier, target) {
@@ -218,21 +216,13 @@ fn format_simple_types(
 
 fn format_simple_type(ty: &SimpleType<'_>, substitutions: &HashMap<&str, &str>) -> String {
     match ty {
+        SimpleType::Optional(inner) => format!("?{}", format_simple_type(inner, substitutions)),
         SimpleType::Literal(literal) => literal.source_text(),
-        SimpleType::OptionalLiteral(literal) => format!("?{}", literal.source_text()),
         SimpleType::Identifier(identifier, arguments) => {
             format_named_type(identifier.v, arguments.as_deref(), substitutions)
         }
-        SimpleType::OptionalIdentifier(identifier, arguments) => format!(
-            "?{}",
-            format_named_type(identifier.v, arguments.as_deref(), substitutions)
-        ),
         SimpleType::Array(identifier, arguments) => format!(
             "{}[]",
-            format_named_type(identifier.v, arguments.as_deref(), substitutions)
-        ),
-        SimpleType::OptionalArray(identifier, arguments) => format!(
-            "?{}[]",
             format_named_type(identifier.v, arguments.as_deref(), substitutions)
         ),
     }

@@ -630,17 +630,14 @@ fn walk_simple_type<'src>(
     for l in ls.iter_mut() {
         l.on_simple_type(ty, errors);
     }
-    let arguments = match ty {
-        SimpleType::Identifier(_, arguments)
-        | SimpleType::OptionalIdentifier(_, arguments)
-        | SimpleType::Array(_, arguments)
-        | SimpleType::OptionalArray(_, arguments) => arguments,
-        SimpleType::Literal(_) | SimpleType::OptionalLiteral(_) => return,
+    let arguments = match ty.inner() {
+        SimpleType::Identifier(_, arguments) | SimpleType::Array(_, arguments) => arguments,
+        SimpleType::Literal(_) | SimpleType::Optional(_) => return,
     };
     for argument in arguments.as_deref().unwrap_or(&[]) {
         walk_simple_type(ls, argument, errors);
     }
-    if let SimpleType::Array(ident, _) | SimpleType::OptionalArray(ident, _) = ty {
+    if let SimpleType::Array(ident, _) = ty.inner() {
         for l in ls.iter_mut() {
             l.on_array(ident, errors);
             l.on_after_array(ident, errors);

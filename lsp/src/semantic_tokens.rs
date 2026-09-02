@@ -266,13 +266,11 @@ fn visit_simple_type(
     type_parameters: &HashSet<&str>,
 ) {
     match ty {
-        SimpleType::Literal(literal) | SimpleType::OptionalLiteral(literal) => {
+        SimpleType::Optional(inner) => visit_simple_type(roles, inner, type_parameters),
+        SimpleType::Literal(literal) => {
             visit_literal(roles, literal, type_parameters);
         }
-        SimpleType::Identifier(name, arguments)
-        | SimpleType::OptionalIdentifier(name, arguments)
-        | SimpleType::Array(name, arguments)
-        | SimpleType::OptionalArray(name, arguments) => {
+        SimpleType::Identifier(name, arguments) | SimpleType::Array(name, arguments) => {
             mark_type_reference(roles, name, type_parameters);
             for argument in arguments.as_deref().unwrap_or_default() {
                 visit_simple_type(roles, argument, type_parameters);
