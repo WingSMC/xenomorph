@@ -804,7 +804,7 @@ fn infer_integer_representation(value: &BigInt) -> IntegerRepresentation {
     }
 }
 
-fn parse_fixed_integer_representation(target: &str) -> Option<IntegerRepresentation> {
+pub(crate) fn parse_fixed_integer_representation(target: &str) -> Option<IntegerRepresentation> {
     let (signed, bits) = match target.as_bytes().first() {
         Some(b'i') => (true, target.get(1..)?.parse::<u64>().ok()?),
         Some(b'u') => (false, target.get(1..)?.parse::<u64>().ok()?),

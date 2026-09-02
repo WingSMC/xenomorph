@@ -5,7 +5,8 @@ use bigdecimal::BigDecimal;
 use num_bigint::BigInt;
 
 use crate::parser::{
-    FloatRepresentation, FloatSize, IntegerRepresentation, IntegerSize, Literal, SimpleType, Type,
+    integer_fits, parse_fixed_integer_representation, FloatRepresentation, FloatSize,
+    IntegerRepresentation, IntegerSize, Literal, SimpleType, Type,
 };
 use crate::utils::extract_documentation;
 
@@ -1219,15 +1220,25 @@ impl TypeHierarchy {
             .unwrap_or_else(|_| target.clone());
         match target {
             OwnedType::Optional(inner) => self.is_assignable_to(candidate, &inner),
-            OwnedType::Named { name, .. } => self.is_type_compatible(candidate, &name),
+            OwnedType::Named { name, .. } => {
+                self.integer_literal_fits_named_type(
+                    candidate,
+                    &name,
+                    self.current_module.as_deref(),
+                ) || self.is_type_compatible(candidate, &name)
+            }
             OwnedType::Qualified {
                 module_path, name, ..
-            } => self.is_type_compatible_inner(
-                candidate,
-                self.current_module.as_deref(),
-                &TypeKey { module_path, name },
-                &mut HashSet::new(),
-            ),
+            } => {
+                let target = TypeKey { module_path, name };
+                self.integer_literal_fits_type(candidate, &target)
+                    || self.is_type_compatible_inner(
+                        candidate,
+                        self.current_module.as_deref(),
+                        &target,
+                        &mut HashSet::new(),
+                    )
+            }
             OwnedType::Generic {
                 constraint,
                 constraint_scope,
@@ -1247,6 +1258,27 @@ impl TypeHierarchy {
                 .evaluate_type(candidate)
                 .is_ok_and(|candidate| candidate == target),
         }
+    }
+
+    fn integer_literal_fits_named_type(
+        &self,
+        candidate: &OwnedType,
+        target: &str,
+        context: Option<&str>,
+    ) -> bool {
+        self.resolve_key(target, context)
+            .is_some_and(|target| self.integer_literal_fits_type(candidate, &target))
+    }
+
+    fn integer_literal_fits_type(&self, candidate: &OwnedType, target: &TypeKey) -> bool {
+        if target.module_path.is_some() || !self.types.contains_key(target) {
+            return false;
+        }
+        let OwnedType::Literal(OwnedLiteral::Integer { value, .. }) = candidate else {
+            return false;
+        };
+        parse_fixed_integer_representation(&target.name)
+            .is_some_and(|representation| integer_fits(value, representation))
     }
 
     pub fn descends_from_static_type(&self, candidate: &OwnedType, target: &XenoType) -> bool {
@@ -1410,12 +1442,13 @@ impl TypeHierarchy {
         if let Some(required_trait) = self.get_trait(constraint) {
             self.type_implements_trait(candidate, required_trait)
         } else {
-            self.is_type_compatible_in(
-                candidate,
-                self.current_module.as_deref(),
-                constraint,
-                constraint_scope,
-            )
+            self.integer_literal_fits_named_type(candidate, constraint, constraint_scope)
+                || self.is_type_compatible_in(
+                    candidate,
+                    self.current_module.as_deref(),
+                    constraint,
+                    constraint_scope,
+                )
         }
     }
 
@@ -1802,6 +1835,44 @@ fn substitute_owned_type(ty: &OwnedType, substitutions: &HashMap<&str, &OwnedTyp
 mod tests {
     use super::*;
     use crate::semantic::{ANY, BUILTIN_TYPES, LITERAL_SUM, STRING_LITERAL_SUM, STRUCT};
+
+    #[test]
+    fn integer_literals_are_assignable_when_their_values_fit_the_target() {
+        let hierarchy = utility_hierarchy();
+        let literal = |value: i64, signed: bool, bits: u64| {
+            OwnedType::Literal(OwnedLiteral::Integer {
+                value: value.into(),
+                representation: IntegerRepresentation {
+                    signed,
+                    size: IntegerSize::Bits(bits),
+                },
+                cast: None,
+            })
+        };
+
+        assert!(hierarchy.is_assignable_to(&literal(7, false, 3), &OwnedType::named("i4")));
+        assert!(hierarchy.is_assignable_to(&literal(-8, true, 4), &OwnedType::named("i4")));
+        assert!(!hierarchy.is_assignable_to(&literal(8, false, 4), &OwnedType::named("i4")));
+        assert!(!hierarchy.is_assignable_to(&literal(-9, true, 5), &OwnedType::named("i4")));
+        assert!(!hierarchy.is_assignable_to(&literal(-1, true, 1), &OwnedType::named("u4")));
+        assert!(hierarchy.is_assignable_to(&literal(15, false, 4), &OwnedType::named("u4")));
+        assert!(!hierarchy.is_assignable_to(&literal(16, false, 5), &OwnedType::named("u4")));
+
+        let explicitly_u4 = OwnedType::Literal(OwnedLiteral::Integer {
+            value: 7.into(),
+            representation: IntegerRepresentation {
+                signed: false,
+                size: IntegerSize::Bits(4),
+            },
+            cast: Some("u4".to_string()),
+        });
+        assert!(hierarchy.is_assignable_to(&explicitly_u4, &OwnedType::named("i4")));
+
+        assert!(
+            !hierarchy.is_assignable_to(&OwnedType::named("u4"), &OwnedType::named("i4")),
+            "range-aware coercion must apply only to constants, not the entire u4 type"
+        );
+    }
 
     #[test]
     fn unconstrained_generics_are_compatible_with_any() {

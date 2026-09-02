@@ -365,35 +365,35 @@ static U4: XenoType = XenoType {
     name: "u4",
     documentation: Some("The u4 type represents a 4-bit unsigned integer."),
     generic_params: None,
-    parents: Some(&[XenoParent::Type(&U8)]),
+    parents: Some(&[XenoParent::Type(&U8), XenoParent::Type(&I8)]),
 };
 
 static U8: XenoType = XenoType {
     name: "u8",
     documentation: Some("The u8 type represents an 8-bit unsigned integer."),
     generic_params: None,
-    parents: Some(&[XenoParent::Type(&U16)]),
+    parents: Some(&[XenoParent::Type(&U16), XenoParent::Type(&I16)]),
 };
 
 static U16: XenoType = XenoType {
     name: "u16",
     documentation: Some("The u16 type represents a 16-bit unsigned integer."),
     generic_params: None,
-    parents: Some(&[XenoParent::Type(&U32)]),
+    parents: Some(&[XenoParent::Type(&U32), XenoParent::Type(&I32)]),
 };
 
 static U32: XenoType = XenoType {
     name: "u32",
     documentation: Some("The u32 type represents a 32-bit unsigned integer."),
     generic_params: None,
-    parents: Some(&[XenoParent::Type(&U64)]),
+    parents: Some(&[XenoParent::Type(&U64), XenoParent::Type(&I64)]),
 };
 
 static U64: XenoType = XenoType {
     name: "u64",
     documentation: Some("The u64 type represents a 64-bit unsigned integer."),
     generic_params: None,
-    parents: Some(&[XenoParent::Type(&U128)]),
+    parents: Some(&[XenoParent::Type(&U128), XenoParent::Type(&I128)]),
 };
 
 static U128: XenoType = XenoType {
@@ -838,5 +838,22 @@ mod tests {
         assert!(TYPE_REFERENCE.is_or_inherits(&EXPRESSION));
         assert!(!STRING_LITERAL.is_or_inherits(&NUMBER_LITERAL));
         assert!(!LITERAL.is_or_inherits(&STRING_LITERAL));
+    }
+
+    #[test]
+    fn unsigned_integers_widen_to_lossless_signed_types() {
+        for (unsigned, signed) in [
+            (&U4, &I8),
+            (&U8, &I16),
+            (&U16, &I32),
+            (&U32, &I64),
+            (&U64, &I128),
+        ] {
+            assert!(is_type_compatible(unsigned, signed, &mut HashSet::new()));
+        }
+
+        assert!(!is_type_compatible(&U8, &I8, &mut HashSet::new()));
+        assert!(!is_type_compatible(&U128, &I128, &mut HashSet::new()));
+        assert!(!is_type_compatible(&I8, &U8, &mut HashSet::new()));
     }
 }

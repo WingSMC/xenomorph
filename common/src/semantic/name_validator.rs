@@ -381,7 +381,7 @@ mod tests {
         Literal::Int(IntLiteral {
             value: value.into(),
             representation: IntegerRepresentation {
-                signed: false,
+                signed: value.is_negative(),
                 size: IntegerSize::Bits(bits),
             },
             token,
@@ -508,6 +508,63 @@ mod tests {
         });
 
         assert!(errors.is_empty(), "{errors:#?}");
+    }
+
+    #[test]
+    fn typed_signed_sets_accept_lossless_unsigned_values() {
+        let keyword = token("set");
+        let element = token("i16");
+        let negative = token("-256");
+        let one = token("1");
+        let seven = token("7");
+        let closing = token("]");
+
+        let errors = validate(&SetType {
+            keyword: &keyword,
+            element_type: Some(SimpleType::Identifier(&element, None)),
+            values: Some(vec![
+                integer(-256, 9, &negative, None),
+                integer(1, 1, &one, None),
+                integer(7, 3, &seven, None),
+            ]),
+            last_token: &closing,
+        });
+
+        assert!(errors.is_empty(), "{errors:#?}");
+    }
+
+    #[test]
+    fn typed_sets_accept_only_literals_within_the_element_range() {
+        let keyword = token("set");
+        let element = token("i4");
+        let minimum = token("-8");
+        let maximum = token("7");
+        let closing = token("]");
+
+        let errors = validate(&SetType {
+            keyword: &keyword,
+            element_type: Some(SimpleType::Identifier(&element, None)),
+            values: Some(vec![
+                integer(-8, 4, &minimum, None),
+                integer(7, 3, &maximum, None),
+            ]),
+            last_token: &closing,
+        });
+
+        assert!(errors.is_empty(), "{errors:#?}");
+
+        let above_maximum = token("8");
+        let errors = validate(&SetType {
+            keyword: &keyword,
+            element_type: Some(SimpleType::Identifier(&element, None)),
+            values: Some(vec![integer(8, 4, &above_maximum, None)]),
+            last_token: &closing,
+        });
+
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert!(errors[0]
+            .message
+            .contains("Set value '8' is not compatible with element type 'i4'"));
     }
 
     #[test]
