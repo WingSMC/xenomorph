@@ -5,35 +5,6 @@ service, but they are intentionally not transcribed into `schema/tda` yet.
 Xenomorph must reproduce their TypeScript semantics before their source
 TypeScript declarations can be removed.
 
-## Dynamic object properties
-
-Xenomorph's `dict<K, V>` currently generates TypeScript `Map<K, V>`, not
-`Record<K, V>` or an object index signature. The JSON contracts below require
-plain objects, so substituting `dict` would change both their static and runtime
-semantics.
-
-- `Requirement`, `CustomAttribute`, and `SimilarRequirement` in TDA `env.d.ts`.
-  `Requirement` has a string index signature whose values form a heterogeneous
-  union.
-- `PmAsJsonData` and `AIPmContents` in TDA `env.d.ts`.
-- `ExecutionMode` and therefore the complete `Execution`, LTT, RTT, and VTT
-  template object graphs in TDA `env.d.ts`. `ExecutionMode` is a
-  `Partial<Record<ExecutionModeKeys, Automation>>` and includes the property
-  name `ecu.test`, which is not currently a valid Xenomorph field identifier.
-- `DesignRequirementDTO.additional_attributes`,
-  `PurposeSearchTestSpec.scenario_requirements`, and the request/response types
-  that transitively depend on them in TDA `src/api/prompts/ai.model.ts`.
-- `CsvDelimiters`, `ExtractSignalsResponse.stats`, `GeneralNotesRes.stats`, and
-  the multipart request types that depend on them in TDA
-  `src/api/prompts/ai.model.forms.ts`.
-- `DngAttributeFilters`, `ModuleEntryMergedOut`,
-  `ModuleEntriesMergedIn`, and `ModuleEntriesMergedOut` in TDA
-  `src/api/prompts/dngGetData.types.ts`.
-
-Required work: add a JSON-object/index-signature type that generates
-`Record<K, V>` (or `{ [key: K]: V }`) distinctly from `Map<K, V>`, including
-quoted property-name support.
-
 ## `unknown`, `object`, and recursive JSON
 
 The current TypeScript target has no native mapping for `unknown` or `object`.
@@ -42,9 +13,17 @@ recursive `JsonValue`.
 
 Blocked contracts include:
 
+- `Requirement`, `CustomAttribute`, and `SimilarRequirement` in TDA `env.d.ts`.
+  Their dynamic value unions contain `Record<string, unknown>`.
 - `JsonPrimitive` and `JsonValue` in TDA `src/model/json-types.ts`.
 - `RequirementSearchRequirement.linked_designs`, `SynthStreamEvent.meta`,
   `StreamEvent.meta`, and responses that transitively contain those fields.
+- `ExtractSignalsResponse.stats`, `GeneralNotesRes.stats`, and
+  `TestGenerationWorkflowStreamPayload.generation_input` in TDA
+  `src/api/prompts/ai.model.forms.ts`.
+- `ModuleEntryMergedOut` and `ModuleEntriesMergedOut` in TDA
+  `src/api/prompts/dngGetData.types.ts`. Merged rows intentionally allow
+  arbitrary `unknown`-valued custom attributes.
 - `TestSpecLookupData.test_spec_procedure` and
   `PurposeSearchTestSpec.test_spec_procedure`.
 - `GenerateTestSpecsOptions.current_design`, which accepts `string | object`.
@@ -111,12 +90,12 @@ The following otherwise ordinary editor contracts remain blocked because they
 contain one of the non-reproducible types above:
 
 - `TestSpecification` (`Requirement[]`)
-- `DesignScenario` (`Record<string, string>`)
-- `TestDesign` (`DesignScenario[]`)
+- `DesignScenario` and `TestDesign` because `DesignScenario` contains
+  `TestSpecification[]`.
 - `DesignStateAndReqsForScenarioRes` (`Requirement[]`)
 - `LinkedScenarioRes` (`Requirement[]`)
 - Full `LabTestTemplate`, `ReleaseTestTemplate`, and `VehicleTestTemplate`
-  graphs (`Requirement[]` and/or `ExecutionMode`)
+  graphs because their shared `General` object contains `Requirement[]`.
 
 Do not weaken these fields to `any`, `string`, `Map`, or an incomplete explicit
 struct merely to make generation pass; each substitution changes the public
