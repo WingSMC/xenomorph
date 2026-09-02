@@ -19,20 +19,9 @@ pub fn run_init() -> Result<(), String> {
     let folder_name = prompt(&mut input, &mut output, "Folder name: ")?;
     let folder_name = validate_folder_name(&folder_name)?;
     let project_directory = original_directory.join(&folder_name);
-    if project_directory.exists() {
-        return Err(format!(
-            "Cannot initialize '{}': the path already exists.",
-            project_directory.display()
-        ));
-    }
 
     let parent_repository = discover_git_repository(&original_directory)?;
-    fs::create_dir(&project_directory).map_err(|error| {
-        format!(
-            "Unable to create project directory '{}': {error}",
-            project_directory.display()
-        )
-    })?;
+    ensure_project_directory(&project_directory)?;
     std::env::set_current_dir(&project_directory).map_err(|error| {
         format!(
             "Unable to enter project directory '{}': {error}",
@@ -196,17 +185,7 @@ fn prompt(
 }
 
 fn validate_folder_name(value: &str) -> Result<PathBuf, String> {
-    let value = value.trim();
-    let path = Path::new(value);
-    let mut components = path.components();
-    let valid = !value.is_empty()
-        && matches!(components.next(), Some(Component::Normal(_)))
-        && components.next().is_none();
-
-    if !valid {
-        return Err("Folder name must be one non-empty relative path component.".to_string());
-    }
-    Ok(path.to_path_buf())
+    validate_relative_path(value, "Folder name")
 }
 
 fn validate_graft_path(value: &str) -> Result<PathBuf, String> {
@@ -248,6 +227,46 @@ fn validate_relative_path(value: &str, name: &str) -> Result<PathBuf, String> {
         ));
     }
     Ok(path.to_path_buf())
+}
+
+fn ensure_project_directory(project_directory: &Path) -> Result<(), String> {
+    match fs::metadata(project_directory) {
+        Ok(metadata) if !metadata.is_dir() => Err(format!(
+            "Cannot initialize '{}': the path exists and is not a directory.",
+            project_directory.display()
+        )),
+        Ok(_) => {
+            let mut entries = fs::read_dir(project_directory).map_err(|error| {
+                format!(
+                    "Unable to inspect project directory '{}': {error}",
+                    project_directory.display()
+                )
+            })?;
+            match entries.next() {
+                None => Ok(()),
+                Some(Ok(_)) => Err(format!(
+                    "Cannot initialize '{}': the directory is not empty.",
+                    project_directory.display()
+                )),
+                Some(Err(error)) => Err(format!(
+                    "Unable to inspect project directory '{}': {error}",
+                    project_directory.display()
+                )),
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir_all(project_directory).map_err(|error| {
+                format!(
+                    "Unable to create project directory '{}': {error}",
+                    project_directory.display()
+                )
+            })
+        }
+        Err(error) => Err(format!(
+            "Unable to inspect project directory '{}': {error}",
+            project_directory.display()
+        )),
+    }
 }
 
 fn repository_name(repository_url: &str) -> Result<String, String> {
@@ -504,16 +523,58 @@ mod tests {
     }
 
     #[test]
-    fn folder_name_must_be_one_relative_component() {
+    fn folder_name_accepts_safe_nested_relative_paths() {
         assert_eq!(
             validate_folder_name("models").unwrap(),
             PathBuf::from("models")
         );
+        assert_eq!(
+            validate_folder_name("schema/other").unwrap(),
+            PathBuf::from("schema/other")
+        );
         assert!(validate_folder_name("").is_err());
         assert!(validate_folder_name(".").is_err());
         assert!(validate_folder_name("..").is_err());
-        assert!(validate_folder_name("models/api").is_err());
+        assert!(validate_folder_name("models/../api").is_err());
         assert!(validate_folder_name("/models").is_err());
+    }
+
+    #[test]
+    fn project_directory_may_be_missing_beneath_a_non_empty_parent_or_empty() {
+        let root = temporary_directory("nested-project-directory");
+        let parent = root.join("schema");
+        fs::create_dir(&parent).expect("parent directory should be created");
+        fs::write(parent.join("existing.txt"), "existing")
+            .expect("parent fixture should be written");
+        let project_directory = parent.join("other");
+
+        ensure_project_directory(&project_directory)
+            .expect("missing nested project directory should be created");
+        assert!(project_directory.is_dir());
+        ensure_project_directory(&project_directory)
+            .expect("empty project directory should be accepted");
+
+        fs::remove_dir_all(root).expect("temporary directory should be removed");
+    }
+
+    #[test]
+    fn project_directory_rejects_non_empty_directories_and_files() {
+        let root = temporary_directory("invalid-project-directory");
+        let non_empty = root.join("non-empty");
+        fs::create_dir(&non_empty).expect("non-empty directory should be created");
+        fs::write(non_empty.join("existing.txt"), "existing")
+            .expect("directory fixture should be written");
+        let file = root.join("existing-file");
+        fs::write(&file, "existing").expect("file fixture should be written");
+
+        assert!(ensure_project_directory(&non_empty)
+            .unwrap_err()
+            .contains("directory is not empty"));
+        assert!(ensure_project_directory(&file)
+            .unwrap_err()
+            .contains("not a directory"));
+
+        fs::remove_dir_all(root).expect("temporary directory should be removed");
     }
 
     #[test]

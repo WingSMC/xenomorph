@@ -32,7 +32,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Initialize a new Xenomorph project in a Git repository.
+    /// Initialize a Xenomorph project in a new or empty relative directory.
     Init,
     /// Attach a Xenomorph Git repository as a submodule.
     Graft {
