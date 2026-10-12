@@ -53,8 +53,6 @@ let client: LanguageClient | undefined;
 let output: OutputChannel | undefined;
 let restartPromise: Promise<void> | undefined;
 
-const restartRequestedNotification = 'xenomorph/restartRequested';
-
 export function activate(context: ExtensionContext): void {
     output = window.createOutputChannel('Xenomorph');
     const codeLensProvider = new XenomorphCodeLensProvider(output);
@@ -88,6 +86,13 @@ export function activate(context: ExtensionContext): void {
     const clientOptions: LanguageClientOptions = {
         documentSelector: [{ scheme: 'file', language: 'xenomorph' }],
         outputChannel: output,
+        middleware: {
+            // The language client registers commands advertised by the server.
+            executeCommand: (command, args, next) =>
+                command === 'xenomorph.reloadPlugins'
+                    ? reloadPlugins(args)
+                    : next(command, args),
+        },
     };
     const lspExecutable = workspace
         .getConfiguration('xenomorph.lsp')
@@ -100,12 +105,6 @@ export function activate(context: ExtensionContext): void {
         createServerOptions(),
         clientOptions,
     );
-    context.subscriptions.push(
-        client.onNotification(restartRequestedNotification, () => {
-            void restartLsp('workspace config changed');
-        }),
-    );
-
     void client.start().catch((error: unknown) => {
         const message = errorMessage(error);
         output?.appendLine(`[LSP] Failed to start: ${message}`);
@@ -113,6 +112,24 @@ export function activate(context: ExtensionContext): void {
             `Xenomorph LSP failed to start (${lspExecutable}). Ensure it is on PATH. ${message}`,
         );
     });
+}
+
+async function reloadPlugins(args: unknown[]): Promise<void> {
+    if (!client?.isRunning()) {
+        void window.showErrorMessage('The Xenomorph LSP is not running.');
+        return;
+    }
+    try {
+        await client.sendRequest('workspace/executeCommand', {
+            command: 'xenomorph.reloadPlugins',
+            arguments: args,
+        });
+        output?.appendLine('[LSP] Plugins reloaded without restarting the server.');
+    } catch (error: unknown) {
+        const message = errorMessage(error);
+        output?.appendLine(`[LSP] Plugin reload failed: ${message}`);
+        void window.showErrorMessage(`Xenomorph plugin reload failed. ${message}`);
+    }
 }
 
 function restartLsp(reason: string): Promise<void> {

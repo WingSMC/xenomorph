@@ -1294,6 +1294,7 @@ dependencies = [
  "serde_json",
  "toml",
  "tower-lsp",
+ "xenomorph_plugin_api",
 ]
 
 [[package]]
@@ -1316,6 +1317,7 @@ dependencies = [
 name = "xenomorph_lsp"
 version = "0.1.2"
 dependencies = [
+ "serde_json",
  "tokio",
  "tower-lsp",
  "xenomorph_common",
@@ -1328,6 +1330,21 @@ dependencies = [
  "clap",
  "serde",
  "serde_json",
+ "xenomorph_common",
+]
+
+[[package]]
+name = "xenomorph_plugin_api"
+version = "0.1.2"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "xenomorph_test_plugin"
+version = "0.0.0"
+dependencies = [
  "xenomorph_common",
 ]
 

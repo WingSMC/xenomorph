@@ -32,6 +32,7 @@ pub fn run_graph(json: bool) {
             Ok(()) => println!(),
             Err(error) => {
                 eprintln!("Failed to serialize module graph: {error}");
+                drop(registry);
                 std::process::exit(1);
             }
         }

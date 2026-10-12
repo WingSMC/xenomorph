@@ -2,7 +2,7 @@ use ouroboros::self_referencing;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 pub mod types;
 
@@ -10,8 +10,11 @@ use crate::config::Config;
 use crate::lexer::{Lexer, Token, XenoTokens};
 use crate::module::types::{DeclarationInfo, ErrorPhase, ModuleDiagnostic, ModulePath};
 use crate::parser::{Declaration, Parser, XenoAst};
-use crate::plugins::XenoPlugin;
-use crate::semantic::{Analyzer, NameCollisionValidator, TypeDeclarationInfo, BUILTIN_TYPES};
+use crate::plugins::{load_plugins, LoadedPlugin, PluginMode};
+use crate::semantic::{
+    Analyzer, MetadataGraph, NameCollisionValidator, TypeDeclarationInfo, BUILTIN_ANNOTATIONS,
+    BUILTIN_TRAITS, BUILTIN_TYPES,
+};
 use crate::utils::calculate_hash;
 use crate::XenoDiagSeverity;
 
@@ -55,8 +58,7 @@ pub struct ModuleData {
 }
 
 /// Determines the workspace root and entry module path from the config.
-fn get_root() -> Result<(PathBuf, String), ModuleDiagnostic> {
-    let config = Config::get();
+fn get_root(config: &Config) -> Result<(PathBuf, String), ModuleDiagnostic> {
     let mut joined = config.workdir.join(Path::new(&config.parser.entry));
     joined.add_extension("xen");
     let entry_file = joined.canonicalize().map_err(|e| ModuleDiagnostic {
@@ -109,31 +111,88 @@ pub struct XenoRegistry {
     pub module_cache: RwLock<HashMap<ModulePath, ModuleData>>,
     pub root: PathBuf,
     pub entry: String,
-    pub plugins: &'static Vec<&'static XenoPlugin<'static>>,
+    pub config: Arc<Config>,
+    pub metadata: MetadataGraph,
+    pub plugins: Vec<LoadedPlugin>,
     pub analyzer: Analyzer,
 }
 
 impl XenoRegistry {
     pub fn new(generation_mode: bool) -> Result<XenoRegistry, ModuleDiagnostic> {
-        let (root, entry) = get_root()?;
-        let plugins = XenoPlugin::get_plugins();
+        let config = std::env::current_dir()
+            .map_err(|error| error.to_string())
+            .and_then(|directory| Config::discover(&directory))
+            .map_err(Self::runtime_error)?;
+        Self::with_config(config, generation_mode)
+    }
+
+    pub fn with_config(
+        config: Config,
+        generation_mode: bool,
+    ) -> Result<XenoRegistry, ModuleDiagnostic> {
+        let (root, entry) = get_root(&config)?;
+        let mode = if generation_mode {
+            PluginMode::Generation
+        } else {
+            PluginMode::Analysis
+        };
+        let plugins = load_plugins(&config, mode).map_err(Self::runtime_error)?;
+        let mut metadata =
+            MetadataGraph::from_all_descriptors(BUILTIN_TYPES, BUILTIN_TRAITS, BUILTIN_ANNOTATIONS);
+        for plugin in &plugins {
+            metadata
+                .types
+                .extend(plugin.description.metadata.types.clone());
+            metadata
+                .traits
+                .extend(plugin.description.metadata.traits.clone());
+            metadata
+                .annotations
+                .extend(plugin.description.metadata.annotations.clone());
+        }
+        let analyzer = Analyzer::new(generation_mode, &plugins);
         Ok(XenoRegistry {
             module_cache: RwLock::new(HashMap::default()),
             root,
             entry,
-            analyzer: Analyzer::new(generation_mode, plugins),
+            analyzer,
+            config: Arc::new(config),
+            metadata,
             plugins,
         })
+    }
+
+    fn runtime_error(message: String) -> ModuleDiagnostic {
+        ModuleDiagnostic {
+            module_path: String::new(),
+            message,
+            location: None,
+            phase: ErrorPhase::Module,
+            severity: XenoDiagSeverity::Err,
+        }
     }
 
     /// Initializes a new `XenoRegistry` and loads the entire workspace starting from the entry module.
     pub fn load_workspace(generation_mode: bool) -> Result<XenoRegistry, Vec<ModuleDiagnostic>> {
         let reg = XenoRegistry::new(generation_mode).map_err(|e| vec![e])?;
-        let errs = reg.load_module(&[&reg.entry], true, None);
+        Self::finish_workspace(reg)
+    }
+
+    pub fn load_workspace_with_config(
+        config: Config,
+        generation_mode: bool,
+    ) -> Result<XenoRegistry, Vec<ModuleDiagnostic>> {
+        Self::with_config(config, generation_mode)
+            .map_err(|error| vec![error])?
+            .finish_workspace()
+    }
+
+    fn finish_workspace(self) -> Result<XenoRegistry, Vec<ModuleDiagnostic>> {
+        let errs = self.load_module(&[&self.entry], true, None);
         if Self::has_fatal_diagnostics(&errs) {
             return Err(errs);
         }
-        Ok(reg)
+        Ok(self)
     }
 
     fn has_fatal_diagnostics(diagnostics: &[ModuleDiagnostic]) -> bool {
@@ -331,7 +390,13 @@ impl XenoRegistry {
     ) -> Vec<ModuleDiagnostic> {
         let mut errors: Vec<ModuleDiagnostic> = Vec::new();
 
-        let md = match Self::_create_module_data(&module_path, abs_path, source, hash) {
+        let md = match Self::_create_module_data(
+            &module_path,
+            abs_path,
+            source,
+            hash,
+            &self.config.debug,
+        ) {
             Ok(r) => r,
             Err(e) => {
                 // Do not leave declarations from the previous version visible
@@ -377,7 +442,7 @@ impl XenoRegistry {
             let analyzer = if generation_allowed && !self.analyzer.generation_mode {
                 &self.analyzer
             } else {
-                analysis_only = Analyzer::new(false, self.plugins);
+                analysis_only = Analyzer::new(false, &self.plugins);
                 &analysis_only
             };
 
@@ -386,8 +451,8 @@ impl XenoRegistry {
                 md,
                 &imports,
                 &cache,
-                self.plugins,
-                &Config::get().plugins.config,
+                &self.plugins,
+                &self.config.plugins.config,
             );
 
             let analyzer_errors: Vec<ModuleDiagnostic> = xeno_errors
@@ -460,14 +525,8 @@ impl XenoRegistry {
                 .iter()
                 .map(|semantic_type| semantic_type.name.to_string())
                 .collect();
-            for plugin in self.plugins {
-                if let Some(provide_types) = plugin.provide_types {
-                    static_types.extend(
-                        provide_types()
-                            .iter()
-                            .map(|semantic_type| semantic_type.name.to_string()),
-                    );
-                }
+            for plugin in &self.plugins {
+                static_types.extend(plugin.description.metadata.types.keys().cloned());
             }
 
             cache
@@ -629,7 +688,7 @@ impl XenoRegistry {
             let analyzer = if generation_allowed {
                 &self.analyzer
             } else {
-                analysis_only = Analyzer::new(false, self.plugins);
+                analysis_only = Analyzer::new(false, &self.plugins);
                 &analysis_only
             };
             let diagnostics = analyzer.run(
@@ -637,8 +696,8 @@ impl XenoRegistry {
                 module,
                 &imports,
                 &cache,
-                self.plugins,
-                &Config::get().plugins.config,
+                &self.plugins,
+                &self.config.plugins.config,
             );
             let analyzer_errors = diagnostics
                 .iter()
@@ -931,6 +990,7 @@ impl XenoRegistry {
         abs_path: PathBuf,
         source: String,
         hash: u64,
+        debug: &crate::config::DebugConfig,
     ) -> Result<ModuleData, Vec<ModuleDiagnostic>> {
         // Collect parser errors via shared mutability since ouroboros closures
         // can't write to head fields during construction.
@@ -952,7 +1012,7 @@ impl XenoRegistry {
             tokens_builder: |source| {
                 Lexer::tokenize(source)
                     .inspect(|ts| {
-                        if Config::get().debug.tokens {
+                        if debug.tokens {
                             eprint!("{:?}", ts);
                         }
                     })
@@ -969,7 +1029,7 @@ impl XenoRegistry {
             ast_builder: |tokens| {
                 let (ast, diagnostics) = Parser::parse(tokens);
 
-                if Config::get().debug.ast {
+                if debug.ast {
                     eprint!("{:?}", ast);
                 }
 
@@ -1039,13 +1099,14 @@ mod tests {
     use std::{
         collections::{BTreeMap, BTreeSet, HashMap, HashSet},
         path::PathBuf,
+        sync::Arc,
     };
 
     use super::{ErrorPhase, ModuleData, ModuleDiagnostic};
     use crate::{
-        config::PluginConfigs,
+        config::{Config, PluginConfigs},
         module::XenoRegistry,
-        semantic::{Analyzer, NameCollisionValidator, BUILTIN_TYPES},
+        semantic::{Analyzer, MetadataGraph, NameCollisionValidator, BUILTIN_TYPES},
         utils::calculate_hash,
         XenoDiagSeverity,
     };
@@ -1083,6 +1144,7 @@ mod tests {
             PathBuf::from(format!("{module_path}.xen")),
             source.to_string(),
             calculate_hash(&source),
+            &crate::config::DebugConfig::default(),
         )
         .expect("semantic test source should parse")
     }
@@ -1115,7 +1177,7 @@ mod tests {
 
     #[test]
     fn purging_module_cache_removes_all_modules() {
-        static EMPTY_PLUGINS: Vec<&'static crate::plugins::XenoPlugin<'static>> = Vec::new();
+        let empty_plugins = Vec::new();
 
         let mut cache = HashMap::new();
         cache.insert(
@@ -1126,8 +1188,10 @@ mod tests {
             module_cache: std::sync::RwLock::new(cache),
             root: PathBuf::new(),
             entry: "test".to_string(),
-            plugins: &EMPTY_PLUGINS,
-            analyzer: Analyzer::new(false, &EMPTY_PLUGINS),
+            analyzer: Analyzer::new(false, &empty_plugins),
+            plugins: empty_plugins,
+            config: Arc::new(Config::default()),
+            metadata: MetadataGraph::default(),
         };
 
         assert_eq!(registry.purge_module_cache(), 1);
@@ -1401,7 +1465,7 @@ mod tests {
 
     #[test]
     fn full_cache_revalidation_finds_types_added_after_generic_declarations() {
-        static EMPTY_PLUGINS: Vec<&'static crate::plugins::XenoPlugin<'static>> = Vec::new();
+        let empty_plugins = Vec::new();
 
         let mut cache = HashMap::new();
         cache.insert(
@@ -1416,8 +1480,10 @@ mod tests {
             module_cache: std::sync::RwLock::new(cache),
             root: PathBuf::new(),
             entry: "early".to_string(),
-            plugins: &EMPTY_PLUGINS,
-            analyzer: Analyzer::new(false, &EMPTY_PLUGINS),
+            analyzer: Analyzer::new(false, &empty_plugins),
+            plugins: empty_plugins,
+            config: Arc::new(Config::default()),
+            metadata: MetadataGraph::default(),
         };
 
         registry.refresh_name_collision_diagnostics();
@@ -1430,7 +1496,7 @@ mod tests {
 
     #[test]
     fn collision_refresh_reports_duplicate_types_on_both_declarations() {
-        static EMPTY_PLUGINS: Vec<&'static crate::plugins::XenoPlugin<'static>> = Vec::new();
+        let empty_plugins = Vec::new();
 
         let mut cache = HashMap::new();
         cache.insert(
@@ -1445,8 +1511,10 @@ mod tests {
             module_cache: std::sync::RwLock::new(cache),
             root: PathBuf::new(),
             entry: "first".to_string(),
-            plugins: &EMPTY_PLUGINS,
-            analyzer: Analyzer::new(false, &EMPTY_PLUGINS),
+            analyzer: Analyzer::new(false, &empty_plugins),
+            plugins: empty_plugins,
+            config: Arc::new(Config::default()),
+            metadata: MetadataGraph::default(),
         };
 
         registry.refresh_name_collision_diagnostics();

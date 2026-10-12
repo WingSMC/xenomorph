@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use super::{Config, DEFAULT_CONFIG_IS_ABSTRACT};
-use crate::plugins::XenoPlugin;
+use crate::plugins::LoadedPlugin;
 
 /// Default location (relative to the workspace root) where the generated
 /// `xenomorph.toml` JSON Schema is written.
@@ -13,29 +13,19 @@ pub const RC_SCHEMA_RELATIVE_PATH: &str = ".xenomorph/xenomorph.schema.json";
 /// in each plugin's contributed `[plugins.<name>]` configuration schema.
 ///
 /// Plugins extend the schema by implementing
-/// [`XenoPlugin::provide_config_schema`], returning a JSON Schema object for
+/// the SDK's config-schema provider, returning a JSON Schema object for
 /// their own config section. The returned object is inserted under
 /// `properties.plugins.properties.<plugin-name>`.
-pub fn build_rc_schema(plugins: &[&'static XenoPlugin<'static>]) -> Value {
+pub fn build_rc_schema(plugins: &[LoadedPlugin]) -> Value {
     let defaults = Config::default();
 
     // Collect plugin-provided config schemas keyed by plugin name.
     let mut plugin_sections: Map<String, Value> = Map::new();
     for plugin in plugins {
-        let Some(provide) = plugin.provide_config_schema else {
+        let Some(schema) = &plugin.description.config_schema else {
             continue;
         };
-        match serde_json::from_str::<Value>(provide()) {
-            Ok(schema) => {
-                plugin_sections.insert(plugin.name.to_string(), schema);
-            }
-            Err(e) => {
-                eprintln!(
-                    "Plugin '{}' provided an invalid config schema: {}",
-                    plugin.name, e
-                );
-            }
-        }
+        plugin_sections.insert(plugin.description.name.clone(), schema.clone());
     }
 
     // `[plugins]` section: built-in keys plus per-plugin config sections.
@@ -167,10 +157,7 @@ pub fn build_rc_schema(plugins: &[&'static XenoPlugin<'static>]) -> Value {
 
 /// Builds the `xenomorph.toml` schema and writes it (pretty-printed) to
 /// `out_path`, creating parent directories as needed.
-pub fn write_rc_schema(
-    plugins: &[&'static XenoPlugin<'static>],
-    out_path: &Path,
-) -> std::io::Result<()> {
+pub fn write_rc_schema(plugins: &[LoadedPlugin], out_path: &Path) -> std::io::Result<()> {
     if let Some(parent) = out_path.parent() {
         fs::create_dir_all(parent)?;
     }

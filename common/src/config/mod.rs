@@ -163,6 +163,40 @@ fn default_workdir() -> PathBuf {
 }
 
 impl Config {
+    pub fn discover(workdir: &Path) -> Result<Self, String> {
+        match find_workspace_config(workdir) {
+            Some(path) => Self::from_path(&path),
+            None => Ok(Self::default_with_workdir(workdir.to_path_buf())),
+        }
+    }
+
+    pub fn from_path(config_path: &Path) -> Result<Self, String> {
+        let authoritative_path = normalized_config_path(config_path)?;
+        let workdir = authoritative_path
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| {
+                format!(
+                    "Config path '{}' has no parent directory",
+                    authoritative_path.display()
+                )
+            })?;
+        let mut config_paths = Vec::new();
+        let (value, schema_config_path) =
+            load_from_value(&authoritative_path, &mut Vec::new(), &mut config_paths)?;
+        let mut config = value.try_into::<Config>().map_err(|error| {
+            format!(
+                "Unable to deserialize merged config '{}': {error}",
+                authoritative_path.display()
+            )
+        })?;
+        config.workdir = workdir;
+        config.config_path = Some(authoritative_path);
+        config.schema_config_path = Some(schema_config_path);
+        config.config_paths = config_paths;
+        Ok(config)
+    }
+
     pub fn default_with_workdir(workdir: PathBuf) -> Self {
         Self {
             workdir,
@@ -178,7 +212,7 @@ impl Config {
     /// bypassing directory discovery so abstract configs can be operated on
     /// directly by commands such as `xeno schema --config`.
     pub fn initialize_from_path(config_path: &Path) -> Result<(), String> {
-        let config = load_config(config_path)?;
+        let config = Config::from_path(config_path)?;
         CONFIG
             .set(config)
             .map_err(|_| "Xenomorph configuration is already initialized.".to_string())
@@ -367,7 +401,7 @@ fn normalized_config_path(path: &Path) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
-fn load_config_value(
+fn load_from_value(
     config_path: &Path,
     resolving: &mut Vec<PathBuf>,
     config_paths: &mut Vec<PathBuf>,
@@ -427,40 +461,13 @@ fn load_config_value(
             .parent()
             .ok_or_else(|| format!("Config path '{}' has no parent", config_path.display()))?;
         let (mut base, schema_config_path) =
-            load_config_value(&parent.join(extends), resolving, config_paths)?;
+            load_from_value(&parent.join(extends), resolving, config_paths)?;
         merge_config_values(&mut base, current);
         Ok((base, schema_config_path))
     })();
 
     resolving.pop();
     result
-}
-
-fn load_config(config_path: &Path) -> Result<Config, String> {
-    let authoritative_path = normalized_config_path(config_path)?;
-    let workdir = authoritative_path
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| {
-            format!(
-                "Config path '{}' has no parent directory",
-                authoritative_path.display()
-            )
-        })?;
-    let mut config_paths = Vec::new();
-    let (value, schema_config_path) =
-        load_config_value(&authoritative_path, &mut Vec::new(), &mut config_paths)?;
-    let mut config = value.try_into::<Config>().map_err(|error| {
-        format!(
-            "Unable to deserialize merged config '{}': {error}",
-            authoritative_path.display()
-        )
-    })?;
-    config.workdir = workdir;
-    config.config_path = Some(authoritative_path);
-    config.schema_config_path = Some(schema_config_path);
-    config.config_paths = config_paths;
-    Ok(config)
 }
 
 /// Discovers and resolves the authoritative config for `wd`, then serializes
@@ -475,7 +482,7 @@ pub fn inspect_merged_config(wd: &Path) -> Result<String, String> {
             wd.display()
         )
     })?;
-    let config = load_config(&config_path)?;
+    let config = Config::from_path(&config_path)?;
     serialize_config_toml(&config)
 }
 
@@ -490,7 +497,7 @@ fn init_config() -> Config {
 
     match find_workspace_config(&current_dir) {
         None => Config::default_with_workdir(current_dir),
-        Some(config_path) => load_config(&config_path).unwrap_or_else(|error| {
+        Some(config_path) => Config::from_path(&config_path).unwrap_or_else(|error| {
             eprintln!("Error: {error}");
             let workdir = config_path
                 .parent()
@@ -505,7 +512,7 @@ fn init_config() -> Config {
 mod tests {
     use super::{
         default_config_toml, find_workspace_config, graft_config_toml, inspect_merged_config,
-        load_config, Config, ConfigValue, FormatterConfig, IndentKind, LineEnding, LogLevel,
+        Config, ConfigValue, FormatterConfig, IndentKind, LineEnding, LogLevel,
         WORKSPACE_CONFIG_FILE,
     };
     use crate::XenoDiagSeverity;
@@ -714,7 +721,7 @@ mod tests {
         )
         .expect("outer config should be written");
 
-        let config = load_config(&outer_config).expect("config hierarchy should load");
+        let config = Config::from_path(&outer_config).expect("config hierarchy should load");
 
         assert_eq!(config.parser.entry, "backend");
         assert_eq!(config.formatter.indent_width, 4);
@@ -749,7 +756,7 @@ mod tests {
         fs::write(&second, "extends = \"./first.toml\"\n")
             .expect("second config should be written");
 
-        let error = load_config(&first).expect_err("inheritance cycle should fail");
+        let error = Config::from_path(&first).expect_err("inheritance cycle should fail");
         assert!(error.contains("Cyclic xenomorph.toml inheritance"));
         assert!(error.contains("first.toml"));
         assert!(error.contains("second.toml"));

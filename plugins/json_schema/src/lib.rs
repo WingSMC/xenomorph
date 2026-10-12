@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use serde_json::{json, Map, Value};
-use xenomorph_common::config::{Config, ConfigValue, PluginConfigs};
+use xenomorph_common::config::{Config, ConfigValue};
 use xenomorph_common::parser::{
     Annotation, Declaration, Expr, KeyValExpr, Literal, SetType, SimpleType, Type, XenoType,
 };
@@ -24,6 +24,7 @@ static PLUGIN: XenoPlugin = XenoPlugin {
     name: NAME,
     version: VERSION,
     initialize: None,
+    shutdown: None,
     provide_types: None,
     provide_annotations: None,
     provide_config_schema: Some(provide_config_schema),
@@ -45,16 +46,14 @@ fn provide_config_schema() -> &'static str {
     }"#
 }
 
-#[no_mangle]
-fn load() -> &'static XenoPlugin<'static> {
-    &PLUGIN
-}
+xenomorph_common::export_plugin!(PLUGIN);
 
 const DRAFT: &str = "https://json-schema.org/draft/2020-12/schema";
 
 // ── Generator listener ──────────────────────────────────────────────
 
 struct JsonSchemaGenerator {
+    workdir: PathBuf,
     /// Accumulated `$defs` for the current module.
     defs: Map<String, Value>,
     abs_path: PathBuf,
@@ -89,8 +88,10 @@ impl SchemaContext<'_, '_> {
     }
 }
 
-fn create_generator(plugin_configs: &PluginConfigs) -> Box<dyn for<'a> AnalyzerListener<'a>> {
+fn create_generator(config: &Config) -> Box<dyn for<'a> AnalyzerListener<'a>> {
     let mut generator = JsonSchemaGenerator::new();
+    generator.workdir = config.workdir.clone();
+    let plugin_configs = &config.plugins.config;
 
     if let Some(ConfigValue::Table(cfg)) = plugin_configs.get("json_schema") {
         if let Some(ConfigValue::String(output)) = cfg.get("output") {
@@ -104,6 +105,7 @@ fn create_generator(plugin_configs: &PluginConfigs) -> Box<dyn for<'a> AnalyzerL
 impl JsonSchemaGenerator {
     fn new() -> Self {
         Self {
+            workdir: PathBuf::new(),
             defs: Map::new(),
             abs_path: PathBuf::new(),
             module_path: String::new(),
@@ -743,7 +745,7 @@ impl<'src> AnalyzerListener<'src> for JsonSchemaGenerator {
                         .module_path
                         .replace('/', std::path::MAIN_SEPARATOR_STR)
                 );
-                let path = Config::get().workdir.join(dir).join(filename);
+                let path = self.workdir.join(dir).join(filename);
                 if let Some(parent) = path.parent() {
                     let _ = fs::create_dir_all(parent);
                 }

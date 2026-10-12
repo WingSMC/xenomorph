@@ -1,0 +1,15 @@
+[package]
+name = "xenomorph_test_plugin"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+bad-abi = []
+alternate-version = []
+
+[dependencies]
+xenomorph_common = { path = "../.." }

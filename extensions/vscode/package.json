@@ -39,6 +39,12 @@
     "contributes": {
         "commands": [
             {
+                "command": "xenomorph.reloadPlugins",
+                "title": "Reload Plugins",
+                "category": "Xenomorph",
+                "icon": "$(refresh)"
+            },
+            {
                 "command": "xenomorph.parse",
                 "title": "Parse Current Document",
                 "category": "Xenomorph",

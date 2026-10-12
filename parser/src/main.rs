@@ -14,7 +14,7 @@ use init::{run_graft, run_init};
 use inspector::run_inspector;
 use xenomorph_common::config::{write_rc_schema, Config, LogLevel, RC_SCHEMA_RELATIVE_PATH};
 use xenomorph_common::module::{types::ModuleDiagnostic, XenoRegistry};
-use xenomorph_common::plugins::XenoPlugin;
+use xenomorph_common::plugins::{load_plugins, PluginMode};
 use xenomorph_common::XenoDiagSeverity;
 
 /// Parse Xenomorph workspaces and run developer tools.
@@ -112,21 +112,24 @@ fn main() {
 /// Generates the `xenomorph.toml` JSON Schema (base + plugin contributions) and
 /// writes it beside the deepest config in the inheritance chain.
 fn generate_rc_schema(config_path: Option<&std::path::Path>) {
-    if let Some(config_path) = config_path {
-        if let Err(error) = Config::initialize_from_path(config_path) {
-            eprintln!("✗ Failed to load xenomorph.toml config: {error}");
-            std::process::exit(1);
-        }
-    }
-    let plugins = XenoPlugin::get_plugins();
-    let out_path = Config::get().schema_workdir().join(RC_SCHEMA_RELATIVE_PATH);
+    let result = (|| {
+        let config = match config_path {
+            Some(path) => Config::from_path(path)?,
+            None => Config::discover(&std::env::current_dir().map_err(|error| error.to_string())?)?,
+        };
+        let plugins = load_plugins(&config, PluginMode::Schema)?;
+        let out_path = config.schema_workdir().join(RC_SCHEMA_RELATIVE_PATH);
+        write_rc_schema(&plugins, &out_path).map_err(|error| error.to_string())?;
+        println!("✓ Wrote xenomorph.toml schema → {}", out_path.display());
+        Ok::<_, String>(())
+    })();
 
-    match write_rc_schema(plugins, &out_path) {
-        Ok(()) => println!("✓ Wrote xenomorph.toml schema → {}", out_path.display()),
+    match result {
         Err(e) => {
             eprintln!("✗ Failed to write xenomorph.toml schema: {}", e);
             std::process::exit(1);
         }
+        Ok(_) => {}
     }
 }
 
@@ -210,8 +213,18 @@ fn format_cli_diagnostic(diagnostic: &ModuleDiagnostic) -> String {
 }
 
 fn run_generate() {
-    let loglevel = Config::get().debug.loglevel;
-    let reg = match XenoRegistry::load_workspace(true) {
+    let config = std::env::current_dir()
+        .map_err(|error| error.to_string())
+        .and_then(|directory| Config::discover(&directory));
+    let config = match config {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("Failed to load workspace config: {error}");
+            std::process::exit(1);
+        }
+    };
+    let loglevel = config.debug.loglevel;
+    let reg = match XenoRegistry::load_workspace_with_config(config, true) {
         Ok(r) => r,
         Err(e) => {
             for diagnostic in e

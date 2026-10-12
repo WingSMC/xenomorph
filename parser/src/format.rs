@@ -6,7 +6,8 @@ use xenomorph_common::config::Config;
 use xenomorph_common::formatter::format_xenomorph;
 
 pub fn run_format(file: Option<&Path>) -> Result<FormatSummary, String> {
-    let config = Config::get();
+    let directory = std::env::current_dir().map_err(|error| error.to_string())?;
+    let config = Config::discover(&directory)?;
     let paths = match file {
         Some(path) => {
             let path = if path.is_absolute() {

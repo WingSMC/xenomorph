@@ -2,7 +2,9 @@
 
 ## What is this?
 
-Xenomorph is meant to be a universal schema descriptor. It is a front-end for plugins that can be used to generate validators, serializers, ORMs, and other data-shape and relation related code in a language and framework agnostic way.
+Xenomorph aims to be a universal schema descriptor. It is a front end for
+plugins. Plugins generate validators, serializers, ORMs, and other code for
+data shapes and relations, independent of language or framework.
 
 ## Language Documentation
 
@@ -11,6 +13,7 @@ Xenomorph is meant to be a universal schema descriptor. It is a front-end for pl
 
 ## Plugin Documentation
 
+- [Plugin API, ownership, and reload](docs/PLUGINS.md)
 - [Java generator](plugins/java/README.md)
 
 ## Config (`xenomorph.toml`)
@@ -52,16 +55,17 @@ path = "./node_modules"
 plugins = ["xenomorph_typescript"]
 ```
 
-Tables are merged recursively from the extended config into the consuming
-config. The consuming config replaces colliding scalar and array values while
-retaining non-colliding keys and subkeys. Paths used at runtime remain relative
-to the authoritative consuming config's directory. `xeno schema` writes
-`.xenomorph/xenomorph.schema.json` beside the deepest extended config (or beside
-the authoritative config when it does not extend another file).
+Tables merge recursively from the extended config into the consuming config.
+The consuming config replaces colliding scalar and array values. It keeps
+non-colliding keys and subkeys. Paths used at runtime remain relative to the
+authoritative consuming config's directory. `xeno schema` writes
+`.xenomorph/xenomorph.schema.json` beside the deepest extended config. If the
+authoritative config does not extend another file, `xeno schema` writes the
+file beside that config instead.
 
-Unknown annotations in the selected plugin visibility scope are warnings, so a
-TypeScript-only view can tolerate Java-only annotations such as `@Lombok`.
-Unknown types remain errors.
+The host reports unknown annotations in the selected plugin visibility scope
+as warnings. A TypeScript-only view can therefore tolerate Java-only
+annotations such as `@Lombok`. Unknown types remain errors.
 
 Use `xeno config --inspect` to print the deeply merged TOML configuration to
 standard output. The output omits the consumed `abstract` and `extends` keys.
@@ -69,7 +73,7 @@ standard output. The output omits the consumed `abstract` and `extends` keys.
 ## Parser
 
 `xeno` parses the configured workspace. For editor and tooling integrations,
-`xeno inspect` reads standalone Xenomorph source from standard input and emits
+`xeno inspect` reads standalone Xenomorph source from standard input. It emits
 structured JSON containing the lexer token stream, syntax AST, and parser
 diagnostics. Standalone inspection does not resolve imports or run workspace
 semantic analysis.
@@ -80,19 +84,31 @@ representation consumed by editor and other tooling integrations.
 
 ## LSP
 
-`xenomorph_lsp` communicates over standard input/output and can be launched by
-the VS Code extension when the executable is available on `PATH`. It provides
-Rust-derived semantic tokens for context-aware syntax highlighting, alongside
-diagnostics, completion, hover, formatting, navigation, and rename support.
+The VS Code extension can launch `xenomorph_lsp` when the executable is
+available on `PATH`. `xenomorph_lsp` communicates over standard input/output.
+It provides:
+
+- Rust-derived semantic tokens for context-aware syntax highlighting
+- Diagnostics
+- Completion
+- Hover
+- Formatting
+- Navigation
+- Rename support
+
+Configuration changes reload the workspace and plugins in process.
+The VS Code **Reload Plugins** command reloads rebuilt libraries without restarting the LSP.
+The host releases generator-only libraries after it copies their semantic metadata.
 
 ## Development
 
-- Install [Rust](https://rust-lang.org/learn/get-started/) (Recommended 1.94)
+- Install [Rust through rustup](https://rust-lang.org/tools/install/). The workspace selects the pinned nightly toolchain in `rust-toolchain.toml`, including rustfmt and Clippy.
+Nightly does not yet provide a stable native Rust ABI. Plugins must use the C ABI for compatibility.
 - Install [Node.js](https://nodejs.org/en/download) (Recommended 24.11)
 
 - Run `npm run install:once` or install these manually:
-    - Install [pnpm](https://pnpm.io/) because it's nicer than npm
-    - Install [@antfu/ni](https://github.com/antfu-collective/ni) for npm run scripts to work
+    - Install [pnpm](https://pnpm.io/). It is nicer than npm
+    - Install [@antfu/ni](https://github.com/antfu-collective/ni) to make `npm run` scripts work
 
 - Run `nr install:deps` to install some dependencies
-- Run `nr build` to run compile/build all sub-projects and extensions.
+- Run `nr build` to compile and build all sub-projects and extensions.

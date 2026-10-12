@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
-use xenomorph_common::config::{Config, ConfigValue, PluginConfigs};
+use xenomorph_common::config::{Config, ConfigValue};
 use xenomorph_common::parser::{
     decimal_roundtrips_as, integer_fits, Annotation, Declaration, Expr, FloatSize, IntLiteral,
     IntegerRepresentation, IntegerSize, KeyValExpr, Literal, SimpleType, Type, XenoType,
@@ -25,6 +25,7 @@ static PLUGIN: XenoPlugin = XenoPlugin {
     name: NAME,
     version: VERSION,
     initialize: None,
+    shutdown: None,
     provide_types: Some(provide_types),
     provide_annotations: Some(provide_annotations),
     provide_config_schema: Some(provide_config_schema),
@@ -139,14 +140,12 @@ fn provide_config_schema() -> &'static str {
     }"#
 }
 
-#[no_mangle]
-fn load() -> &'static XenoPlugin<'static> {
-    &PLUGIN
-}
+xenomorph_common::export_plugin!(PLUGIN);
 
 // ── Generator listener ──────────────────────────────────────────────
 
 struct JavaGenerator {
+    workdir: PathBuf,
     abs_path: PathBuf,
     module_path: String,
     /// Output directory override from `[plugins.java].output`.
@@ -176,6 +175,7 @@ struct JavaGenerator {
 impl JavaGenerator {
     fn new() -> Self {
         Self {
+            workdir: PathBuf::new(),
             abs_path: PathBuf::new(),
             module_path: String::new(),
             output_dir: None,
@@ -192,8 +192,10 @@ impl JavaGenerator {
     }
 }
 
-fn create_generator(plugin_configs: &PluginConfigs) -> Box<dyn for<'a> AnalyzerListener<'a>> {
+fn create_generator(config: &Config) -> Box<dyn for<'a> AnalyzerListener<'a>> {
     let mut generator = JavaGenerator::new();
+    generator.workdir = config.workdir.clone();
+    let plugin_configs = &config.plugins.config;
 
     if let Some(ConfigValue::Table(cfg)) = plugin_configs.get("java") {
         if let Some(ConfigValue::String(output)) = cfg.get("output") {
@@ -338,7 +340,7 @@ impl<'src> AnalyzerListener<'src> for JavaGenerator {
 
     fn on_after_module(&mut self, scope: &ScopeInfo) {
         let base = match &self.output_dir {
-            Some(dir) => Config::get().workdir.join(dir),
+            Some(dir) => self.workdir.join(dir),
             None => self
                 .abs_path
                 .parent()

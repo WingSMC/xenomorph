@@ -1,11 +1,7 @@
-use std::sync::LazyLock;
-
 use tower_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, Documentation, InsertTextFormat, MarkupContent, MarkupKind,
 };
-use xenomorph_common::semantic::{
-    XenoAnnotation, XenoConstraint, XenoType, BUILTIN_ANNOTATIONS, BUILTIN_TYPES,
-};
+use xenomorph_common::semantic::{OwnedAnnotation, OwnedConstraint, OwnedSemanticType};
 
 pub fn create_completion_item(
     label: &str,
@@ -27,15 +23,8 @@ pub fn create_completion_item(
     }
 }
 
-pub static BUILTIN_ANNOTATION_COMPLETIONS: LazyLock<Vec<CompletionItem>> = LazyLock::new(|| {
-    BUILTIN_ANNOTATIONS
-        .iter()
-        .map(|annotation| create_annotation_completion_item(annotation))
-        .collect()
-});
-
-pub fn create_annotation_completion_item(annotation: &XenoAnnotation) -> CompletionItem {
-    let signature = format_annotation_signature(annotation);
+pub fn create_owned_annotation_completion_item(annotation: &OwnedAnnotation) -> CompletionItem {
+    let signature = format_owned_annotation_signature(annotation);
 
     CompletionItem {
         label: annotation.name.to_string(),
@@ -44,27 +33,30 @@ pub fn create_annotation_completion_item(annotation: &XenoAnnotation) -> Complet
         insert_text_format: Some(InsertTextFormat::SNIPPET),
         documentation: Some(Documentation::MarkupContent(MarkupContent {
             kind: MarkupKind::Markdown,
-            value: format_annotation_documentation(annotation, &signature),
+            value: format_owned_annotation_documentation(annotation, &signature),
         })),
         ..Default::default()
     }
 }
 
-pub fn format_annotation_documentation(annotation: &XenoAnnotation, signature: &str) -> String {
+pub fn format_owned_annotation_documentation(
+    annotation: &OwnedAnnotation,
+    signature: &str,
+) -> String {
     let mut documentation = format!("```xenomorph\n{}\n```", signature);
 
     if let Some(target) = annotation.target_parameter() {
         documentation.push_str(&format!(
             "\n\n**Applicable {}:** `{}`",
             match target.constraint {
-                XenoConstraint::Type(_) => "type",
-                XenoConstraint::Trait(_) => "trait",
+                OwnedConstraint::Type(_) => "type",
+                OwnedConstraint::Trait(_) => "trait",
             },
             target.constraint.name()
         ));
     }
 
-    if let Some(body) = annotation.documentation {
+    if let Some(body) = &annotation.documentation {
         documentation.push_str("\n\n");
         documentation.push_str(body);
     }
@@ -72,16 +64,16 @@ pub fn format_annotation_documentation(annotation: &XenoAnnotation, signature: &
     documentation
 }
 
-pub fn format_annotation_signature(annotation: &XenoAnnotation) -> String {
+pub fn format_owned_annotation_signature(annotation: &OwnedAnnotation) -> String {
     let explicit_parameters = annotation.explicit_parameters();
     let params = explicit_parameters
         .iter()
         .enumerate()
         .map(|(index, param)| {
             if annotation.variadic && index + 1 == explicit_parameters.len() {
-                format!("...{}", format_constraint(param.constraint))
+                format!("...{}", format_constraint(&param.constraint))
             } else {
-                format_constraint(param.constraint)
+                format_constraint(&param.constraint)
             }
         })
         .collect::<Vec<_>>()
@@ -90,14 +82,14 @@ pub fn format_annotation_signature(annotation: &XenoAnnotation) -> String {
     format!("@{}({})", annotation.name, params)
 }
 
-fn format_constraint(required: XenoConstraint) -> String {
+fn format_constraint(required: &OwnedConstraint) -> String {
     required.name().to_string()
 }
 
-pub fn create_type_completion_item(t: &XenoType) -> CompletionItem {
+pub fn create_owned_type_completion_item(t: &OwnedSemanticType) -> CompletionItem {
     create_completion_item(
-        t.name,
-        t.documentation,
+        &t.name,
+        t.documentation.as_deref(),
         if t.name.contains("color") || t.name.contains("Color") {
             CompletionItemKind::COLOR
         } else {
@@ -106,17 +98,13 @@ pub fn create_type_completion_item(t: &XenoType) -> CompletionItem {
     )
 }
 
-pub static BUILTIN_TYPE_COMPLETIONS: LazyLock<Vec<CompletionItem>> = LazyLock::new(|| {
-    BUILTIN_TYPES
-        .iter()
-        .map(|t| create_type_completion_item(t))
-        .collect()
-});
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xenomorph_common::semantic::{XenoAnnotationKind, XenoParam, ANY_TARGET_PARAM, EXPRESSION};
+    use xenomorph_common::semantic::{
+        MetadataGraph, XenoAnnotation, XenoAnnotationKind, XenoConstraint, XenoParam,
+        ANY_TARGET_PARAM, EXPRESSION,
+    };
 
     static FIRST: XenoParam = XenoParam {
         name: "first",
@@ -133,6 +121,11 @@ mod tests {
         params: &[&ANY_TARGET_PARAM, &FIRST, &REST],
         variadic: true,
     };
+
+    fn format_annotation_signature(annotation: &XenoAnnotation) -> String {
+        let graph = MetadataGraph::from_descriptors(&[], &[annotation]);
+        format_owned_annotation_signature(&graph.annotations[annotation.name])
+    }
 
     #[test]
     fn variadic_annotation_signature_marks_only_the_repeated_parameter() {
@@ -160,5 +153,20 @@ mod tests {
             format_annotation_signature(&ANNOTATION),
             "@Lombok(...Expression)"
         );
+    }
+
+    #[test]
+    fn owned_annotation_completion_uses_copied_metadata() {
+        let graph = MetadataGraph::from_descriptors(&[], &[&VARIADIC]);
+        let annotation = graph.annotations["annotation"].clone();
+        drop(graph);
+        let completion = create_owned_annotation_completion_item(&annotation);
+        assert_eq!(
+            completion.detail.as_deref(),
+            Some("@annotation(Expression, ...Expression)")
+        );
+        assert_eq!(completion.label, "annotation");
+        assert!(format_owned_annotation_documentation(&annotation, "")
+            .contains("**Applicable type:** `any`"));
     }
 }

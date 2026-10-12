@@ -3,6 +3,7 @@ use std::fmt;
 
 use bigdecimal::BigDecimal;
 use num_bigint::BigInt;
+use serde::{Deserialize, Serialize};
 
 use crate::parser::{
     integer_fits, parse_fixed_integer_representation, FloatRepresentation, FloatSize,
@@ -10,9 +11,9 @@ use crate::parser::{
 };
 use crate::utils::extract_documentation;
 
-use super::{XenoConstraint, XenoParent, XenoTrait, XenoTraitKind, XenoType};
+use super::{MetadataGraph, OwnedConstraint, OwnedTrait, OwnedTraitKind, XenoTrait, XenoType};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GenericParameterInfo {
     pub name: String,
     /// Name of either a type or a trait that constrains this parameter.
@@ -21,7 +22,7 @@ pub struct GenericParameterInfo {
     pub constraint_scope: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TypeDeclarationInfo {
     pub generic_params: Vec<GenericParameterInfo>,
     /// Immediate type parents. Intersections contribute multiple parents.
@@ -55,22 +56,26 @@ impl TypeDeclarationInfo {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OwnedField {
     pub name: String,
     pub ty: OwnedType,
     pub documentation: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OwnedLiteral {
     Integer {
+        #[serde(with = "super::metadata::string_number")]
         value: BigInt,
+        #[serde(with = "super::metadata::IntegerRepresentationDef")]
         representation: IntegerRepresentation,
         cast: Option<String>,
     },
     Float {
+        #[serde(with = "super::metadata::string_number")]
         value: BigDecimal,
+        #[serde(with = "super::metadata::FloatRepresentationDef")]
         representation: FloatRepresentation,
         cast: Option<String>,
     },
@@ -155,13 +160,13 @@ impl OwnedLiteral {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OwnedSet {
     pub element_type: Option<Box<OwnedType>>,
     pub values: Option<Vec<OwnedLiteral>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OwnedType {
     Named {
         name: String,
@@ -321,7 +326,7 @@ impl OwnedType {
 
 /// One node in the runtime hierarchy. Static builtin/plugin types and loaded
 /// source declarations use the same representation after pass one.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TypeDefinition {
     pub name: String,
     /// `None` for builtin/plugin types, otherwise the declaring module path.
@@ -330,7 +335,8 @@ pub struct TypeDefinition {
     pub parents: Vec<OwnedType>,
     /// Source declaration body. Static semantic types do not have one.
     pub body: Option<OwnedType>,
-    pub traits: Vec<&'static XenoTrait>,
+    pub traits: Vec<String>,
+    pub documentation: Option<String>,
     /// Source-level simple aliases are transparent to target generators.
     pub transparent_alias: bool,
 }
@@ -379,15 +385,130 @@ impl SemanticDomain {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TypeHierarchy {
+    #[serde(with = "type_definition_map")]
     types: HashMap<TypeKey, TypeDefinition>,
-    traits: HashMap<String, &'static XenoTrait>,
+    #[serde(with = "super::metadata::unique_named_map")]
+    traits: HashMap<String, OwnedTrait>,
     module_imports: HashMap<String, Vec<String>>,
     current_module: Option<String>,
 }
 
+mod type_definition_map {
+    use super::*;
+
+    pub fn serialize<S: serde::Serializer>(
+        types: &HashMap<TypeKey, TypeDefinition>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        types.values().collect::<Vec<_>>().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<HashMap<TypeKey, TypeDefinition>, D::Error> {
+        let definitions = Vec::<TypeDefinition>::deserialize(deserializer)?;
+        let mut types = HashMap::new();
+        for definition in definitions {
+            let key = TypeKey {
+                module_path: definition.module_path.clone(),
+                name: definition.name.clone(),
+            };
+            if types.insert(key, definition).is_some() {
+                return Err(serde::de::Error::custom(
+                    "Duplicate type identity in hierarchy",
+                ));
+            }
+        }
+        Ok(types)
+    }
+}
+
 impl TypeHierarchy {
+    pub(crate) fn current_module(&self) -> Option<&str> {
+        self.current_module.as_deref()
+    }
+
+    pub fn validate_metadata(&self) -> Result<(), String> {
+        MetadataGraph {
+            traits: self.traits.clone(),
+            ..MetadataGraph::default()
+        }
+        .validate()?;
+        for (key, definition) in &self.types {
+            super::metadata::validate_identity(&key.name, &definition.name)?;
+            if key.module_path != definition.module_path {
+                return Err(format!(
+                    "Type '{}' has inconsistent module identity",
+                    definition.name
+                ));
+            }
+            if key.module_path.is_some() {
+                continue;
+            }
+            if definition.body.is_some() || definition.transparent_alias {
+                return Err(format!(
+                    "Global metadata type '{}' has a source declaration body",
+                    definition.name
+                ));
+            }
+            super::metadata::validate_parameter_names(
+                definition
+                    .generic_params
+                    .iter()
+                    .map(|parameter| parameter.name.as_str()),
+                &definition.name,
+            )?;
+            for parameter in &definition.generic_params {
+                if let Some(constraint) = &parameter.constraint {
+                    if constraint.trim().is_empty()
+                        || (!self.has_trait(constraint)
+                            && self.get_type_in(None, constraint).is_none())
+                    {
+                        return Err(format!(
+                            "Metadata references missing constraint '{constraint}'"
+                        ));
+                    }
+                }
+                if parameter.constraint_scope.is_some() {
+                    return Err(format!(
+                        "Global metadata type '{}' has a module-scoped constraint",
+                        definition.name
+                    ));
+                }
+            }
+            let mut parents = HashSet::new();
+            for parent in &definition.parents {
+                let name = match parent {
+                    OwnedType::Named { name, arguments } if arguments.is_empty() => name,
+                    _ => {
+                        return Err(format!(
+                            "Global metadata type '{}' has an invalid parent",
+                            definition.name
+                        ))
+                    }
+                };
+                if !parents.insert(name) || self.get_type_in(None, name).is_none() {
+                    return Err(format!(
+                        "Global metadata type '{}' has a repeated or missing parent '{name}'",
+                        definition.name
+                    ));
+                }
+            }
+            let mut traits = HashSet::new();
+            for descriptor in &definition.traits {
+                if !traits.insert(descriptor) || !self.has_trait(descriptor) {
+                    return Err(format!(
+                        "Global metadata type '{}' has a repeated or missing trait '{descriptor}'",
+                        definition.name
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn set_current_module(&mut self, module_path: impl Into<String>) {
         self.current_module = Some(module_path.into());
     }
@@ -396,78 +517,67 @@ impl TypeHierarchy {
         self.module_imports.insert(module_path.into(), imports);
     }
 
-    pub fn insert_trait(&mut self, xeno_trait: &'static XenoTrait) {
-        for parent in xeno_trait.parents.unwrap_or(&[]) {
-            self.insert_trait(parent);
-        }
-        if let XenoTraitKind::Sum(member) = xeno_trait.kind {
-            self.insert_trait(member);
-        }
-        self.traits.insert(xeno_trait.name.to_string(), xeno_trait);
+    pub fn insert_trait(&mut self, xeno_trait: &XenoTrait) {
+        self.insert_metadata(&MetadataGraph::from_all_descriptors(
+            &[],
+            &[xeno_trait],
+            &[],
+        ));
     }
 
-    pub fn insert_semantic_type(&mut self, semantic_type: &'static XenoType) {
-        self.insert_semantic_type_inner(semantic_type, &mut HashSet::new());
+    pub fn insert_semantic_type(&mut self, semantic_type: &XenoType) {
+        self.insert_metadata(&MetadataGraph::from_descriptors(&[semantic_type], &[]));
     }
 
-    fn insert_semantic_type_inner(
-        &mut self,
-        semantic_type: &'static XenoType,
-        visited: &mut HashSet<*const XenoType>,
-    ) {
-        if !visited.insert(semantic_type as *const XenoType) {
-            return;
+    /// Copies a complete, name-linked graph. No descriptor or DLL memory is retained.
+    pub fn insert_metadata(&mut self, metadata: &MetadataGraph) {
+        self.traits.extend(metadata.traits.clone());
+        for semantic_type in metadata.types.values() {
+            let parents = semantic_type
+                .parents
+                .iter()
+                .filter_map(|parent| match parent {
+                    OwnedConstraint::Type(name) => Some(OwnedType::named(name)),
+                    OwnedConstraint::Trait(_) => None,
+                })
+                .collect();
+            let traits = semantic_type
+                .parents
+                .iter()
+                .filter_map(|parent| match parent {
+                    OwnedConstraint::Trait(name) => Some(name.clone()),
+                    OwnedConstraint::Type(_) => None,
+                })
+                .collect();
+            let generic_params = semantic_type
+                .generic_params
+                .iter()
+                .map(|parameter| GenericParameterInfo {
+                    name: parameter.name.clone(),
+                    constraint: parameter
+                        .constraint
+                        .as_ref()
+                        .map(|constraint| constraint.name().to_string()),
+                    constraint_scope: None,
+                })
+                .collect();
+            self.types.insert(
+                TypeKey {
+                    module_path: None,
+                    name: semantic_type.name.to_string(),
+                },
+                TypeDefinition {
+                    name: semantic_type.name.to_string(),
+                    module_path: None,
+                    generic_params,
+                    parents,
+                    body: None,
+                    traits,
+                    documentation: semantic_type.documentation.clone(),
+                    transparent_alias: false,
+                },
+            );
         }
-
-        let mut parents = Vec::new();
-        let mut traits = Vec::new();
-        let mut generic_params = Vec::new();
-        for parent in semantic_type.parents.unwrap_or(&[]) {
-            match parent {
-                XenoParent::Type(parent_type) => {
-                    self.insert_semantic_type_inner(parent_type, visited);
-                    parents.push(OwnedType::named(parent_type.name));
-                }
-                XenoParent::Trait(parent_trait) => {
-                    self.insert_trait(parent_trait);
-                    traits.push(*parent_trait);
-                }
-            }
-        }
-        for parameter in semantic_type.generic_params.unwrap_or(&[]) {
-            let constraint = parameter.constraint.map(|constraint| match constraint {
-                XenoConstraint::Type(required_type) => {
-                    self.insert_semantic_type_inner(required_type, visited);
-                    required_type.name.to_string()
-                }
-                XenoConstraint::Trait(required_trait) => {
-                    self.insert_trait(required_trait);
-                    required_trait.name.to_string()
-                }
-            });
-            generic_params.push(GenericParameterInfo {
-                name: parameter.name.to_string(),
-                constraint,
-                constraint_scope: None,
-            });
-        }
-
-        self.types.insert(
-            TypeKey {
-                module_path: None,
-                name: semantic_type.name.to_string(),
-            },
-            TypeDefinition {
-                name: semantic_type.name.to_string(),
-                module_path: None,
-                generic_params,
-                parents,
-                body: None,
-                traits,
-                transparent_alias: false,
-            },
-        );
-        visited.remove(&(semantic_type as *const XenoType));
     }
 
     pub fn insert_declaration(
@@ -499,6 +609,7 @@ impl TypeHierarchy {
                 parents: declaration.parents,
                 body: Some(body),
                 traits: Vec::new(),
+                documentation: None,
                 transparent_alias: declaration.transparent_alias,
             },
         );
@@ -515,8 +626,31 @@ impl TypeHierarchy {
         })
     }
 
-    pub fn get_trait(&self, name: &str) -> Option<&'static XenoTrait> {
-        self.traits.get(name).copied()
+    pub fn get_trait(&self, name: &str) -> Option<&OwnedTrait> {
+        self.traits.get(name)
+    }
+
+    pub fn trait_is_or_inherits(&self, candidate: &str, target: &str) -> bool {
+        fn visit(
+            hierarchy: &TypeHierarchy,
+            candidate: &str,
+            target: &str,
+            visited: &mut HashSet<String>,
+        ) -> bool {
+            if candidate == target {
+                return true;
+            }
+            if !visited.insert(candidate.to_string()) {
+                return false;
+            }
+            hierarchy.get_trait(candidate).is_some_and(|descriptor| {
+                descriptor
+                    .parents
+                    .iter()
+                    .any(|parent| visit(hierarchy, parent, target, visited))
+            })
+        }
+        visit(self, candidate, target, &mut HashSet::new())
     }
 
     pub fn has_type(&self, name: &str) -> bool {
@@ -1084,7 +1218,23 @@ impl TypeHierarchy {
     }
 
     pub fn type_implements_trait(&self, candidate: &OwnedType, required: &XenoTrait) -> bool {
-        if matches!(required.kind, XenoTraitKind::Struct | XenoTraitKind::Sum(_)) {
+        if self.has_trait(required.name) {
+            self.implements_trait(candidate, required.name)
+        } else {
+            let mut hierarchy = self.clone();
+            hierarchy.insert_trait(required);
+            hierarchy.implements_trait(candidate, required.name)
+        }
+    }
+
+    pub fn implements_trait(&self, candidate: &OwnedType, required: &str) -> bool {
+        let Some(required) = self.get_trait(required) else {
+            return false;
+        };
+        if matches!(
+            required.kind,
+            OwnedTraitKind::Struct | OwnedTraitKind::Sum(_)
+        ) {
             if let Ok(evaluated) = self.evaluate_type(candidate) {
                 if evaluated != *candidate {
                     return self.type_implements_trait_inner(
@@ -1302,24 +1452,33 @@ impl TypeHierarchy {
         &self,
         candidate: &OwnedType,
         context: Option<&str>,
-        required: &XenoTrait,
+        required: &OwnedTrait,
         visited: &mut HashSet<String>,
     ) -> bool {
+        if matches!(required.kind, OwnedTraitKind::Sum(_))
+            && !visited.insert(format!(
+                "trait:{}:{context:?}:{}",
+                required.name,
+                candidate.display_name()
+            ))
+        {
+            return false;
+        }
         match candidate {
             OwnedType::Optional(_) => return false,
             OwnedType::Literal(literal) => {
-                return match required.kind {
-                    XenoTraitKind::Literal => true,
-                    XenoTraitKind::LiteralType | XenoTraitKind::Semantic => self
+                return match &required.kind {
+                    OwnedTraitKind::Literal => true,
+                    OwnedTraitKind::LiteralType | OwnedTraitKind::Semantic => self
                         .type_implements_trait_inner(
                             &OwnedType::named(literal.semantic_type_name()),
                             context,
                             required,
                             visited,
                         ),
-                    XenoTraitKind::Sum(member) => {
+                    OwnedTraitKind::Sum(member) => self.get_trait(member).is_some_and(|member| {
                         self.type_implements_trait_inner(candidate, context, member, visited)
-                    }
+                    }),
                     _ => false,
                 };
             }
@@ -1332,7 +1491,7 @@ impl TypeHierarchy {
                 );
             }
             OwnedType::Struct(_) => {
-                if matches!(required.kind, XenoTraitKind::Struct) {
+                if matches!(required.kind, OwnedTraitKind::Struct) {
                     return true;
                 }
                 return self.type_implements_trait_inner(
@@ -1349,15 +1508,17 @@ impl TypeHierarchy {
                         else {
                             return false;
                         };
-                        match required.kind {
-                            XenoTraitKind::Sum(member) => {
+                        match &required.kind {
+                            OwnedTraitKind::Sum(member) => {
                                 matches!(item, OwnedType::Literal(_))
-                                    && self.type_implements_trait_inner(
-                                        &item,
-                                        context,
-                                        member,
-                                        &mut visited.clone(),
-                                    )
+                                    && self.get_trait(member).is_some_and(|member| {
+                                        self.type_implements_trait_inner(
+                                            &item,
+                                            context,
+                                            member,
+                                            &mut visited.clone(),
+                                        )
+                                    })
                             }
                             _ => self.type_implements_trait_inner(
                                 &item,
@@ -1432,7 +1593,7 @@ impl TypeHierarchy {
         if definition
             .traits
             .iter()
-            .any(|candidate_trait| candidate_trait.is_or_inherits(required))
+            .any(|candidate_trait| self.trait_is_or_inherits(candidate_trait, &required.name))
         {
             return true;
         }
@@ -1449,7 +1610,10 @@ impl TypeHierarchy {
             .collect::<HashMap<_, _>>();
         if definition.body.as_ref().is_some_and(|body| {
             let inspect_body = matches!(body, OwnedType::Sum(_) | OwnedType::Intersection(_))
-                || matches!(required.kind, XenoTraitKind::Struct | XenoTraitKind::Sum(_));
+                || matches!(
+                    required.kind,
+                    OwnedTraitKind::Struct | OwnedTraitKind::Sum(_)
+                );
             inspect_body && {
                 let body = substitute_owned_type(body, &substitutions);
                 let body = self
@@ -1587,9 +1751,13 @@ impl TypeHierarchy {
     }
 
     pub fn descends_from_static_type(&self, candidate: &OwnedType, target: &XenoType) -> bool {
+        self.descends_from_semantic_type(candidate, target.name)
+    }
+
+    pub fn descends_from_semantic_type(&self, candidate: &OwnedType, target: &str) -> bool {
         let target_key = TypeKey {
             module_path: None,
-            name: target.name.to_string(),
+            name: target.to_string(),
         };
         self.types.contains_key(&target_key)
             && self.is_type_compatible_inner(
@@ -1789,7 +1957,7 @@ impl TypeHierarchy {
         constraint_scope: Option<&str>,
     ) -> bool {
         if let Some(required_trait) = self.get_trait(constraint) {
-            self.type_implements_trait(candidate, required_trait)
+            self.implements_trait(candidate, &required_trait.name)
         } else {
             self.integer_literal_fits_named_type(candidate, constraint, constraint_scope)
                 || self.is_type_compatible_in(
@@ -1829,10 +1997,10 @@ impl TypeHierarchy {
         &self,
         candidate_constraint: &str,
         candidate_scope: Option<&str>,
-        required: &XenoTrait,
+        required: &OwnedTrait,
     ) -> bool {
         if let Some(candidate_trait) = self.get_trait(candidate_constraint) {
-            candidate_trait.is_or_inherits(required)
+            self.trait_is_or_inherits(&candidate_trait.name, &required.name)
         } else {
             self.type_implements_trait_inner(
                 &OwnedType::named(candidate_constraint),

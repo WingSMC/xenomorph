@@ -30,8 +30,10 @@ or absolute paths, configure `xenomorph.lsp.executable` and
 
 After changing the LSP executable setting, reload the VS Code window. Use
 **Xenomorph: Restart LSP Server** to restart the current executable manually.
-Changes to the workspace's discovered `xenomorph.toml` restart the language
-server automatically.
+Changes to the workspace's discovered `xenomorph.toml` reload configuration and
+plugins without restarting the language server. Unsaved document contents are
+retained. Invalid configuration or plugin updates leave the last valid runtime
+active and report the failure in the Output channel.
 
 ## Commands
 
@@ -49,6 +51,9 @@ Open the Command Palette with `Ctrl+Shift+P` and search for **Xenomorph**:
   document.
 - **Xenomorph: Restart LSP Server** restarts the language-server process and
   reloads workspace configuration, plugins, and modules.
+- **Xenomorph: Reload Plugins** rereads configuration and rebuilt plugin
+  libraries in the running server. Rebuilt libraries are not watched
+  automatically.
 
 The commands inspect the current in-memory editor text, so saving first is not
 required.

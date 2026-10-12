@@ -1,5 +1,10 @@
 [workspace]
 resolver = "1"
-members = ["parser", "lsp", "common", "plugins/*"]
-
-#abi_stable?
+members = [
+    "parser",
+    "lsp",
+    "common",
+    "plugin_api",
+    "plugins/*",
+    "common/tests/fixture",
+]

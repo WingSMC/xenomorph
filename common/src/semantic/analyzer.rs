@@ -2,28 +2,28 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use crate::plugins::ListenerFactory;
 use crate::{
     config::PluginConfigs,
     module::ModuleData,
     parser::{Annotation, Declaration, Expr, KeyValExpr, SetType, SimpleType, Type, XenoType},
-    plugins::XenoPlugin,
+    plugins::LoadedPlugin,
     semantic::{
         annotation_validator::AnnotationValidator, if_validator::IfChainValidator,
         intersection_validator::IntersectionValidator, name_validator::NameValidator,
-        GenericParameterInfo, OwnedType, TypeHierarchy, BUILTIN_ANNOTATIONS, BUILTIN_TRAITS,
-        BUILTIN_TYPES,
+        GenericParameterInfo, MetadataGraph, OwnedAnnotation, OwnedType, TypeHierarchy,
+        BUILTIN_ANNOTATIONS, BUILTIN_TRAITS, BUILTIN_TYPES,
     },
     TokenData, XenoDiagnostic,
 };
 
 /// Scope information built by the analyzer and passed to listeners.
 /// Contains all known types/annotations with their provenance.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ScopeInfo {
     /// Module path of the current module.
     pub module_path: String,
     /// Absolute filesystem path of the current module.
+    #[serde(with = "crate::plugins::protocol::path")]
     pub abs_path: PathBuf,
     /// Types declared in this module.
     pub own_types: Vec<String>,
@@ -36,10 +36,87 @@ pub struct ScopeInfo {
     /// Canonical runtime hierarchy for builtin, plugin, local, and imported types.
     pub type_hierarchy: TypeHierarchy,
     /// Typed definitions for built-in and plugin annotations.
-    pub annotations: HashMap<String, &'static crate::semantic::XenoAnnotation>,
+    #[serde(with = "super::metadata::unique_named_map")]
+    pub annotations: HashMap<String, OwnedAnnotation>,
 }
 
 impl ScopeInfo {
+    pub fn validate(&self) -> Result<(), String> {
+        self.validate_metadata()
+    }
+
+    /// Checks decoded metadata and scope indexes before a plugin uses them.
+    /// Unresolved source declaration bodies remain host semantic diagnostics.
+    pub fn validate_metadata(&self) -> Result<(), String> {
+        self.type_hierarchy.validate_metadata()?;
+        match self.type_hierarchy.current_module() {
+            Some(module) if module != self.module_path => {
+                return Err("Scope module does not match hierarchy lookup context".into());
+            }
+            None if !self.own_types.is_empty() || !self.imported_types.is_empty() => {
+                return Err("Source scope has no hierarchy lookup context".into());
+            }
+            _ => {}
+        }
+        for (key, annotation) in &self.annotations {
+            super::metadata::validate_identity(key, &annotation.name)?;
+            super::metadata::validate_parameter_names(
+                annotation
+                    .params
+                    .iter()
+                    .map(|parameter| parameter.name.as_str()),
+                &annotation.name,
+            )?;
+            for parameter in &annotation.params {
+                super::metadata::validate_constraint(
+                    &parameter.constraint,
+                    |name| self.type_hierarchy.get_type_in(None, name).is_some(),
+                    |name| self.type_hierarchy.has_trait(name),
+                )?;
+            }
+            if annotation.variadic && annotation.explicit_parameters().is_empty() {
+                return Err(format!(
+                    "Variadic annotation '{}' has no explicit parameter to repeat",
+                    annotation.name
+                ));
+            }
+        }
+        if self.known_annotations.len() != self.annotations.len()
+            || self
+                .known_annotations
+                .iter()
+                .any(|name| !self.annotations.contains_key(name))
+        {
+            return Err("Annotation scope index does not match metadata definitions".into());
+        }
+        for name in &self.builtin_types {
+            if self.type_hierarchy.get_type_in(None, name).is_none() {
+                return Err(format!("Scope references missing global type '{name}'"));
+            }
+        }
+        let check_types = |module: &str, names: &[String]| -> Result<(), String> {
+            let mut unique = HashSet::new();
+            for name in names {
+                if !unique.insert(name)
+                    || self
+                        .type_hierarchy
+                        .get_type_in(Some(module), name)
+                        .is_none()
+                {
+                    return Err(format!(
+                        "Scope references repeated or missing type '{module}::{name}'"
+                    ));
+                }
+            }
+            Ok(())
+        };
+        check_types(&self.module_path, &self.own_types)?;
+        for (module, names) in &self.imported_types {
+            check_types(module, names)?;
+        }
+        Ok(())
+    }
+
     /// Returns true if `name` is a known type (own, imported, or builtin).
     pub fn has_type(&self, name: &str) -> bool {
         self.type_hierarchy.has_type(name)
@@ -67,8 +144,25 @@ impl ScopeInfo {
         self.known_annotations.contains(name)
     }
 
-    pub fn find_annotation(&self, name: &str) -> Option<&'static crate::semantic::XenoAnnotation> {
-        self.annotations.get(name).copied()
+    pub fn find_annotation(&self, name: &str) -> Option<&OwnedAnnotation> {
+        self.annotations.get(name)
+    }
+
+    pub fn insert_metadata(&mut self, metadata: &MetadataGraph) {
+        self.type_hierarchy.insert_metadata(metadata);
+        self.builtin_types.extend(metadata.types.keys().cloned());
+        self.known_annotations
+            .extend(metadata.annotations.keys().cloned());
+        self.annotations.extend(metadata.annotations.clone());
+    }
+
+    pub fn implements_trait(&self, candidate: &OwnedType, required: &str) -> bool {
+        self.type_hierarchy.implements_trait(candidate, required)
+    }
+
+    pub fn descends_from_semantic_type(&self, candidate: &OwnedType, target: &str) -> bool {
+        self.type_hierarchy
+            .descends_from_semantic_type(candidate, target)
     }
 
     pub fn generic_parameters(&self, name: &str) -> Option<Vec<GenericParameterInfo>> {
@@ -91,7 +185,7 @@ impl ScopeInfo {
     pub fn descends_from_static_type(
         &self,
         candidate: &OwnedType,
-        target: &'static crate::semantic::XenoType,
+        target: &crate::semantic::XenoType,
     ) -> bool {
         self.type_hierarchy
             .descends_from_static_type(candidate, target)
@@ -232,35 +326,37 @@ pub trait AnalyzerListener<'src> {
     }
 }
 
-/// Stateless analyzer that holds registered listener factories.
+/// Analyzer that owns metadata used by every module analysis.
 /// Created once during registry construction, reused for every module analysis.
 pub struct Analyzer {
-    /// Factories for listeners that run on every analysis (builtins + plugins).
-    listener_factories: Vec<ListenerFactory>,
     /// Whether to use generation mode (true) or analyzer/LSP mode (false).
     pub generation_mode: bool,
+    metadata: MetadataGraph,
 }
 
 impl Analyzer {
-    pub fn new(generation_mode: bool, plugins: &[&'static XenoPlugin<'static>]) -> Self {
-        let mut factories: Vec<ListenerFactory> = Vec::new();
-
-        // Register plugin listeners
+    pub fn new(generation_mode: bool, plugins: &[LoadedPlugin]) -> Self {
+        let mut analyzer = Self::with_metadata(generation_mode, MetadataGraph::default());
         for plugin in plugins {
-            let register_fn = if generation_mode {
-                plugin.register_generator
-            } else {
-                plugin.register_analyzer
-            };
-            if let Some(factory) = register_fn {
-                factories.push(factory);
-            }
+            analyzer.add_metadata(&plugin.description.metadata);
         }
+        analyzer
+    }
 
-        Analyzer {
-            listener_factories: factories,
+    /// Constructs an analyzer without native plugin listener factories.
+    pub fn with_metadata(generation_mode: bool, metadata: MetadataGraph) -> Self {
+        Self {
             generation_mode,
+            metadata,
         }
+    }
+
+    pub fn add_metadata(&mut self, metadata: &MetadataGraph) {
+        self.metadata.types.extend(metadata.types.clone());
+        self.metadata.traits.extend(metadata.traits.clone());
+        self.metadata
+            .annotations
+            .extend(metadata.annotations.clone());
     }
 
     /// Analyze a module's AST with full scope from the cache.
@@ -272,8 +368,8 @@ impl Analyzer {
         module_data: &ModuleData,
         imports: &[String],
         cache: &HashMap<String, ModuleData>,
-        plugins: &[&'static XenoPlugin<'static>],
-        plugin_configs: &PluginConfigs,
+        plugins: &[LoadedPlugin],
+        _plugin_configs: &PluginConfigs,
     ) -> Vec<XenoDiagnostic<'src>> {
         // ── Pass 1: collect every type and trait before validation ──
         let mut builtin_types: HashSet<String> = HashSet::new();
@@ -281,53 +377,16 @@ impl Analyzer {
         let mut type_hierarchy = TypeHierarchy::default();
         let mut annotations = HashMap::new();
 
-        // Builtins
-        for t in BUILTIN_TYPES {
-            builtin_types.insert(t.name.to_string());
-            type_hierarchy.insert_semantic_type(t);
-        }
-        for xeno_trait in BUILTIN_TRAITS {
-            type_hierarchy.insert_trait(xeno_trait);
-        }
-        for a in BUILTIN_ANNOTATIONS {
-            known_annotations.insert(a.name.to_string());
-            annotations.insert(a.name.to_string(), *a);
-            for parameter in a.params {
-                match parameter.constraint {
-                    crate::semantic::XenoConstraint::Type(required) => {
-                        type_hierarchy.insert_semantic_type(required)
-                    }
-                    crate::semantic::XenoConstraint::Trait(required) => {
-                        type_hierarchy.insert_trait(required)
-                    }
-                }
-            }
-        }
-
-        // Plugin-provided names
-        for plugin in plugins {
-            if let Some(provide) = plugin.provide_types {
-                for semantic_type in provide() {
-                    builtin_types.insert(semantic_type.name.to_string());
-                    type_hierarchy.insert_semantic_type(semantic_type);
-                }
-            }
-            if let Some(provide) = plugin.provide_annotations {
-                for annotation in provide() {
-                    known_annotations.insert(annotation.name.to_string());
-                    annotations.insert(annotation.name.to_string(), *annotation);
-                    for parameter in annotation.params {
-                        match parameter.constraint {
-                            crate::semantic::XenoConstraint::Type(required) => {
-                                type_hierarchy.insert_semantic_type(required)
-                            }
-                            crate::semantic::XenoConstraint::Trait(required) => {
-                                type_hierarchy.insert_trait(required)
-                            }
-                        }
-                    }
-                }
-            }
+        let builtin_metadata =
+            MetadataGraph::from_all_descriptors(BUILTIN_TYPES, BUILTIN_TRAITS, BUILTIN_ANNOTATIONS);
+        for metadata in std::iter::once(&builtin_metadata)
+            .chain(std::iter::once(&self.metadata))
+            .chain(plugins.iter().map(|plugin| &plugin.description.metadata))
+        {
+            type_hierarchy.insert_metadata(metadata);
+            builtin_types.extend(metadata.types.keys().cloned());
+            known_annotations.extend(metadata.annotations.keys().cloned());
+            annotations.extend(metadata.annotations.clone());
         }
 
         // Module declarations were indexed when each ModuleData was created.
@@ -382,17 +441,12 @@ impl Analyzer {
         };
 
         // ── Pass 2: validate and generate with the completed hierarchy ──
-        let mut listeners: Vec<Box<dyn AnalyzerListener<'src>>> = Vec::new();
-        for f in &self.listener_factories {
-            let listener: Box<dyn AnalyzerListener<'src>> = f(plugin_configs);
-            listeners.push(listener);
-        }
-
-        // Add the name validator (always present)
-        listeners.push(Box::new(NameValidator::new(&scope)));
-        listeners.push(Box::new(IntersectionValidator::new(&scope)));
-        listeners.push(Box::new(AnnotationValidator::new(&scope)));
-        listeners.push(Box::new(IfChainValidator::new()));
+        let mut listeners: Vec<Box<dyn AnalyzerListener<'src>>> = vec![
+            Box::new(NameValidator::new(&scope)),
+            Box::new(IntersectionValidator::new(&scope)),
+            Box::new(AnnotationValidator::new(&scope)),
+            Box::new(IfChainValidator::new()),
+        ];
 
         // Notify listeners of module context + scope
         for l in listeners.iter_mut() {
@@ -418,6 +472,22 @@ impl Analyzer {
 
         walk_ast(&mut listeners, ast, &mut errors);
 
+        if !self.generation_mode || can_generate(&errors) {
+            for plugin in plugins {
+                if self.generation_mode && !can_generate(&errors) {
+                    break;
+                }
+                match plugin.run(self.generation_mode, ast, &scope) {
+                    Ok(diagnostics) => errors.extend(diagnostics),
+                    Err(error) => errors.push(XenoDiagnostic {
+                        location: first_source_location(ast),
+                        message: format!("Plugin '{}' failed: {error}", plugin.description.name),
+                        severity: crate::XenoDiagSeverity::Err,
+                    }),
+                }
+            }
+        }
+
         // Generators write their files when the module is finalized. Keep the
         // log level presentational: warnings and infos do not block this step,
         // but errors from any phase do.
@@ -431,6 +501,16 @@ impl Analyzer {
     }
 }
 
+fn first_source_location<'src>(ast: &[Declaration<'src>]) -> TokenData<'src> {
+    ast.iter()
+        .find_map(|declaration| match declaration {
+            Declaration::Import { location, .. } => Some((*location).clone()),
+            Declaration::Type { from, .. } => Some((*from).clone()),
+            Declaration::Custom { name, .. } => name.map(Clone::clone),
+        })
+        .unwrap_or(TokenData { v: "", l: 0, c: 0 })
+}
+
 fn can_generate(diagnostics: &[XenoDiagnostic<'_>]) -> bool {
     !diagnostics
         .iter()
@@ -441,7 +521,21 @@ fn can_generate(diagnostics: &[XenoDiagnostic<'_>]) -> bool {
 
 type Listeners<'src> = [Box<dyn AnalyzerListener<'src>>];
 
-fn walk_ast<'src>(
+/// Runs one plugin listener without host semantic validators.
+pub fn run_plugin_listener<'src>(
+    listener: Box<dyn AnalyzerListener<'src>>,
+    ast: &[Declaration<'src>],
+    scope: &ScopeInfo,
+) -> Vec<XenoDiagnostic<'src>> {
+    let mut listeners = vec![listener];
+    listeners[0].on_before_module(scope);
+    let mut diagnostics = Vec::new();
+    walk_ast(&mut listeners, ast, &mut diagnostics);
+    listeners[0].on_after_module(scope);
+    diagnostics
+}
+
+pub(crate) fn walk_ast<'src>(
     ls: &mut Listeners<'src>,
     ast: &[Declaration<'src>],
     errors: &mut Vec<XenoDiagnostic<'src>>,
@@ -740,6 +834,46 @@ mod tests {
     #[test]
     fn errors_block_generation() {
         assert!(!can_generate(&[diagnostic(XenoDiagSeverity::Err)]));
+    }
+
+    #[test]
+    fn sdk_listener_runs_module_lifecycle_without_host_validators() {
+        use std::sync::{Arc, Mutex};
+        struct Listener(Arc<Mutex<Vec<&'static str>>>);
+        impl<'src> AnalyzerListener<'src> for Listener {
+            fn on_before_module(&mut self, _: &ScopeInfo) {
+                self.0.lock().unwrap().push("before_module");
+            }
+            fn on_before_ast(
+                &mut self,
+                _: &[Declaration<'src>],
+                _: &mut Vec<XenoDiagnostic<'src>>,
+            ) {
+                self.0.lock().unwrap().push("before_ast");
+            }
+            fn on_after_ast(&mut self, _: &[Declaration<'src>], _: &mut Vec<XenoDiagnostic<'src>>) {
+                self.0.lock().unwrap().push("after_ast");
+            }
+            fn on_after_module(&mut self, _: &ScopeInfo) {
+                self.0.lock().unwrap().push("after_module");
+            }
+        }
+        let tokens = crate::lexer::Lexer::tokenize("type Value = Unknown @missing;").unwrap();
+        let (ast, diagnostics) = crate::parser::Parser::parse(&tokens);
+        assert!(diagnostics.is_empty());
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let diagnostics = run_plugin_listener(
+            Box::new(Listener(events.clone())),
+            &ast,
+            &scope_with_declarations(HashMap::new()),
+        );
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["before_module", "before_ast", "after_ast", "after_module"]
+        );
+        assert_eq!(first_source_location(&ast).v, "type");
+        assert_eq!(first_source_location(&[]).v, "");
     }
 
     fn scope_with_declarations(

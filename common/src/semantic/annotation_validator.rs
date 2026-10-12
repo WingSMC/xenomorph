@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use crate::{
     parser::{Declaration, Expr, Literal, SimpleType, Type, XenoType as AstType},
     semantic::{
-        simple_to_owned_type, type_to_owned_type, AnalyzerListener, OwnedType, ScopeInfo,
-        XenoAnnotation, XenoConstraint, XenoTrait, XenoTraitKind,
+        simple_to_owned_type, type_to_owned_type, AnalyzerListener, OwnedAnnotation,
+        OwnedConstraint, OwnedTrait, OwnedTraitKind, OwnedType, ScopeInfo,
     },
     TokenData, XenoDiagnostic,
 };
@@ -128,7 +128,7 @@ impl AnnotationValidator {
 
     fn validate_applicability<'src>(
         &self,
-        annotation: &XenoAnnotation,
+        annotation: &OwnedAnnotation,
         name: &TokenData<'src>,
         errors: &mut Vec<XenoDiagnostic<'src>>,
     ) {
@@ -141,14 +141,14 @@ impl AnnotationValidator {
         };
 
         for candidate in self.current_types() {
-            if !self.type_matches_constraint(candidate, target.constraint) {
+            if !self.type_matches_constraint(candidate, &target.constraint) {
                 errors.push(XenoDiagnostic {
                     location: (*name).clone(),
                     message: format!(
                         "Annotation '@{}' is not applicable to type '{}'. Required {}(s): {}.",
                         annotation.name,
                         candidate.display_name(),
-                        Self::constraint_kind(target.constraint),
+                        Self::constraint_kind(&target.constraint),
                         target.constraint.name()
                     ),
                     severity: crate::XenoDiagSeverity::Err,
@@ -159,7 +159,7 @@ impl AnnotationValidator {
 
     fn validate_args<'src>(
         &self,
-        annotation: &XenoAnnotation,
+        annotation: &OwnedAnnotation,
         name: &TokenData<'src>,
         args: &[Expr<'src>],
         errors: &mut Vec<XenoDiagnostic<'src>>,
@@ -189,7 +189,7 @@ impl AnnotationValidator {
             let Some(param) = annotation.parameter_at(index) else {
                 continue;
             };
-            if !self.arg_matches_constraint(arg, param.constraint) {
+            if !self.arg_matches_constraint(arg, &param.constraint) {
                 errors.push(XenoDiagnostic {
                     severity: crate::XenoDiagSeverity::Err,
                     location: Self::expr_location(arg),
@@ -205,44 +205,46 @@ impl AnnotationValidator {
         }
     }
 
-    fn type_matches_constraint(&self, candidate: &OwnedType, required: XenoConstraint) -> bool {
+    fn type_matches_constraint(&self, candidate: &OwnedType, required: &OwnedConstraint) -> bool {
         match required {
-            XenoConstraint::Type(required) => {
-                self.scope.descends_from_static_type(candidate, required)
+            OwnedConstraint::Type(required) => {
+                self.scope.descends_from_semantic_type(candidate, required)
             }
-            XenoConstraint::Trait(required) => {
-                self.scope.type_implements_trait(candidate, required)
-            }
+            OwnedConstraint::Trait(required) => self.scope.implements_trait(candidate, required),
         }
     }
 
-    fn arg_matches_constraint(&self, arg: &Expr<'_>, required: XenoConstraint) -> bool {
+    fn arg_matches_constraint(&self, arg: &Expr<'_>, required: &OwnedConstraint) -> bool {
         match required {
-            XenoConstraint::Type(required) => match arg {
+            OwnedConstraint::Type(required) => match arg {
                 Expr::Type(Type::Simple(simple)) => self
                     .scope
-                    .descends_from_static_type(&simple_to_owned_type(simple), required),
+                    .descends_from_semantic_type(&simple_to_owned_type(simple), required),
                 _ => false,
             },
-            XenoConstraint::Trait(required) => self.arg_matches_trait(arg, required),
+            OwnedConstraint::Trait(required) => self
+                .scope
+                .type_hierarchy
+                .get_trait(required)
+                .is_some_and(|required| self.arg_matches_trait(arg, required)),
         }
     }
 
-    fn constraint_kind(constraint: XenoConstraint) -> &'static str {
+    fn constraint_kind(constraint: &OwnedConstraint) -> &'static str {
         match constraint {
-            XenoConstraint::Type(_) => "type",
-            XenoConstraint::Trait(_) => "trait",
+            OwnedConstraint::Type(_) => "type",
+            OwnedConstraint::Trait(_) => "trait",
         }
     }
 
-    fn arg_matches_trait(&self, arg: &Expr<'_>, required: &XenoTrait) -> bool {
-        match required.kind {
-            XenoTraitKind::Expression => true,
-            XenoTraitKind::Literal => matches!(
+    fn arg_matches_trait(&self, arg: &Expr<'_>, required: &OwnedTrait) -> bool {
+        match &required.kind {
+            OwnedTraitKind::Expression => true,
+            OwnedTraitKind::Literal => matches!(
                 arg,
                 Expr::Regex(_) | Expr::Type(Type::Simple(SimpleType::Literal(_)))
             ),
-            XenoTraitKind::LiteralType => match arg {
+            OwnedTraitKind::LiteralType => match arg {
                 Expr::Type(Type::Simple(SimpleType::Literal(literal))) => {
                     let candidate = match literal {
                         Literal::Int(_) | Literal::Float(_) => {
@@ -251,32 +253,38 @@ impl AnnotationValidator {
                         Literal::String(_, _) => OwnedType::named("string"),
                         Literal::Boolean(_, _) => OwnedType::named("bool"),
                     };
-                    self.scope.type_implements_trait(&candidate, required)
+                    self.scope.implements_trait(&candidate, &required.name)
                 }
                 _ => false,
             },
-            XenoTraitKind::RegexLiteral => matches!(arg, Expr::Regex(_)),
-            XenoTraitKind::Identifier => {
+            OwnedTraitKind::RegexLiteral => matches!(arg, Expr::Regex(_)),
+            OwnedTraitKind::Identifier => {
                 matches!(arg, Expr::Type(Type::Simple(SimpleType::Identifier(_, _))))
             }
-            XenoTraitKind::Type => match arg {
+            OwnedTraitKind::Type => match arg {
                 Expr::Type(Type::Simple(SimpleType::Identifier(identifier, _))) => {
                     self.scope.has_type(identifier.v)
                 }
                 _ => false,
             },
-            XenoTraitKind::Annotation => matches!(arg, Expr::Annotation(_)),
-            XenoTraitKind::Semantic => match arg {
+            OwnedTraitKind::Annotation => matches!(arg, Expr::Annotation(_)),
+            OwnedTraitKind::Semantic => match arg {
                 Expr::Type(Type::Simple(simple)) => self
                     .scope
-                    .type_implements_trait(&simple_to_owned_type(simple), required),
+                    .implements_trait(&simple_to_owned_type(simple), &required.name),
                 _ => false,
             },
-            XenoTraitKind::Struct => matches!(arg, Expr::Type(Type::Struct(_))),
-            XenoTraitKind::Sum(member) => match arg {
-                Expr::Type(Type::Sum(items)) => items.iter().all(|item| {
-                    self.arg_matches_trait(&Expr::Type(Type::Simple(item.clone())), member)
-                }),
+            OwnedTraitKind::Struct => matches!(arg, Expr::Type(Type::Struct(_))),
+            OwnedTraitKind::Sum(member) => match arg {
+                Expr::Type(Type::Sum(items)) => self
+                    .scope
+                    .type_hierarchy
+                    .get_trait(member)
+                    .is_some_and(|member| {
+                        items.iter().all(|item| {
+                            self.arg_matches_trait(&Expr::Type(Type::Simple(item.clone())), member)
+                        })
+                    }),
                 _ => false,
             },
         }
@@ -442,10 +450,8 @@ mod tests {
                 .map(|annotation| annotation.name.to_string())
                 .collect(),
             type_hierarchy,
-            annotations: BUILTIN_ANNOTATIONS
-                .iter()
-                .map(|annotation| (annotation.name.to_string(), *annotation))
-                .collect(),
+            annotations: crate::semantic::MetadataGraph::from_descriptors(&[], BUILTIN_ANNOTATIONS)
+                .annotations,
         }
     }
 

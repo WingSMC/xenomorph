@@ -12,7 +12,7 @@
         "test": "nr test:xeno && nr test:extensions",
         "test:coverage": "cargo llvm-cov",
         "test:coverage:html": "cargo llvm-cov --html --output-dir coverage && echo 'Report: coverage/html/index.html'",
-        "test:extensions": "cd ./extensions/vscode && cd ../..",
+        "test:extensions": "cd ./extensions/vscode/client && nr test && cd ../..",
         "test:xeno": "cargo test --release",
         "xeno:schema": "xeno schema"
     },

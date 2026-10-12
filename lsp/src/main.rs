@@ -1,7 +1,6 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use tower_lsp::jsonrpc::Result;
-use tower_lsp::lsp_types::notification::Notification;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 use xenomorph_common::{
@@ -15,7 +14,10 @@ use xenomorph_common::{
     parser::{
         Annotation, Declaration, Expr, Literal, SimpleType, Type, XenoType as ParsedXenoType,
     },
-    semantic::{XenoAnnotation, XenoConstraint, XenoParent, XenoTrait, XenoTraitKind, XenoType},
+    semantic::{
+        OwnedAnnotation, OwnedConstraint, OwnedSemanticType, OwnedTrait, OwnedTraitKind, OwnedType,
+        TypeHierarchy,
+    },
     TokenData,
 };
 
@@ -24,8 +26,8 @@ mod hover;
 mod semantic_tokens;
 
 use completions::{
-    create_annotation_completion_item, create_completion_item, create_type_completion_item,
-    BUILTIN_ANNOTATION_COMPLETIONS, BUILTIN_TYPE_COMPLETIONS,
+    create_completion_item, create_owned_annotation_completion_item,
+    create_owned_type_completion_item,
 };
 
 struct HoverTarget {
@@ -355,14 +357,220 @@ fn deduplicate_completions(mut items: Vec<CompletionItem>) -> Vec<CompletionItem
 struct Backend {
     client: Client,
     registry: Arc<XenoRegistry>,
-    config_watcher: Mutex<Option<WorkspaceConfigWatcher>>,
+    runtime: Arc<RuntimeState>,
 }
 
-enum RestartRequested {}
+struct RuntimeState {
+    registry: RwLock<Arc<XenoRegistry>>,
+    documents: Mutex<HashMap<Url, String>>,
+    coordinator: Mutex<()>,
+    config_watcher: Mutex<Option<WorkspaceConfigWatcher>>,
+    stopped: std::sync::atomic::AtomicBool,
+}
 
-impl Notification for RestartRequested {
-    type Params = ();
-    const METHOD: &'static str = "xenomorph/restartRequested";
+impl RuntimeState {
+    fn snapshot(&self) -> Arc<XenoRegistry> {
+        Arc::clone(&self.registry.read().unwrap())
+    }
+
+    fn reconcile(
+        self: &Arc<Self>,
+        client: Client,
+    ) -> std::result::Result<Arc<XenoRegistry>, String> {
+        let _coordinator = self
+            .coordinator
+            .lock()
+            .map_err(|_| "Runtime coordinator is poisoned")?;
+        if self.stopped.load(std::sync::atomic::Ordering::Acquire) {
+            return Err("Language server is shutting down".into());
+        }
+        let active = self.snapshot();
+        let config = xenomorph_common::config::Config::discover(&active.config.workdir)?;
+        let candidate =
+            XenoRegistry::with_config(config, false).map_err(|error| error.to_string())?;
+        candidate.load_module(&[&candidate.entry], true, None);
+        for (uri, text) in self
+            .documents
+            .lock()
+            .map_err(|_| "Document storage is poisoned")?
+            .iter()
+        {
+            let path = uri
+                .to_file_path()
+                .map_err(|_| format!("Invalid document URI: {uri}"))?;
+            if candidate.abs_path_to_module_path(&path).is_some() {
+                candidate.load_module_from_source(&path, text.clone());
+            }
+        }
+        candidate.refresh_name_collision_diagnostics();
+        let watcher = config_watcher_paths(
+            candidate.config.workspace_config_paths(),
+            Arc::clone(self),
+            client,
+        )?;
+        let candidate = Arc::new(candidate);
+        *self
+            .config_watcher
+            .lock()
+            .map_err(|_| "Config watcher storage is poisoned")? = Some(watcher);
+        *self
+            .registry
+            .write()
+            .map_err(|_| "Runtime storage is poisoned")? = Arc::clone(&candidate);
+        Ok(candidate)
+    }
+}
+
+struct LiveBackend {
+    client: Client,
+    runtime: Arc<RuntimeState>,
+}
+
+impl LiveBackend {
+    fn backend(&self) -> Backend {
+        Backend {
+            client: self.client.clone(),
+            registry: self.runtime.snapshot(),
+            runtime: Arc::clone(&self.runtime),
+        }
+    }
+}
+
+#[tower_lsp::async_trait]
+impl LanguageServer for LiveBackend {
+    async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        self.backend().initialize(params).await
+    }
+    async fn initialized(&self, params: InitializedParams) {
+        self.backend().initialized(params).await;
+    }
+    async fn shutdown(&self) -> Result<()> {
+        self.backend().shutdown().await
+    }
+    async fn execute_command(
+        &self,
+        params: ExecuteCommandParams,
+    ) -> Result<Option<serde_json::Value>> {
+        self.backend().execute_command(params).await
+    }
+    async fn did_open(&self, params: DidOpenTextDocumentParams) {
+        self.backend().did_open(params).await;
+    }
+    async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        self.backend().did_change(params).await;
+    }
+    async fn did_close(&self, params: DidCloseTextDocumentParams) {
+        self.backend().did_close(params).await;
+    }
+    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+        self.backend().completion(params).await
+    }
+    async fn completion_resolve(&self, item: CompletionItem) -> Result<CompletionItem> {
+        self.backend().completion_resolve(item).await
+    }
+    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+        self.backend().hover(params).await
+    }
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
+        self.backend().semantic_tokens_full(params).await
+    }
+    async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
+        self.backend().formatting(params).await
+    }
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        self.backend().goto_definition(params).await
+    }
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        self.backend().references(params).await
+    }
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> Result<Option<DocumentSymbolResponse>> {
+        self.backend().document_symbol(params).await
+    }
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> Result<Option<PrepareRenameResponse>> {
+        self.backend().prepare_rename(params).await
+    }
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        self.backend().rename(params).await
+    }
+}
+
+fn config_watcher(
+    runtime: Arc<RuntimeState>,
+    client: Client,
+) -> std::result::Result<WorkspaceConfigWatcher, String> {
+    let paths = runtime.snapshot().config.workspace_config_paths();
+    config_watcher_paths(paths, runtime, client)
+}
+
+fn config_watcher_paths(
+    paths: Vec<std::path::PathBuf>,
+    runtime: Arc<RuntimeState>,
+    client: Client,
+) -> std::result::Result<WorkspaceConfigWatcher, String> {
+    let handle = tokio::runtime::Handle::current();
+    WorkspaceConfigWatcher::watch_paths(paths, move |event| {
+        let runtime = Arc::clone(&runtime);
+        let client = client.clone();
+        handle.spawn(async move {
+            match event {
+                Ok(()) => {
+                    if let Err(error) = reload_runtime(runtime, client.clone()).await {
+                        client.log_message(MessageType::ERROR, format!("Workspace reload failed; keeping the last valid runtime: {error}")).await;
+                    }
+                }
+                Err(error) => client.log_message(MessageType::ERROR, format!("Workspace config watcher error: {error}")).await,
+            }
+        });
+    }).map_err(|error| error.to_string())
+}
+
+async fn reload_runtime(
+    runtime: Arc<RuntimeState>,
+    client: Client,
+) -> std::result::Result<(), String> {
+    let previous = runtime.snapshot();
+    let state = Arc::clone(&runtime);
+    let reload_client = client.clone();
+    let candidate = tokio::task::spawn_blocking(move || state.reconcile(reload_client))
+        .await
+        .map_err(|error| format!("Runtime reload task failed: {error}"))??;
+    let mut uris: std::collections::HashSet<Url> =
+        runtime.documents.lock().unwrap().keys().cloned().collect();
+    for registry in [&previous, &candidate] {
+        for module in registry.module_cache.read().unwrap().values() {
+            if let Ok(uri) = Url::from_file_path(module.borrow_abs_path()) {
+                uris.insert(uri);
+            }
+        }
+    }
+    for uri in uris {
+        let diagnostics = uri
+            .to_file_path()
+            .ok()
+            .and_then(|path| candidate.abs_path_to_module_path(&path))
+            .map(|module| diagnostics_for_module(&candidate.get_all_errors_for(&module), &module))
+            .unwrap_or_default();
+        client.publish_diagnostics(uri, diagnostics, None).await;
+    }
+    client
+        .log_message(
+            MessageType::INFO,
+            "Workspace configuration and plugins reloaded without restarting the LSP.",
+        )
+        .await;
+    Ok(())
 }
 
 fn diagnostics_for_module(errors: &[ModuleDiagnostic], module_path: &str) -> Vec<Diagnostic> {
@@ -408,110 +616,44 @@ impl Backend {
 
     fn get_builtin_types(&self) -> impl Iterator<Item = CompletionItem> + '_ {
         self.registry
-            .plugins
-            .iter()
-            .filter_map(|p| p.provide_types.map(|f| f()))
-            .flatten()
-            .map(|semantic_type| create_type_completion_item(semantic_type))
-            .chain(BUILTIN_TYPE_COMPLETIONS.iter().cloned())
+            .metadata
+            .types
+            .values()
+            .map(create_owned_type_completion_item)
     }
 
     fn get_builtin_annotations(&self) -> impl Iterator<Item = CompletionItem> + '_ {
         self.registry
-            .plugins
-            .iter()
-            .filter_map(|p| p.provide_annotations.map(|f| f()))
-            .flatten()
-            .map(|annotation| create_annotation_completion_item(annotation))
-            .chain(BUILTIN_ANNOTATION_COMPLETIONS.iter().cloned())
+            .metadata
+            .annotations
+            .values()
+            .map(create_owned_annotation_completion_item)
     }
 
-    fn find_annotation(&self, name: &str) -> Option<&'static XenoAnnotation> {
-        self.registry
-            .plugins
-            .iter()
-            .filter_map(|plugin| plugin.provide_annotations.map(|provide| provide()))
-            .flatten()
-            .copied()
-            .chain(
-                xenomorph_common::semantic::BUILTIN_ANNOTATIONS
-                    .iter()
-                    .copied(),
-            )
-            .find(|annotation| annotation.name == name)
+    fn find_annotation(&self, name: &str) -> Option<&OwnedAnnotation> {
+        self.registry.metadata.annotations.get(name)
     }
 
-    fn semantic_types(&self) -> impl Iterator<Item = &'static XenoType> + '_ {
-        self.registry
-            .plugins
-            .iter()
-            .filter_map(|plugin| plugin.provide_types.map(|provide| provide()))
-            .flatten()
-            .copied()
-            .chain(xenomorph_common::semantic::BUILTIN_TYPES.iter().copied())
+    fn semantic_types(&self) -> impl Iterator<Item = &OwnedSemanticType> + '_ {
+        self.registry.metadata.types.values()
     }
 
-    fn semantic_traits(&self) -> Vec<&'static XenoTrait> {
-        fn collect_trait(
-            xeno_trait: &'static XenoTrait,
-            traits: &mut Vec<&'static XenoTrait>,
-            seen: &mut std::collections::HashSet<&'static str>,
-        ) {
-            if !seen.insert(xeno_trait.name) {
-                return;
-            }
-            traits.push(xeno_trait);
-            for parent in xeno_trait.parents.unwrap_or(&[]) {
-                collect_trait(parent, traits, seen);
-            }
-        }
-
-        let mut traits = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for xeno_trait in xenomorph_common::semantic::BUILTIN_TRAITS {
-            collect_trait(xeno_trait, &mut traits, &mut seen);
-        }
-        for semantic_type in self.semantic_types() {
-            for parent in semantic_type.parents.unwrap_or(&[]) {
-                if let XenoParent::Trait(xeno_trait) = parent {
-                    collect_trait(xeno_trait, &mut traits, &mut seen);
-                }
-            }
-            for parameter in semantic_type.generic_params.unwrap_or(&[]) {
-                if let Some(XenoConstraint::Trait(xeno_trait)) = parameter.constraint {
-                    collect_trait(xeno_trait, &mut traits, &mut seen);
-                }
-            }
-        }
-        for annotation in self
-            .registry
-            .plugins
-            .iter()
-            .filter_map(|plugin| plugin.provide_annotations.map(|provide| provide()))
-            .flatten()
-            .copied()
-            .chain(
-                xenomorph_common::semantic::BUILTIN_ANNOTATIONS
-                    .iter()
-                    .copied(),
-            )
-        {
-            for parameter in annotation.params {
-                if let XenoConstraint::Trait(required) = parameter.constraint {
-                    collect_trait(required, &mut traits, &mut seen);
-                }
-            }
-        }
-        traits
+    fn semantic_traits(&self) -> Vec<&OwnedTrait> {
+        self.registry.metadata.traits.values().collect()
     }
 
-    fn literal_completions(&self, required: &XenoTrait) -> Vec<CompletionItem> {
+    fn literal_completions(&self, required: &OwnedTrait) -> Vec<CompletionItem> {
+        let mut hierarchy = TypeHierarchy::default();
+        hierarchy.insert_metadata(&self.registry.metadata);
         let accepts = |name: &str| {
-            matches!(required.kind, XenoTraitKind::Literal)
+            matches!(required.kind, OwnedTraitKind::Literal)
                 || self
                     .semantic_types()
                     .find(|candidate| candidate.name == name)
-                    .is_some_and(|candidate| candidate.implements(required))
+                    .is_some_and(|candidate| {
+                        hierarchy
+                            .implements_trait(&OwnedType::named(&candidate.name), &required.name)
+                    })
         };
         let mut items = Vec::new();
         if accepts("integer") || accepts("number") {
@@ -566,7 +708,7 @@ impl Backend {
 
     fn completions_for_constraint(
         &self,
-        required: XenoConstraint,
+        required: &OwnedConstraint,
         module_path: Option<&str>,
     ) -> Vec<CompletionItem> {
         let all_types = || {
@@ -577,36 +719,54 @@ impl Backend {
             deduplicate_completions(types)
         };
 
-        let XenoConstraint::Trait(required) = required else {
+        let OwnedConstraint::Trait(required) = required else {
             return all_types();
         };
+        let Some(required) = self.registry.metadata.traits.get(required) else {
+            return Vec::new();
+        };
+        let mut hierarchy = TypeHierarchy::default();
+        hierarchy.insert_metadata(&self.registry.metadata);
 
-        match required.kind {
-            XenoTraitKind::Semantic => {
+        match &required.kind {
+            OwnedTraitKind::Semantic => {
                 let allowed: std::collections::HashSet<_> = self
                     .semantic_types()
-                    .filter(|semantic_type| semantic_type.implements(required))
-                    .map(|semantic_type| semantic_type.name)
+                    .filter(|semantic_type| {
+                        hierarchy.implements_trait(
+                            &OwnedType::named(&semantic_type.name),
+                            &required.name,
+                        )
+                    })
+                    .map(|semantic_type| semantic_type.name.as_str())
                     .collect();
                 all_types()
                     .into_iter()
                     .filter(|item| allowed.contains(item.label.as_str()))
                     .collect()
             }
-            XenoTraitKind::Literal | XenoTraitKind::LiteralType => {
+            OwnedTraitKind::Literal | OwnedTraitKind::LiteralType => {
                 self.literal_completions(required)
             }
-            XenoTraitKind::RegexLiteral => vec![Self::regex_literal_completion()],
-            XenoTraitKind::Identifier | XenoTraitKind::Type => all_types(),
-            XenoTraitKind::Annotation => self.get_builtin_annotations().collect(),
-            XenoTraitKind::Expression => {
+            OwnedTraitKind::RegexLiteral => vec![Self::regex_literal_completion()],
+            OwnedTraitKind::Identifier | OwnedTraitKind::Type => all_types(),
+            OwnedTraitKind::Annotation => self.get_builtin_annotations().collect(),
+            OwnedTraitKind::Expression => {
                 let mut items = all_types();
                 items.extend(self.get_builtin_annotations());
-                items.extend(self.literal_completions(&xenomorph_common::semantic::LITERAL));
+                if let Some(literal) = self.registry.metadata.traits.get("Literal") {
+                    items.extend(self.literal_completions(literal));
+                }
                 deduplicate_completions(items)
             }
-            XenoTraitKind::Struct => all_types(),
-            XenoTraitKind::Sum(member) => self.literal_completions(member),
+            OwnedTraitKind::Struct => all_types(),
+            OwnedTraitKind::Sum(member) => self
+                .registry
+                .metadata
+                .traits
+                .get(member)
+                .map(|member| self.literal_completions(member))
+                .unwrap_or_default(),
         }
     }
 
@@ -717,30 +877,41 @@ impl Backend {
             Ok(p) => p,
             Err(_) => return,
         };
-        let Some(module_path) = self.registry.abs_path_to_module_path(&file_path) else {
-            return;
+        let publications = {
+            let _coordinator = self.runtime.coordinator.lock().unwrap();
+            self.runtime
+                .documents
+                .lock()
+                .unwrap()
+                .insert(uri.clone(), source.clone());
+            let registry = self.runtime.snapshot();
+            let Some(module_path) = registry.abs_path_to_module_path(&file_path) else {
+                return;
+            };
+            let load_errors = registry.load_module_from_source(&file_path, source);
+            registry.revalidate_importers(&module_path);
+            let affected_modules = registry.refresh_name_collision_diagnostics();
+            let current_module_was_revalidated = affected_modules.contains(&module_path);
+            let mut publications = Vec::new();
+            for affected_module in affected_modules {
+                let Some(abs_path) = registry.with_module(&affected_module, |_, _, module| {
+                    module.borrow_abs_path().to_path_buf()
+                }) else {
+                    continue;
+                };
+                let Ok(affected_uri) = Url::from_file_path(abs_path) else {
+                    continue;
+                };
+                let errors = registry.get_all_errors_for(&affected_module);
+                publications.push((affected_uri, affected_module, errors));
+            }
+            if !current_module_was_revalidated {
+                publications.push((uri.clone(), module_path, load_errors));
+            }
+            publications
         };
-
-        let load_errors = self.registry.load_module_from_source(&file_path, source);
-        self.registry.revalidate_importers(&module_path);
-        let affected_modules = self.registry.refresh_name_collision_diagnostics();
-        let current_module_was_revalidated = affected_modules.contains(&module_path);
-        for affected_module in affected_modules {
-            let Some(abs_path) = self.registry.with_module(&affected_module, |_, _, module| {
-                module.borrow_abs_path().to_path_buf()
-            }) else {
-                continue;
-            };
-            let Ok(affected_uri) = Url::from_file_path(abs_path) else {
-                continue;
-            };
-            let errors = self.registry.get_all_errors_for(&affected_module);
-            self.publish_module_diagnostics(affected_uri, &affected_module, &errors)
-                .await;
-        }
-        if !current_module_was_revalidated {
-            self.publish_module_diagnostics(uri.clone(), &module_path, &load_errors)
-                .await;
+        for (uri, module, errors) in publications {
+            self.publish_module_diagnostics(uri, &module, &errors).await;
         }
     }
 
@@ -775,7 +946,7 @@ impl Backend {
                 .find_annotation(annotation_name)
                 .and_then(|annotation| annotation.parameter_at(parameter_index))
             {
-                return self.completions_for_constraint(parameter.constraint, module_path);
+                return self.completions_for_constraint(&parameter.constraint, module_path);
             }
             return items;
         }
@@ -811,8 +982,8 @@ impl Backend {
             items.extend(all_types());
             items.extend(self.semantic_traits().into_iter().map(|xeno_trait| {
                 create_completion_item(
-                    xeno_trait.name,
-                    xeno_trait.documentation,
+                    &xeno_trait.name,
+                    xeno_trait.documentation.as_deref(),
                     CompletionItemKind::INTERFACE,
                 )
             }));
@@ -1036,6 +1207,10 @@ impl LanguageServer for Backend {
     async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
+                execute_command_provider: Some(ExecuteCommandOptions {
+                    commands: vec!["xenomorph.reloadPlugins".to_string()],
+                    work_done_progress_options: Default::default(),
+                }),
                 text_document_sync: Some(TextDocumentSyncCapability::Options(
                     TextDocumentSyncOptions {
                         open_close: Some(true),
@@ -1096,38 +1271,7 @@ impl LanguageServer for Backend {
                 .await;
         }
 
-        let registry = Arc::clone(&self.registry);
-        let client = self.client.clone();
-        let runtime = tokio::runtime::Handle::current();
-        match WorkspaceConfigWatcher::watch(move |event| {
-            let client = client.clone();
-            match event {
-                Ok(()) => {
-                    let removed = registry.purge_module_cache();
-                    runtime.spawn(async move {
-                        client
-                            .log_message(
-                                MessageType::INFO,
-                                format!(
-                                    "Workspace config changed; purged {removed} cached module(s) and requested an LSP restart."
-                                ),
-                            )
-                            .await;
-                        client.send_notification::<RestartRequested>(()).await;
-                    });
-                }
-                Err(error) => {
-                    runtime.spawn(async move {
-                        client
-                            .log_message(
-                                MessageType::WARNING,
-                                format!("Workspace config watcher error: {error}"),
-                            )
-                            .await;
-                    });
-                }
-            }
-        }) {
+        match config_watcher(Arc::clone(&self.runtime), self.client.clone()) {
             Ok(watcher) => {
                 let config_paths = watcher
                     .config_paths()
@@ -1135,7 +1279,7 @@ impl LanguageServer for Backend {
                     .map(|path| path.display().to_string())
                     .collect::<Vec<_>>()
                     .join(", ");
-                *self.config_watcher.lock().unwrap() = Some(watcher);
+                *self.runtime.config_watcher.lock().unwrap() = Some(watcher);
                 self.client
                     .log_message(
                         MessageType::INFO,
@@ -1159,7 +1303,41 @@ impl LanguageServer for Backend {
     }
 
     async fn shutdown(&self) -> Result<()> {
+        {
+            let _coordinator = self.runtime.coordinator.lock().unwrap();
+            self.runtime
+                .stopped
+                .store(true, std::sync::atomic::Ordering::Release);
+            let empty = XenoRegistry {
+                module_cache: RwLock::new(HashMap::new()),
+                root: self.registry.root.clone(),
+                entry: self.registry.entry.clone(),
+                config: Arc::clone(&self.registry.config),
+                metadata: self.registry.metadata.clone(),
+                plugins: Vec::new(),
+                analyzer: xenomorph_common::semantic::Analyzer::new(false, &[]),
+            };
+            *self.runtime.registry.write().unwrap() = Arc::new(empty);
+        }
+        self.runtime.config_watcher.lock().unwrap().take();
         Ok(())
+    }
+
+    async fn execute_command(
+        &self,
+        params: ExecuteCommandParams,
+    ) -> Result<Option<serde_json::Value>> {
+        if params.command != "xenomorph.reloadPlugins" {
+            return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                "Unknown Xenomorph command",
+            ));
+        }
+        reload_runtime(Arc::clone(&self.runtime), self.client.clone())
+            .await
+            .map_err(|error| {
+                tower_lsp::jsonrpc::Error::invalid_params(format!("Plugin reload failed: {error}"))
+            })?;
+        Ok(Some(serde_json::json!({ "reloaded": true })))
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
@@ -1178,6 +1356,11 @@ impl LanguageServer for Backend {
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
+        self.runtime
+            .documents
+            .lock()
+            .unwrap()
+            .remove(&params.text_document.uri);
         self.client
             .publish_diagnostics(params.text_document.uri, vec![], None)
             .await;
@@ -1259,7 +1442,7 @@ impl LanguageServer for Backend {
                     source,
                     tokens,
                     ast,
-                    &xenomorph_common::config::Config::get().formatter,
+                    &self.registry.config.formatter,
                 );
 
                 vec![TextEdit {
@@ -1624,17 +1807,24 @@ async fn main() {
             return;
         }
     };
-    let reg = Arc::new(reg);
-
-    let (service, socket) = LspService::new(move |client| Backend {
-        client,
-        registry: Arc::clone(&reg),
+    let runtime = Arc::new(RuntimeState {
+        registry: RwLock::new(Arc::new(reg)),
+        documents: Mutex::new(HashMap::new()),
+        coordinator: Mutex::new(()),
         config_watcher: Mutex::new(None),
+        stopped: std::sync::atomic::AtomicBool::new(false),
+    });
+    let service_runtime = Arc::clone(&runtime);
+
+    let (service, socket) = LspService::new(move |client| LiveBackend {
+        client,
+        runtime: Arc::clone(&service_runtime),
     });
 
     Server::new(tokio::io::stdin(), tokio::io::stdout(), socket)
         .serve(service)
         .await;
+    runtime.config_watcher.lock().unwrap().take();
 }
 
 #[cfg(test)]

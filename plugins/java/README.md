@@ -82,3 +82,10 @@ public class SomethingTuple {
 ```
 
 The exact Lombok annotations and accessors depend on the plugin configuration and any Xenomorph `@Lombok(...)` annotations.
+
+## Plugin lifecycle
+
+The Java generator uses the [versioned plugin SDK](../../docs/PLUGINS.md).
+Output paths use the configuration supplied by the host at initialization.
+The LSP retains Java/Lombok semantic metadata but releases the generator
+library; it does not generate Java files.

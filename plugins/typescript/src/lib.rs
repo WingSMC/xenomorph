@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-use xenomorph_common::config::{Config, ConfigValue, PluginConfigs};
+use xenomorph_common::config::{Config, ConfigValue};
 use xenomorph_common::parser::{
     Annotation, Declaration, Expr, FloatSize, IntLiteral, KeyValExpr, Literal, SimpleType, Type,
     XenoType,
@@ -23,6 +23,7 @@ static PLUGIN: XenoPlugin = XenoPlugin {
     name: NAME,
     version: VERSION,
     initialize: None,
+    shutdown: None,
     provide_types: Some(provide_types),
     provide_annotations: None,
     provide_config_schema: Some(provide_config_schema),
@@ -57,8 +58,10 @@ fn provide_config_schema() -> &'static str {
     }"#
 }
 
-fn create_generator(plugin_configs: &PluginConfigs) -> Box<dyn for<'a> AnalyzerListener<'a>> {
+fn create_generator(config: &Config) -> Box<dyn for<'a> AnalyzerListener<'a>> {
     let mut generator = TsGenerator::new();
+    generator.workdir = config.workdir.clone();
+    let plugin_configs = &config.plugins.config;
     if let Some(ConfigValue::Table(ts_config)) = plugin_configs.get("typescript") {
         if let Some(ConfigValue::String(output)) = ts_config.get("output") {
             generator.output_dir = Some(PathBuf::from(output));
@@ -67,14 +70,12 @@ fn create_generator(plugin_configs: &PluginConfigs) -> Box<dyn for<'a> AnalyzerL
     Box::new(generator)
 }
 
-#[no_mangle]
-fn load() -> &'static XenoPlugin<'static> {
-    &PLUGIN
-}
+xenomorph_common::export_plugin!(PLUGIN);
 
 // ── Generator listener ──────────────────────────────────────────────
 
 struct TsGenerator {
+    workdir: PathBuf,
     out: String,
     abs_path: PathBuf,
     module_path: String,
@@ -94,6 +95,7 @@ struct TsGenerator {
 impl TsGenerator {
     fn new() -> Self {
         Self {
+            workdir: PathBuf::new(),
             out: String::new(),
             abs_path: PathBuf::new(),
             module_path: String::new(),
@@ -217,7 +219,7 @@ impl<'src> AnalyzerListener<'src> for TsGenerator {
                         .module_path
                         .replace('/', std::path::MAIN_SEPARATOR_STR)
                 );
-                let path = Config::get().workdir.join(dir).join(filename);
+                let path = self.workdir.join(dir).join(filename);
                 if let Some(parent) = path.parent() {
                     let _ = fs::create_dir_all(parent);
                 }
@@ -1056,7 +1058,7 @@ mod tests {
             .is_some_and(|definition| definition
                 .traits
                 .iter()
-                .any(|candidate| candidate.name == "KeyTrait")));
+                .any(|candidate| candidate == "KeyTrait")));
         let key_parameter = hierarchy
             .generic_parameters("Dict")
             .and_then(|parameters| parameters.into_iter().next())
