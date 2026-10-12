@@ -1,6 +1,10 @@
 {
     "name": "xenomorph",
+    "version": "0.1.2",
     "scripts": {
+        "update-versions": "node scripts/update-versions.mjs",
+        "check-versions": "node scripts/update-versions.mjs --check",
+        "test:scripts": "node --test scripts/test/*.test.mjs",
         "build": "nr build:xeno && nr xeno:schema && nr build:extensions",
         "build:extensions": "cd ./extensions/vscode && nr build && cd ../..",
         "build:xeno": "cargo build --release",

@@ -112,3 +112,27 @@ Nightly does not yet provide a stable native Rust ABI. Plugins must use the C AB
 
 - Run `nr install:deps` to install some dependencies
 - Run `nr build` to compile and build all sub-projects and extensions.
+
+## Versions and CI
+
+Run `pnpm run update-versions 1.2.3` from the workspace to set all `package.json`
+and Cargo package versions, including the test fixture, and synchronize local
+package entries in Cargo lockfiles. Dependency versions are preserved. The
+script requires Node.js and accepts a SemVer version without a `v` prefix.
+Use `pnpm run check-versions 1.2.3` to validate versions without changing files.
+
+Testing and linting run on pull requests (opened, updated, reopened, or marked
+ready for review), branch pushes, and manual workflow dispatches. Testing
+includes the Rust workspace and plugin ABI/lifecycle tests on Windows, Linux,
+and macOS, plus the workspace script and VS Code extension tests. Linting checks
+Rust formatting, Clippy warnings, and extension TypeScript types.
+
+To build release artifacts, commit the updated manifests and lockfile, then
+push an exact version tag such as `1.2.3`. The build workflow rejects tags that
+do not match every package version. Successful builds upload these artifacts
+to the workflow run:
+
+- A `.tar.gz` for each of Windows x64, Linux x64, and macOS ARM64 containing
+  `xeno`, `xenomorph_lsp`, and the Java, JSON Schema, and TypeScript plugin
+  libraries (`.dll`, `.so`, or `.dylib`). Archives preserve executable permissions.
+- The platform-independent `xenomorph-<version>.vsix` VS Code extension.

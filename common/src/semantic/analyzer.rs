@@ -559,17 +559,8 @@ fn walk_decl<'src>(
     for l in ls.iter_mut() {
         l.on_before_decl(decl, errors);
     }
-    match decl {
-        Declaration::Type { ty: t, .. } => {
-            walk_type(ls, t, errors);
-        }
-        _ => {} // Declaration::Custom {
-                //     plugin_id,
-                //     decl_id,
-                //     name,
-                //     docs,
-                //     value,
-                // } => walk_custom(plugin_id, decl_id, name, docs, value, ls, errors),
+    if let Declaration::Type { ty: t, .. } = decl {
+        walk_type(ls, t, errors);
     }
     for l in ls.iter_mut() {
         l.on_after_decl(decl, errors);
@@ -758,29 +749,14 @@ impl XenoDefNode<'_> {
         let mut def_tree: XenoDefTree = HashMap::new();
 
         for declaration in ast {
-            match declaration {
-                Declaration::Type { name, docs, .. } => {
-                    let node = XenoDefNode {
-                        name: name.v,
-                        docs: *docs,
-                        fields: None,
-                        meta: Some(Box::new(Some(true))),
-                    };
-                    def_tree.insert(name.v, node);
-                }
-                _ => {} // Declaration::Custom { docs, name, .. } => {
-                        //     if let Some(n) = name {
-                        //         def_tree.insert(
-                        //             n.v,
-                        //             XenoDefNode {
-                        //                 name: n.v,
-                        //                 docs: *docs,
-                        //                 fields: None,
-                        //                 meta: None,
-                        //             },
-                        //         );
-                        //     }
-                        // }
+            if let Declaration::Type { name, docs, .. } = declaration {
+                let node = XenoDefNode {
+                    name: name.v,
+                    docs: *docs,
+                    fields: None,
+                    meta: Some(Box::new(Some(true))),
+                };
+                def_tree.insert(name.v, node);
             }
         }
 

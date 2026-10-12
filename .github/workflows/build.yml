@@ -1,0 +1,112 @@
+name: Build release artifacts
+
+on:
+  push:
+    tags: ['*']
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  validate:
+    name: Validate tag against package versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Validate exact version tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/update-versions.mjs --check "$RELEASE_TAG"
+
+  native:
+    name: Programs and plugins (${{ matrix.target }})
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            executable-suffix: .exe
+            library-prefix: ''
+            library-suffix: .dll
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            executable-suffix: ''
+            library-prefix: lib
+            library-suffix: .so
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            executable-suffix: ''
+            library-prefix: lib
+            library-suffix: .dylib
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install workspace toolchain and target
+        run: |
+          rustup show active-toolchain
+          rustup target add "${{ matrix.target }}"
+      - uses: Swatinem/rust-cache@v2
+      - name: Build CLI, LSP, and plugins
+        run: >-
+          cargo build --release --locked --target "${{ matrix.target }}"
+          -p xenomorph_parser -p xenomorph_lsp
+          -p xenomorph_java -p xenomorph_json_schema -p xenomorph_typescript
+      # Tar preserves the executable permissions when downloaded from Actions artifacts.
+      - name: Archive programs and plugins
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TARGET: ${{ matrix.target }}
+          EXE_SUFFIX: ${{ matrix.executable-suffix }}
+          LIB_PREFIX: ${{ matrix.library-prefix }}
+          LIB_SUFFIX: ${{ matrix.library-suffix }}
+        run: |
+          mkdir -p artifacts
+          tar -czf "artifacts/xenomorph-${RELEASE_TAG}-${RELEASE_TARGET}.tar.gz" \
+            -C "target/${RELEASE_TARGET}/release" \
+            "xeno${EXE_SUFFIX}" "xenomorph_lsp${EXE_SUFFIX}" \
+            "${LIB_PREFIX}xenomorph_java${LIB_SUFFIX}" \
+            "${LIB_PREFIX}xenomorph_json_schema${LIB_SUFFIX}" \
+            "${LIB_PREFIX}xenomorph_typescript${LIB_SUFFIX}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xenomorph-${{ github.ref_name }}-${{ matrix.target }}
+          path: artifacts/*.tar.gz
+          if-no-files-found: error
+
+  vscode:
+    name: VS Code extension (.vsix)
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.11.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+          cache-dependency-path: extensions/vscode/client/pnpm-lock.yaml
+      - name: Install extension dependencies
+        run: pnpm --dir extensions/vscode/client install --frozen-lockfile
+      - name: Build extension
+        run: pnpm --dir extensions/vscode/client run build
+      - name: Package extension
+        working-directory: extensions/vscode
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: pnpm dlx @vscode/vsce@3.7.1 package --no-dependencies --out "xenomorph-${RELEASE_TAG}.vsix"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xenomorph-vscode-${{ github.ref_name }}
+          path: extensions/vscode/*.vsix
+          if-no-files-found: error

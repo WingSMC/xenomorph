@@ -20,7 +20,7 @@ use xenomorph_common::{TokenData, XenoDiagSeverity, XenoDiagnostic};
 // ── Plugin registration ─────────────────────────────────────────────
 
 static NAME: &str = "java";
-static VERSION: &str = "0.1.2";
+static VERSION: &str = env!("CARGO_PKG_VERSION");
 static PLUGIN: XenoPlugin = XenoPlugin {
     name: NAME,
     version: VERSION,
@@ -591,6 +591,7 @@ impl JavaGenerator {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_class(
         &self,
         docs: &Option<&str>,

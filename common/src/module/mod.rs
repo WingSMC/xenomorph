@@ -1,3 +1,6 @@
+// Ouroboros generates constructors with one argument per stored field.
+#![allow(clippy::too_many_arguments)]
+
 use ouroboros::self_referencing;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use serde_json::{json, Map, Value};
@@ -19,7 +19,7 @@ use xenomorph_common::{TokenData, XenoDiagnostic};
 // ── Plugin registration ─────────────────────────────────────────────
 
 static NAME: &str = "json_schema";
-static VERSION: &str = "0.1.2";
+static VERSION: &str = env!("CARGO_PKG_VERSION");
 static PLUGIN: XenoPlugin = XenoPlugin {
     name: NAME,
     version: VERSION,
@@ -130,17 +130,17 @@ impl JsonSchemaGenerator {
     /// Builds a `$ref` value pointing at a named type, resolving cross-module
     /// references to a relative `.schema.json` file path.
     fn ref_for(&self, name: &str) -> Value {
-        match self
-            .own_types
-            .contains(name)
-            .then_some(None)
-            .unwrap_or_else(|| self.provider_of(name).map(Some))
-        {
-            Some(Some(provider)) => {
+        let provider = if self.own_types.contains(name) {
+            None
+        } else {
+            self.provider_of(name)
+        };
+        match provider {
+            Some(provider) => {
                 let rel = schema_ref_path(&self.module_path, provider);
                 json!({ "$ref": format!("{rel}#/$defs/{name}") })
             }
-            Some(None) | None => json!({ "$ref": format!("#/$defs/{name}") }),
+            None => json!({ "$ref": format!("#/$defs/{name}") }),
         }
     }
 
@@ -1005,7 +1005,7 @@ fn with_description(mut schema: Value, docs: Option<&xenomorph_common::TokenData
     schema
 }
 
-fn with_schema_extension(path: &PathBuf) -> PathBuf {
+fn with_schema_extension(path: &Path) -> PathBuf {
     let stem = path
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())

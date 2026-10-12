@@ -124,12 +124,9 @@ fn generate_rc_schema(config_path: Option<&std::path::Path>) {
         Ok::<_, String>(())
     })();
 
-    match result {
-        Err(e) => {
-            eprintln!("✗ Failed to write xenomorph.toml schema: {}", e);
-            std::process::exit(1);
-        }
-        Ok(_) => {}
+    if let Err(e) = result {
+        eprintln!("✗ Failed to write xenomorph.toml schema: {}", e);
+        std::process::exit(1);
     }
 }
 
@@ -338,7 +335,7 @@ mod tests {
         assert!(matches!(
             cli.command,
             Commands::Schema { config: Some(path) }
-                if path == PathBuf::from("schemas/linked/xenomorph.toml")
+                if path == std::path::Path::new("schemas/linked/xenomorph.toml")
         ));
     }
 

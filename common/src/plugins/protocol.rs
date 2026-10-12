@@ -106,7 +106,7 @@ impl Diagnostic {
             0 => Ok(XenoDiagSeverity::Err),
             1 => Ok(XenoDiagSeverity::Warn),
             2 => Ok(XenoDiagSeverity::Info),
-            value => return Err(format!("Invalid plugin diagnostic severity: {value}")),
+            value => Err(format!("Invalid plugin diagnostic severity: {value}")),
         }
     }
 }
