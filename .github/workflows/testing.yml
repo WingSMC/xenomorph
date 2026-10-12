@@ -1,66 +1,71 @@
 name: Testing
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-  push:
-    branches: ['**']
-  workflow_dispatch:
+    pull_request:
+        types: [opened, synchronize, reopened, ready_for_review]
+    push:
+        branches: ["**"]
+    workflow_dispatch:
+        inputs:
+            macos:
+                description: Include macOS tests (costs a crap ton of money)
+                type: boolean
+                default: false
 
 permissions:
-  contents: read
+    contents: read
 
 concurrency:
-  group: testing-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+    group: testing-${{ github.event.pull_request.number || github.ref }}
+    cancel-in-progress: true
 
 defaults:
-  run:
-    shell: bash
+    run:
+        shell: bash
 
 jobs:
-  rust:
-    name: Rust and plugin ABI (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install workspace toolchain
-        run: rustup show active-toolchain
-      - name: Install independent fixture compiler
-        run: rustup toolchain install 1.94.0 --profile minimal
-      - uses: Swatinem/rust-cache@v2
-      - name: Build independent plugin binaries
-        run: |
-          cargo build --workspace --locked
-          cargo +1.94.0 build -p xenomorph_test_plugin --locked --features alternate-version --target-dir target/plugin-fixture-stable
-          cargo build -p xenomorph_test_plugin --locked --features bad-abi --target-dir target/plugin-fixture-bad
-      - name: Test workspace and plugin lifecycle
-        run: |
-          cargo test --workspace --locked
-          cargo test -p xenomorph_common plugins::tests --locked -- --ignored
-          cargo test -p xenomorph_lsp --test reload --locked -- --ignored
-          cargo test -p xenomorph_parser --test plugin_cli --locked -- --ignored
+    rust:
+        name: Rust and plugin ABI (${{ matrix.os }})
+        strategy:
+            fail-fast: false
+            matrix:
+                os: ${{ github.event_name == 'workflow_dispatch' && inputs.macos && fromJSON('["windows-latest", "ubuntu-latest", "macos-latest"]') || fromJSON('["windows-latest", "ubuntu-latest"]') }}
+        runs-on: ${{ matrix.os }}
+        steps:
+            - uses: actions/checkout@v6
+            - name: Install workspace toolchain
+              run: rustup show active-toolchain
+            - name: Install independent fixture compiler
+              run: rustup toolchain install 1.94.0 --profile minimal
+            - uses: Swatinem/rust-cache@v2
+            - name: Build independent plugin binaries
+              run: |
+                  cargo build --workspace --locked
+                  cargo +1.94.0 build -p xenomorph_test_plugin --locked --features alternate-version --target-dir target/plugin-fixture-stable
+                  cargo build -p xenomorph_test_plugin --locked --features bad-abi --target-dir target/plugin-fixture-bad
+            - name: Test workspace and plugin lifecycle
+              run: |
+                  cargo test --workspace --locked
+                  cargo test -p xenomorph_common plugins::tests --locked -- --ignored
+                  cargo test -p xenomorph_lsp --test reload --locked -- --ignored
+                  cargo test -p xenomorph_parser --test plugin_cli --locked -- --ignored
 
-  node:
-    name: Workspace scripts and VS Code extension
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 12.11.2
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-          cache: pnpm
-          cache-dependency-path: extensions/vscode/client/pnpm-lock.yaml
-      - name: Install extension dependencies
-        run: pnpm --dir extensions/vscode/client install --frozen-lockfile
-      - name: Test workspace scripts
-        run: pnpm run test:scripts
-      - name: Test extension
-        run: pnpm --dir extensions/vscode/client run test
+    node:
+        name: Workspace scripts and VS Code extension
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v6
+            - uses: pnpm/action-setup@v5
+              with:
+                  version: 12.11.2
+            - uses: actions/setup-node@v6
+              with:
+                  node-version: "24"
+                  cache: pnpm
+                  cache-dependency-path: extensions/vscode/client/pnpm-lock.yaml
+            - name: Install extension dependencies
+              run: pnpm --dir extensions/vscode/client install --frozen-lockfile
+            - name: Test workspace scripts
+              run: pnpm run test:scripts
+            - name: Test extension
+              run: pnpm --dir extensions/vscode/client run test

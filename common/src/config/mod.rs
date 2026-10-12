@@ -736,12 +736,18 @@ mod tests {
             Some("example.service")
         );
         assert_eq!(config.plugins.config["java"]["data"].as_bool(), Some(true));
-        assert_eq!(config.workdir, root);
-        assert_eq!(config.workspace_config_path(), outer_config);
-        assert_eq!(config.schema_workdir(), inner.as_path());
+        // Loading resolves filesystem aliases, including macOS /var and Windows
+        // short temp-directory names. Compare to the same normalized paths.
+        let expected_outer =
+            super::normalized_config_path(&outer_config).expect("outer config should resolve");
+        let expected_inner =
+            super::normalized_config_path(&inner_config).expect("inner config should resolve");
+        assert_eq!(config.workdir, expected_outer.parent().unwrap());
+        assert_eq!(config.workspace_config_path(), expected_outer);
+        assert_eq!(config.schema_workdir(), expected_inner.parent().unwrap());
         assert_eq!(
             config.workspace_config_paths(),
-            vec![outer_config, inner_config]
+            vec![expected_outer, expected_inner]
         );
 
         fs::remove_dir_all(root).expect("test directory should be removed");

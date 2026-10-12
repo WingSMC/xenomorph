@@ -1,0 +1,65 @@
+name: Build macOS release artifacts (manual)
+
+on:
+    workflow_dispatch:
+        inputs:
+            tag:
+                description: Existing release tag matching every package version (e.g. 1.2.3)
+                required: true
+                type: string
+
+permissions:
+    contents: read
+
+defaults:
+    run:
+        shell: bash
+
+jobs:
+    validate:
+        name: Validate release tag
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v6
+              with:
+                  ref: refs/tags/${{ inputs.tag }}
+            - uses: actions/setup-node@v6
+              with:
+                  node-version: "24"
+            - name: Validate exact version tag
+              env:
+                  RELEASE_TAG: ${{ inputs.tag }}
+              run: node scripts/update-versions.mjs --check "$RELEASE_TAG"
+
+    native:
+        name: Programs and plugins (aarch64-apple-darwin)
+        needs: validate
+        runs-on: macos-latest
+        steps:
+            - uses: actions/checkout@v6
+              with:
+                  ref: refs/tags/${{ inputs.tag }}
+            - name: Install workspace toolchain and target
+              run: |
+                  rustup show active-toolchain
+                  rustup target add aarch64-apple-darwin
+            - uses: Swatinem/rust-cache@v2
+            - name: Build CLI, LSP, and plugins
+              run: >-
+                  cargo build --release --locked --target aarch64-apple-darwin
+                  -p xenomorph_parser -p xenomorph_lsp
+                  -p xenomorph_java -p xenomorph_json_schema -p xenomorph_typescript
+            - name: Archive programs and plugins
+              env:
+                  RELEASE_TAG: ${{ inputs.tag }}
+              run: |
+                  mkdir -p artifacts
+                  tar -czf "artifacts/xenomorph-${RELEASE_TAG}-aarch64-apple-darwin.tar.gz" \
+                    -C target/aarch64-apple-darwin/release \
+                    xeno xenomorph_lsp \
+                    libxenomorph_java.dylib libxenomorph_json_schema.dylib libxenomorph_typescript.dylib
+            - uses: actions/upload-artifact@v6
+              with:
+                  name: xenomorph-${{ inputs.tag }}-aarch64-apple-darwin
+                  path: artifacts/*.tar.gz
+                  if-no-files-found: error

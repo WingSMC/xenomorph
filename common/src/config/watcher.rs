@@ -162,12 +162,32 @@ fn paths_match(left: &Path, right: &Path) -> bool {
 
     #[cfg(windows)]
     {
-        left.to_string_lossy()
+        if left
+            .to_string_lossy()
             .eq_ignore_ascii_case(&right.to_string_lossy())
+        {
+            return true;
+        }
     }
-    #[cfg(not(windows))]
-    {
-        false
+
+    // Native events can resolve directory aliases (macOS /var, Windows short
+    // names). Resolve the parents because a removed/replaced file may no longer
+    // exist when its event arrives.
+    let canonical_entry =
+        |path: &Path| Some(path.parent()?.canonicalize().ok()?.join(path.file_name()?));
+    match (canonical_entry(left), canonical_entry(right)) {
+        (Some(left), Some(right)) => {
+            #[cfg(windows)]
+            {
+                left.to_string_lossy()
+                    .eq_ignore_ascii_case(&right.to_string_lossy())
+            }
+            #[cfg(not(windows))]
+            {
+                left == right
+            }
+        }
+        _ => false,
     }
 }
 
@@ -204,14 +224,40 @@ mod tests {
     }
 
     #[test]
+    fn matches_canonical_events_through_a_directory_alias_after_removal() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("xenomorph-watcher-alias-{unique}"));
+        fs::create_dir_all(root.join("nested")).expect("test directory should be created");
+        let config_path = root.join("nested/../xenomorph.toml");
+        fs::write(&config_path, "").expect("config should be written");
+        let canonical = config_path.canonicalize().expect("config should resolve");
+        fs::remove_file(&config_path).expect("config should be removed");
+        let event = Event::new(EventKind::Remove(notify::event::RemoveKind::File))
+            .add_path(canonical.clone());
+        let matches = event_targets_config(&event, &config_path);
+        let other = root.join("nested/xenomorph.toml");
+        assert!(!event_targets_config(&event, &other));
+        fs::remove_dir_all(root).expect("test directory should be removed");
+        assert!(
+            matches,
+            "canonical event {canonical:?} should match {config_path:?}"
+        );
+    }
+
+    #[test]
     fn watches_real_config_file_changes() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock should be after epoch")
             .as_nanos();
         let root = std::env::temp_dir().join(format!("xenomorph-watcher-{unique}"));
-        let config_path = root.join("xenomorph.toml");
-        fs::create_dir_all(&root).expect("test directory should be created");
+        // Exercise the real native watcher with an alias, even on systems whose
+        // temp-directory path does not contain a symlink or Windows short name.
+        let config_path = root.join("nested/../xenomorph.toml");
+        fs::create_dir_all(root.join("nested")).expect("test directory should be created");
         fs::write(&config_path, "[debug]\nloglevel = \"info\"\n")
             .expect("initial config should be written");
 

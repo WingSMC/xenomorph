@@ -123,16 +123,22 @@ Use `pnpm run check-versions 1.2.3` to validate versions without changing files.
 
 Testing and linting run on pull requests (opened, updated, reopened, or marked
 ready for review), branch pushes, and manual workflow dispatches. Testing
-includes the Rust workspace and plugin ABI/lifecycle tests on Windows, Linux,
-and macOS, plus the workspace script and VS Code extension tests. Linting checks
-Rust formatting, Clippy warnings, and extension TypeScript types.
+includes the Rust workspace and plugin ABI/lifecycle tests on Windows and Linux,
+plus the workspace script and VS Code extension tests. To run macOS tests,
+manually dispatch Testing with **Include macOS tests** enabled (off by default).
+Linting checks Rust formatting, Clippy warnings, and extension TypeScript types.
 
 To build release artifacts, commit the updated manifests and lockfile, then
 push an exact version tag such as `1.2.3`. The build workflow rejects tags that
 do not match every package version. Successful builds upload these artifacts
 to the workflow run:
 
-- A `.tar.gz` for each of Windows x64, Linux x64, and macOS ARM64 containing
+- A `.tar.gz` for each of Windows x64 and Linux x64 containing
   `xeno`, `xenomorph_lsp`, and the Java, JSON Schema, and TypeScript plugin
-  libraries (`.dll`, `.so`, or `.dylib`). Archives preserve executable permissions.
+  libraries (`.dll` or `.so`). Archives preserve executable permissions.
 - The platform-independent `xenomorph-<version>.vsix` VS Code extension.
+
+macOS jobs run only after a manual trigger. To build macOS ARM64 programs and
+plugins, dispatch **Build macOS release artifacts (manual)** with an existing
+release tag. It validates the tagged package versions on Linux before starting
+the macOS runner and uploads the macOS `.tar.gz` to that workflow run.
