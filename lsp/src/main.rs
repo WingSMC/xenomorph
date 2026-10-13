@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
@@ -426,18 +426,12 @@ impl RuntimeState {
         let candidate =
             XenoRegistry::with_config(config, false).map_err(|error| error.to_string())?;
         candidate.load_module(&[&candidate.entry], true, None);
-        for (uri, text) in self
-            .documents
-            .lock()
-            .map_err(|_| "Document storage is poisoned")?
-            .iter()
         {
-            let path = uri
-                .to_file_path()
-                .map_err(|_| format!("Invalid document URI: {uri}"))?;
-            if candidate.abs_path_to_module_path(&path).is_some() {
-                candidate.load_module_from_source(&path, text.clone());
-            }
+            let documents = self
+                .documents
+                .lock()
+                .map_err(|_| "Document storage is poisoned")?;
+            synchronize_documents(&candidate, &documents);
         }
         candidate.refresh_name_collision_diagnostics();
         let watcher = config_watcher_paths(
@@ -583,8 +577,9 @@ async fn reload_runtime(
     let candidate = tokio::task::spawn_blocking(move || state.reconcile(reload_client))
         .await
         .map_err(|error| format!("Runtime reload task failed: {error}"))??;
-    let mut uris: std::collections::HashSet<Url> =
-        runtime.documents.lock().unwrap().keys().cloned().collect();
+    let documents = runtime.documents.lock().unwrap().clone();
+    let graph = current_module_graph(&candidate);
+    let mut uris: HashSet<Url> = documents.keys().cloned().collect();
     for registry in [&previous, &candidate] {
         for module in registry.module_cache.read().unwrap().values() {
             let module = module.read().unwrap();
@@ -594,19 +589,12 @@ async fn reload_runtime(
         }
     }
     for uri in uris {
-        let diagnostics = uri
-            .to_file_path()
-            .ok()
-            .and_then(|path| candidate.abs_path_to_module_path(&path))
-            .map(|module| {
-                let errors = candidate.get_all_errors_for(&module);
-                candidate
-                    .with_module(&module, |_, _, data| {
-                        diagnostics_for_source(&errors, &module, &data.source)
-                    })
-                    .unwrap_or_default()
-            })
-            .unwrap_or_default();
+        let diagnostics = diagnostics_for_document(
+            &candidate,
+            &graph,
+            &uri,
+            documents.get(&uri).map(String::as_str),
+        );
         client.publish_diagnostics(uri, diagnostics, None).await;
     }
     client
@@ -616,6 +604,91 @@ async fn reload_runtime(
         )
         .await;
     Ok(())
+}
+
+fn current_module_graph(registry: &XenoRegistry) -> HashSet<String> {
+    let index = registry.index.read().unwrap();
+    let mut graph = HashSet::new();
+    let mut pending = vec![registry.entry.clone()];
+    while let Some(path) = pending.pop() {
+        if graph.insert(path.clone()) {
+            if let Some(module) = index.get(&path) {
+                pending.extend(module.imports.iter().cloned());
+            }
+        }
+    }
+    graph
+}
+
+/// Apply editor buffers in import order so newly imported open documents use
+/// their unsaved text, and unrelated documents do not become graph members.
+fn synchronize_documents(registry: &XenoRegistry, documents: &HashMap<Url, String>) {
+    let sources: HashMap<_, _> = documents
+        .iter()
+        .filter_map(|(uri, text)| {
+            let path = uri.to_file_path().ok()?;
+            let module = registry.abs_path_to_module_path(&path)?;
+            Some((module, (path, text)))
+        })
+        .collect();
+    let mut visited = HashSet::new();
+    let mut pending = VecDeque::from([registry.entry.clone()]);
+    while let Some(module) = pending.pop_front() {
+        if !visited.insert(module.clone()) {
+            continue;
+        }
+        if let Some((path, source)) = sources.get(&module) {
+            let unchanged = registry
+                .with_module(&module, |_, _, data| {
+                    data.borrow_source() == source.as_str()
+                })
+                .unwrap_or(false);
+            if !unchanged {
+                registry.load_module_from_source(path, (*source).clone());
+            }
+        }
+        if let Some(imports) = registry.with_module(&module, |_, _, data| data.imports.clone()) {
+            pending.extend(imports);
+        }
+    }
+}
+
+fn outside_module_graph_diagnostic(source: &str) -> Diagnostic {
+    let source = xenomorph_common::SourceDocument::new(source.to_string());
+    let (line, character) = source.position(source.text().len() as u32, true);
+    Diagnostic {
+        range: Range::new(Position::new(0, 0), Position::new(line, character)),
+        severity: Some(DiagnosticSeverity::INFORMATION),
+        message: "Not part of the current module graph.".to_string(),
+        source: Some("xenomorph".to_string()),
+        tags: Some(vec![DiagnosticTag::UNNECESSARY]),
+        ..Default::default()
+    }
+}
+
+fn diagnostics_for_document(
+    registry: &XenoRegistry,
+    graph: &HashSet<String>,
+    uri: &Url,
+    open_source: Option<&str>,
+) -> Vec<Diagnostic> {
+    let module = uri
+        .to_file_path()
+        .ok()
+        .and_then(|path| registry.abs_path_to_module_path(&path))
+        .filter(|path| graph.contains(path));
+    if let Some(module) = module {
+        let errors = registry.get_all_errors_for(&module);
+        registry
+            .with_module(&module, |_, _, data| {
+                diagnostics_for_source(&errors, &module, &data.source)
+            })
+            .unwrap_or_default()
+    } else {
+        open_source
+            .map(|source| vec![outside_module_graph_diagnostic(source)])
+            .unwrap_or_default()
+    }
 }
 
 fn diagnostics_for_source(
@@ -939,71 +1012,45 @@ impl Backend {
 
     // ── Document validation ─────────────────────────────────────────
 
-    /// Reloads the module in the registry from the given source text,
-    /// then revalidates and publishes diagnostics for all of its importers.
+    /// Synchronizes graph members and updates diagnostics for cached and open files.
     async fn validate_document(&self, uri: &Url, source: String) {
-        let file_path = match uri.to_file_path() {
-            Ok(p) => p,
-            Err(_) => return,
-        };
         let publications = {
             let _coordinator = self.runtime.coordinator.lock().unwrap();
-            self.runtime
-                .documents
-                .lock()
-                .unwrap()
-                .insert(uri.clone(), source.clone());
+            let mut documents = self.runtime.documents.lock().unwrap();
+            documents.insert(uri.clone(), source);
             let registry = self.runtime.snapshot();
-            let Some(module_path) = registry.abs_path_to_module_path(&file_path) else {
-                return;
-            };
-            let load_errors = registry.load_module_from_source(&file_path, source);
-            let affected_modules: Vec<_> = registry
+            synchronize_documents(&registry, &documents);
+            let graph = current_module_graph(&registry);
+            let affected_paths: Vec<_> = registry
                 .module_cache
                 .read()
                 .unwrap()
-                .keys()
-                .cloned()
+                .values()
+                .map(|module| module.read().unwrap().borrow_abs_path().to_path_buf())
                 .collect();
-            let current_module_was_revalidated = affected_modules.contains(&module_path);
-            let mut publications = Vec::new();
-            for affected_module in affected_modules {
-                let Some(abs_path) = registry.with_module(&affected_module, |_, _, module| {
-                    module.borrow_abs_path().to_path_buf()
-                }) else {
-                    continue;
-                };
-                let Ok(affected_uri) = Url::from_file_path(abs_path) else {
-                    continue;
-                };
-                let errors = registry.get_all_errors_for(&affected_module);
-                publications.push((affected_uri, affected_module, errors));
-            }
-            if !current_module_was_revalidated {
-                publications.push((uri.clone(), module_path, load_errors));
-            }
-            publications
+            let mut uris: HashSet<_> = documents.keys().cloned().collect();
+            uris.extend(
+                affected_paths
+                    .into_iter()
+                    .filter_map(|path| Url::from_file_path(path).ok()),
+            );
+            uris.into_iter()
+                .map(|uri| {
+                    let diagnostics = diagnostics_for_document(
+                        &registry,
+                        &graph,
+                        &uri,
+                        documents.get(&uri).map(String::as_str),
+                    );
+                    (uri, diagnostics)
+                })
+                .collect::<Vec<_>>()
         };
-        for (uri, module, errors) in publications {
-            self.publish_module_diagnostics(uri, &module, &errors).await;
+        for (uri, diagnostics) in publications {
+            self.client
+                .publish_diagnostics(uri, diagnostics, None)
+                .await;
         }
-    }
-
-    async fn publish_module_diagnostics(
-        &self,
-        uri: Url,
-        module_path: &str,
-        errors: &[ModuleDiagnostic],
-    ) {
-        let diagnostics = self
-            .registry
-            .with_module(module_path, |_, _, module| {
-                diagnostics_for_source(errors, module_path, &module.source)
-            })
-            .unwrap_or_else(|| diagnostics_for_module(errors, module_path));
-        self.client
-            .publish_diagnostics(uri, diagnostics, None)
-            .await;
     }
 
     // ── Completions ─────────────────────────────────────────────────
@@ -2049,6 +2096,52 @@ mod tests {
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.directory).unwrap();
         }
+    }
+
+    #[test]
+    fn current_graph_follows_transitive_imports_and_cycles_and_excludes_cached_orphans() {
+        let workspace = ReferenceWorkspace::new(&[
+            ("index", "import middle; type Root = string;"),
+            ("middle", "import leaf; type Middle = string;"),
+            ("leaf", "import middle; type Leaf = string;"),
+            ("orphan", "type Orphan = string;"),
+        ]);
+        assert_eq!(
+            current_module_graph(&workspace.registry),
+            HashSet::from(["index".into(), "middle".into(), "leaf".into()]),
+        );
+    }
+
+    #[test]
+    fn synchronizing_documents_follows_unsaved_transitive_imports() {
+        let workspace = ReferenceWorkspace::new(&[
+            ("index", "type Root = string;"),
+            ("middle", "type Middle = string;"),
+            ("leaf", "type Saved = string;"),
+        ]);
+        let documents = HashMap::from([
+            (
+                workspace.location("index", 0, 0, 0).uri,
+                "import middle; type Root = string;".into(),
+            ),
+            (
+                workspace.location("middle", 0, 0, 0).uri,
+                "import leaf; type Middle = string;".into(),
+            ),
+            (
+                workspace.location("leaf", 0, 0, 0).uri,
+                "type Draft = string;".into(),
+            ),
+        ]);
+        synchronize_documents(&workspace.registry, &documents);
+        assert_eq!(
+            current_module_graph(&workspace.registry),
+            HashSet::from(["index".into(), "middle".into(), "leaf".into()]),
+        );
+        assert!(workspace
+            .registry
+            .with_module("leaf", |_, _, data| data.declarations.contains_key("Draft"))
+            .unwrap());
     }
 
     #[tokio::test]
