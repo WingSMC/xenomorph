@@ -73,6 +73,7 @@ pub struct FormatterConfig {
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
 pub enum IndentKind {
     #[default]
     #[serde(rename = "space", alias = "spaces")]
@@ -83,6 +84,7 @@ pub enum IndentKind {
 
 #[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
+#[repr(u8)]
 pub enum LineEnding {
     #[default]
     Lf,
@@ -126,6 +128,7 @@ pub struct DebugConfig {
 
 #[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
+#[repr(u8)]
 pub enum LogLevel {
     Error,
     Warning,

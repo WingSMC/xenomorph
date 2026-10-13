@@ -8,7 +8,7 @@ mod tests {
         Lexer::tokenize(src)
             .unwrap()
             .into_iter()
-            .map(|(variant, data)| (variant, data.v))
+            .map(|(variant, data)| (variant, data.text(src)))
             .collect()
     }
 
@@ -16,7 +16,7 @@ mod tests {
         Lexer::tokenize(src)
             .unwrap()
             .into_iter()
-            .map(|(variant, data)| (variant, data.v, data.l, data.c))
+            .map(|(variant, data)| (variant, data.text(src), data.line(src), data.column(src)))
             .collect()
     }
 
@@ -224,14 +224,75 @@ mod tests {
     #[test]
     fn single_token_error_span_covers_one_utf8_character() {
         let error = Lexer::tokenize(source::UNKNOWN_UTF8).unwrap_err();
-        assert_eq!(error.location.v, "é");
-        assert_eq!(error.location.c, 0);
+        assert_eq!(error.location.text(source::UNKNOWN_UTF8), "é");
+        assert_eq!(error.location.column(source::UNKNOWN_UTF8), 0);
     }
 
     #[test]
     fn unknown_ascii_characters_report_the_current_character() {
         let error = Lexer::tokenize(source::UNKNOWN_ASCII).unwrap_err();
         assert_eq!(error.message, source::UNKNOWN_ERROR);
-        assert_eq!(error.location.v, source::UNKNOWN_ASCII);
+        assert_eq!(
+            error.location.text(source::UNKNOWN_ASCII),
+            source::UNKNOWN_ASCII
+        );
+    }
+}
+
+#[cfg(test)]
+mod incremental {
+    use crate::lexer::Lexer;
+    #[test]
+    fn edits_match_full_lexing_across_all_lexical_boundaries() {
+        let source="/** docs\nmore */ import models/user; type A = { key: \"hello\nworld\", value: number } @match(/a+/); /* ignored */ type B = |A|number;";
+        let old = Lexer::lex(source);
+        assert!(old.error.is_none());
+        for offset in source
+            .char_indices()
+            .map(|(i, _)| i)
+            .chain(std::iter::once(source.len()))
+        {
+            for inserted in [
+                "",
+                "x",
+                "\n",
+                "\r\n",
+                "\"",
+                "/",
+                "/*",
+                "\u{e9}",
+                "\u{1f600}",
+            ] {
+                for removed in [0, source[offset..].chars().next().map_or(0, char::len_utf8)] {
+                    let replacement = format!(
+                        "{}{}{}",
+                        &source[..offset],
+                        inserted,
+                        &source[offset + removed..]
+                    );
+                    let actual = Lexer::relex(source, &old, &replacement);
+                    let expected = Lexer::lex(&replacement);
+                    assert_eq!(
+                        actual.tokens, expected.tokens,
+                        "edit {offset}, {inserted:?}, remove {removed}"
+                    );
+                    assert_eq!(
+                        actual.error.as_ref().map(|e| (&e.message, e.location)),
+                        expected.error.as_ref().map(|e| (&e.message, e.location))
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn small_edit_converges_before_the_end_of_a_large_document() {
+        let source = (0..1000)
+            .map(|i| format!("type T{i} = number;\n"))
+            .collect::<String>();
+        let old = Lexer::lex(&source);
+        let replacement = source.replacen("number", "string", 1);
+        let actual = Lexer::relex(&source, &old, &replacement);
+        assert_eq!(actual.tokens, Lexer::lex(&replacement).tokens);
+        assert!(actual.scanned_bytes < 100);
     }
 }

@@ -8,11 +8,12 @@ use xenomorph_common::{
 /// Finds the generic arguments attached to the exact type reference under the
 /// cursor and converts them to source-like Xenomorph text.
 pub fn type_arguments_at_token(
-    ast: &[Declaration<'_>],
-    target: &TokenData<'_>,
+    ast: &[Declaration],
+    target: &TokenData,
+    source: &str,
 ) -> Option<Vec<String>> {
     ast.iter().find_map(|declaration| match declaration {
-        Declaration::Type { ty, .. } => find_arguments_in_xeno_type(ty, target),
+        Declaration::Type { ty, .. } => find_arguments_in_xeno_type(ty, target, source),
         Declaration::Import { .. } | Declaration::Custom { .. } => None,
     })
 }
@@ -20,8 +21,9 @@ pub fn type_arguments_at_token(
 /// Formats one declaration layer for hover display. Supplied generic arguments
 /// replace the declaration's generic parameters throughout the rendered body.
 pub fn format_type_declaration(
-    declaration: &Declaration<'_>,
+    declaration: &Declaration,
     supplied_arguments: &[String],
+    source: &str,
 ) -> Option<String> {
     let Declaration::Type {
         name, generics, ty, ..
@@ -34,18 +36,18 @@ pub fn format_type_declaration(
     let substitutions = generics
         .iter()
         .zip(supplied_arguments)
-        .map(|((name, _), argument)| (name.v, argument.as_str()))
+        .map(|((name, _), argument)| (name.text(source), argument.as_str()))
         .collect::<HashMap<_, _>>();
 
-    let generic_display = format_declaration_generics(generics, supplied_arguments);
-    let body = format_type(&ty.0, &substitutions);
+    let generic_display = format_declaration_generics(generics, supplied_arguments, source);
+    let body = format_type(&ty.0, &substitutions, source);
     let annotations = if ty.1.is_empty() {
         String::new()
     } else {
         format!(
             " {}",
             ty.1.iter()
-                .map(|annotation| format_annotation(annotation, &substitutions))
+                .map(|annotation| format_annotation(annotation, &substitutions, source))
                 .collect::<Vec<_>>()
                 .join(" ")
         )
@@ -53,13 +55,14 @@ pub fn format_type_declaration(
 
     Some(format!(
         "type {}{generic_display} = {body}{annotations};",
-        name.v
+        name.text(source)
     ))
 }
 
 fn format_declaration_generics(
-    generics: &[(&TokenData<'_>, Option<&TokenData<'_>>)],
+    generics: &[(TokenData, Option<TokenData>)],
     supplied_arguments: &[String],
+    source: &str,
 ) -> String {
     if generics.is_empty() {
         return String::new();
@@ -73,8 +76,8 @@ fn format_declaration_generics(
             .map(|(index, (name, constraint))| {
                 supplied_arguments.get(index).cloned().unwrap_or_else(|| {
                     constraint.map_or_else(
-                        || name.v.to_string(),
-                        |constraint| format!("{}: {}", name.v, constraint.v),
+                        || name.text(source).to_string(),
+                        |constraint| format!("{}: {}", name.text(source), constraint.text(source)),
                     )
                 })
             })
@@ -84,38 +87,40 @@ fn format_declaration_generics(
 }
 
 fn find_arguments_in_xeno_type(
-    ty: &(Type<'_>, Vec<Annotation<'_>>),
-    target: &TokenData<'_>,
+    ty: &(Type, Vec<Annotation>),
+    target: &TokenData,
+    source: &str,
 ) -> Option<Vec<String>> {
-    find_arguments_in_type(&ty.0, target).or_else(|| {
+    find_arguments_in_type(&ty.0, target, source).or_else(|| {
         ty.1.iter()
-            .find_map(|annotation| find_arguments_in_annotation(annotation, target))
+            .find_map(|annotation| find_arguments_in_annotation(annotation, target, source))
     })
 }
 
-fn find_arguments_in_type(ty: &Type<'_>, target: &TokenData<'_>) -> Option<Vec<String>> {
+fn find_arguments_in_type(ty: &Type, target: &TokenData, source: &str) -> Option<Vec<String>> {
     match ty {
-        Type::Simple(simple) => find_arguments_in_simple_type(simple, target),
+        Type::Simple(simple) => find_arguments_in_simple_type(simple, target, source),
         Type::Tuple(items) | Type::Sum(items) | Type::Intersection(items) => items
             .iter()
-            .find_map(|simple| find_arguments_in_simple_type(simple, target)),
+            .find_map(|simple| find_arguments_in_simple_type(simple, target, source)),
         Type::Set(set) => set
             .element_type
             .as_ref()
-            .and_then(|element| find_arguments_in_simple_type(element, target)),
+            .and_then(|element| find_arguments_in_simple_type(element, target, source)),
         Type::Struct(fields) | Type::Enum(fields) => fields
             .iter()
-            .find_map(|(_, simple, _)| find_arguments_in_simple_type(simple, target)),
+            .find_map(|(_, simple, _)| find_arguments_in_simple_type(simple, target, source)),
     }
 }
 
 fn find_arguments_in_simple_type(
-    simple: &SimpleType<'_>,
-    target: &TokenData<'_>,
+    simple: &SimpleType,
+    target: &TokenData,
+    source: &str,
 ) -> Option<Vec<String>> {
     let (identifier, arguments) = match simple.inner() {
         SimpleType::Identifier(identifier, arguments)
-        | SimpleType::Array(identifier, arguments) => (*identifier, arguments.as_deref()),
+        | SimpleType::Array(identifier, arguments) => (identifier, arguments.as_deref()),
         SimpleType::Literal(_) | SimpleType::Optional(_) => return None,
     };
 
@@ -124,7 +129,7 @@ fn find_arguments_in_simple_type(
             arguments
                 .unwrap_or(&[])
                 .iter()
-                .map(|argument| format_simple_type(argument, &HashMap::new()))
+                .map(|argument| format_simple_type(argument, &HashMap::new(), source))
                 .collect(),
         );
     }
@@ -132,63 +137,75 @@ fn find_arguments_in_simple_type(
     arguments
         .unwrap_or(&[])
         .iter()
-        .find_map(|argument| find_arguments_in_simple_type(argument, target))
+        .find_map(|argument| find_arguments_in_simple_type(argument, target, source))
 }
 
 fn find_arguments_in_annotation(
-    annotation: &Annotation<'_>,
-    target: &TokenData<'_>,
+    annotation: &Annotation,
+    target: &TokenData,
+    source: &str,
 ) -> Option<Vec<String>> {
     annotation
         .params
         .iter()
         .find_map(|expression| match expression {
             Expr::Regex(_) => None,
-            Expr::Annotation(annotation) => find_arguments_in_annotation(annotation, target),
-            Expr::Type(ty) => find_arguments_in_type(ty, target),
+            Expr::Annotation(annotation) => {
+                find_arguments_in_annotation(annotation, target, source)
+            }
+            Expr::Type(ty) => find_arguments_in_type(ty, target, source),
         })
 }
 
-fn same_token(left: &TokenData<'_>, right: &TokenData<'_>) -> bool {
-    std::ptr::eq(left, right)
-        || left.l == right.l && left.c == right.c && left.v.len() == right.v.len()
+fn same_token(left: &TokenData, right: &TokenData) -> bool {
+    left == right
 }
 
-fn format_type(ty: &Type<'_>, substitutions: &HashMap<&str, &str>) -> String {
+fn format_type(ty: &Type, substitutions: &HashMap<&str, &str>, source: &str) -> String {
     match ty {
-        Type::Simple(simple) => format_simple_type(simple, substitutions),
-        Type::Tuple(items) => format!("[{}]", format_simple_types(items, substitutions, ", ")),
+        Type::Simple(simple) => format_simple_type(simple, substitutions, source),
+        Type::Tuple(items) => format!(
+            "[{}]",
+            format_simple_types(items, substitutions, ", ", source)
+        ),
         Type::Set(set) => {
             let element = set
                 .element_type
                 .as_ref()
-                .map(|element| format!("<{}>", format_simple_type(element, substitutions)))
+                .map(|element| format!("<{}>", format_simple_type(element, substitutions, source)))
                 .unwrap_or_default();
             let values = set.values.as_ref().map_or_else(String::new, |values| {
                 format!(
                     "[{}]",
                     values
                         .iter()
-                        .map(|literal| literal.source_text())
+                        .map(|literal| literal.source_text(source))
                         .collect::<Vec<_>>()
                         .join(", ")
                 )
             });
             format!("set{element}{values}")
         }
-        Type::Struct(fields) => format_fields("", fields, substitutions),
-        Type::Enum(fields) => format_fields("enum ", fields, substitutions),
-        Type::Sum(items) => format!("| {}", format_simple_types(items, substitutions, " | ")),
+        Type::Struct(fields) => format_fields("", fields, substitutions, source),
+        Type::Enum(fields) => format_fields("enum ", fields, substitutions, source),
+        Type::Sum(items) => format!(
+            "| {}",
+            format_simple_types(items, substitutions, " | ", source)
+        ),
         Type::Intersection(items) => {
-            format!("& {}", format_simple_types(items, substitutions, " & "))
+            format!(
+                "& {}",
+                format_simple_types(items, substitutions, " & ", source)
+            )
         }
     }
 }
 
 fn format_fields(
     prefix: &str,
-    fields: &[xenomorph_common::parser::KeyValExpr<'_>],
+    fields: &[xenomorph_common::parser::KeyValExpr],
     substitutions: &HashMap<&str, &str>,
+    source: &str,
 ) -> String {
     if fields.is_empty() {
         return format!("{prefix}{{}}");
@@ -196,42 +213,64 @@ fn format_fields(
 
     let fields = fields
         .iter()
-        .map(|(name, ty, _)| format!("  {}: {},", name.v, format_simple_type(ty, substitutions)))
+        .map(|(name, ty, _)| {
+            format!(
+                "  {}: {},",
+                name.text(source),
+                format_simple_type(ty, substitutions, source)
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
     format!("{prefix}{{\n{fields}\n}}")
 }
 
 fn format_simple_types(
-    types: &[SimpleType<'_>],
+    types: &[SimpleType],
     substitutions: &HashMap<&str, &str>,
     separator: &str,
+    source: &str,
 ) -> String {
     types
         .iter()
-        .map(|ty| format_simple_type(ty, substitutions))
+        .map(|ty| format_simple_type(ty, substitutions, source))
         .collect::<Vec<_>>()
         .join(separator)
 }
 
-fn format_simple_type(ty: &SimpleType<'_>, substitutions: &HashMap<&str, &str>) -> String {
+fn format_simple_type(
+    ty: &SimpleType,
+    substitutions: &HashMap<&str, &str>,
+    source: &str,
+) -> String {
     match ty {
-        SimpleType::Optional(inner) => format!("?{}", format_simple_type(inner, substitutions)),
-        SimpleType::Literal(literal) => literal.source_text(),
-        SimpleType::Identifier(identifier, arguments) => {
-            format_named_type(identifier.v, arguments.as_deref(), substitutions)
+        SimpleType::Optional(inner) => {
+            format!("?{}", format_simple_type(inner, substitutions, source))
         }
+        SimpleType::Literal(literal) => literal.source_text(source),
+        SimpleType::Identifier(identifier, arguments) => format_named_type(
+            identifier.text(source),
+            arguments.as_deref(),
+            substitutions,
+            source,
+        ),
         SimpleType::Array(identifier, arguments) => format!(
             "{}[]",
-            format_named_type(identifier.v, arguments.as_deref(), substitutions)
+            format_named_type(
+                identifier.text(source),
+                arguments.as_deref(),
+                substitutions,
+                source
+            )
         ),
     }
 }
 
 fn format_named_type(
     name: &str,
-    arguments: Option<&[SimpleType<'_>]>,
+    arguments: Option<&[SimpleType]>,
     substitutions: &HashMap<&str, &str>,
+    source: &str,
 ) -> String {
     if arguments.is_none() {
         if let Some(substitution) = substitutions.get(name) {
@@ -243,33 +282,41 @@ fn format_named_type(
         None => name.to_string(),
         Some(arguments) => format!(
             "{name}<{}>",
-            format_simple_types(arguments, substitutions, ", ")
+            format_simple_types(arguments, substitutions, ", ", source)
         ),
     }
 }
 
-fn format_annotation(annotation: &Annotation<'_>, substitutions: &HashMap<&str, &str>) -> String {
+fn format_annotation(
+    annotation: &Annotation,
+    substitutions: &HashMap<&str, &str>,
+    source: &str,
+) -> String {
     if annotation.params.is_empty() {
-        return format!("@{}", annotation.ident.v);
+        return format!("@{}", annotation.ident.text(source));
     }
 
     format!(
         "@{}({})",
-        annotation.ident.v,
+        annotation.ident.text(source),
         annotation
             .params
             .iter()
-            .map(|expression| format_expression(expression, substitutions))
+            .map(|expression| format_expression(expression, substitutions, source))
             .collect::<Vec<_>>()
             .join(", ")
     )
 }
 
-fn format_expression(expression: &Expr<'_>, substitutions: &HashMap<&str, &str>) -> String {
+fn format_expression(
+    expression: &Expr,
+    substitutions: &HashMap<&str, &str>,
+    source: &str,
+) -> String {
     match expression {
-        Expr::Regex(token) => token.v.to_string(),
-        Expr::Annotation(annotation) => format_annotation(annotation, substitutions),
-        Expr::Type(ty) => format_type(ty, substitutions),
+        Expr::Regex(token) => token.text(source).to_string(),
+        Expr::Annotation(annotation) => format_annotation(annotation, substitutions, source),
+        Expr::Type(ty) => format_type(ty, substitutions, source),
     }
 }
 
@@ -278,12 +325,12 @@ mod tests {
     use super::*;
     use xenomorph_common::{lexer::Lexer, parser::Parser};
 
-    fn parse(source: &str) -> Vec<Declaration<'_>> {
+    fn parse(source: &str) -> Vec<Declaration> {
         let tokens = Box::leak(Box::new(
             Lexer::tokenize(Box::leak(source.to_string().into_boxed_str()))
                 .expect("hover fixture should lex"),
         ));
-        let (ast, diagnostics) = Parser::parse(tokens);
+        let (ast, diagnostics) = Parser::parse(tokens, source);
         assert!(
             diagnostics.is_empty(),
             "unexpected diagnostics: {diagnostics:#?}"
@@ -293,12 +340,11 @@ mod tests {
 
     #[test]
     fn specialized_hover_substitutes_generics_in_one_declaration_layer() {
-        let ast = parse(
-            "type Ty<T> = { field1: T, field2: Ty2[], nested: Dict<string, T> } @ann1 @ann2(P1, P2, \"asd\");",
-        );
+        let source = "type Ty<T> = { field1: T, field2: Ty2[], nested: Dict<string, T> } @ann1 @ann2(P1, P2, \"asd\");";
+        let ast = parse(source);
 
         assert_eq!(
-            format_type_declaration(&ast[0], &["string".to_string()]).as_deref(),
+            format_type_declaration(&ast[0], &["string".to_string()], source).as_deref(),
             Some(
                 "type Ty<string> = {\n  field1: string,\n  field2: Ty2[],\n  nested: Dict<string, string>,\n} @ann1 @ann2(P1, P2, \"asd\");"
             )
@@ -307,17 +353,19 @@ mod tests {
 
     #[test]
     fn unspecialized_hover_preserves_generic_constraints() {
-        let ast = parse("type Ty<T: HasLength> = T @minlen(1);");
+        let source = "type Ty<T: HasLength> = T @minlen(1);";
+        let ast = parse(source);
 
         assert_eq!(
-            format_type_declaration(&ast[0], &[]).as_deref(),
+            format_type_declaration(&ast[0], &[], source).as_deref(),
             Some("type Ty<T: HasLength> = T @minlen(1);")
         );
     }
 
     #[test]
     fn hover_finds_arguments_on_the_exact_nested_reference() {
-        let ast = parse("type Use = Dict<Ty<string>, Ty<u8>>;");
+        let source = "type Use = Dict<Ty<string>, Ty<u8>>;";
+        let ast = parse(source);
         let Declaration::Type { ty, .. } = &ast[0] else {
             panic!("expected a type declaration");
         };
@@ -329,7 +377,7 @@ mod tests {
         };
 
         assert_eq!(
-            type_arguments_at_token(&ast, second_ty),
+            type_arguments_at_token(&ast, second_ty, source),
             Some(vec!["u8".to_string()])
         );
     }

@@ -239,6 +239,7 @@ fn run_generate() {
     let mut total_counts = DiagnosticCounts::default();
 
     for module in cache.values() {
+        let module = module.read().unwrap();
         let path = module.borrow_module_path();
         let decl_count = module.borrow_declarations().len();
         let diagnostics: Vec<_> = module

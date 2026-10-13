@@ -6,55 +6,55 @@ use crate::{
 use std::collections::HashMap;
 
 /// Reports unknown type identifiers and unknown annotation names.
-pub struct NameValidator {
-    scope: ScopeInfo,
+pub struct NameValidator<'context> {
+    scope: &'context ScopeInfo,
+    source: &'context str,
     generic_params: HashMap<String, Option<String>>,
 }
 
-impl NameValidator {
-    pub fn new(scope: &ScopeInfo) -> Self {
+impl<'context> NameValidator<'context> {
+    pub fn new(scope: &'context ScopeInfo, source: &'context str) -> Self {
         Self {
-            scope: scope.clone(),
+            scope,
+            source,
             generic_params: HashMap::new(),
         }
     }
 
-    fn validate_known_type<'src>(
-        &self,
-        name: &TokenData<'src>,
-        errors: &mut Vec<XenoDiagnostic<'src>>,
-    ) -> bool {
-        if self.scope.has_type(name.v) || self.generic_params.contains_key(name.v) {
+    fn validate_known_type(&self, name: &TokenData, errors: &mut Vec<XenoDiagnostic>) -> bool {
+        if self.scope.has_type(name.text(self.source))
+            || self.generic_params.contains_key(name.text(self.source))
+        {
             true
         } else {
             errors.push(XenoDiagnostic {
-                location: (*name).clone(),
-                message: format!("Unknown type '{}'", name.v),
+                location: (*name),
+                message: format!("Unknown type '{}'", name.text(self.source)),
                 severity: crate::XenoDiagSeverity::Err,
             });
             false
         }
     }
 
-    fn validate_known_constraint<'src>(
+    fn validate_known_constraint(
         &self,
-        name: &TokenData<'src>,
-        errors: &mut Vec<XenoDiagnostic<'src>>,
+        name: &TokenData,
+        errors: &mut Vec<XenoDiagnostic>,
     ) -> bool {
-        if self.scope.has_constraint(name.v) {
+        if self.scope.has_constraint(name.text(self.source)) {
             true
         } else {
             errors.push(XenoDiagnostic {
-                location: (*name).clone(),
-                message: format!("Unknown type or trait '{}'", name.v),
+                location: (*name),
+                message: format!("Unknown type or trait '{}'", name.text(self.source)),
                 severity: crate::XenoDiagSeverity::Err,
             });
             false
         }
     }
 
-    fn resolved_argument(&self, argument: &SimpleType<'_>) -> OwnedType {
-        self.resolve_generic_references(simple_to_owned_type(argument))
+    fn resolved_argument(&self, argument: &SimpleType) -> OwnedType {
+        self.resolve_generic_references(simple_to_owned_type(argument, self.source))
     }
 
     fn resolve_generic_references(&self, candidate: OwnedType) -> OwnedType {
@@ -141,26 +141,26 @@ impl NameValidator {
         }
     }
 
-    fn validate_specialization<'src>(
+    fn validate_specialization(
         &self,
-        name: &TokenData<'src>,
-        arguments: Option<&[SimpleType<'src>]>,
-        errors: &mut Vec<XenoDiagnostic<'src>>,
+        name: &TokenData,
+        arguments: Option<&[SimpleType]>,
+        errors: &mut Vec<XenoDiagnostic>,
     ) {
         if !self.validate_known_type(name, errors) {
             return;
         }
 
-        let Some(parameters) = self.scope.generic_parameters(name.v) else {
+        let Some(parameters) = self.scope.generic_parameters(name.text(self.source)) else {
             return;
         };
         let arguments = arguments.unwrap_or(&[]);
         if parameters.len() != arguments.len() {
             errors.push(XenoDiagnostic {
-                location: (*name).clone(),
+                location: (*name),
                 message: format!(
                     "Type '{}' expects {} generic argument(s), got {}.",
-                    name.v,
+                    name.text(self.source),
                     parameters.len(),
                     arguments.len()
                 ),
@@ -182,11 +182,11 @@ impl NameValidator {
             ) {
                 constraints_are_valid = false;
                 errors.push(XenoDiagnostic {
-                    location: argument.get_last_token().clone(),
+                    location: argument.get_last_token(),
                     message: format!(
                         "Generic argument '{}' for '{}.{}' does not satisfy constraint '{}'.",
                         candidate.display_name(),
-                        name.v,
+                        name.text(self.source),
                         parameter.name,
                         constraint
                     ),
@@ -197,7 +197,7 @@ impl NameValidator {
 
         if constraints_are_valid {
             let candidate = OwnedType::Named {
-                name: name.v.to_string(),
+                name: name.text(self.source).to_string(),
                 arguments: arguments
                     .iter()
                     .map(|argument| self.resolved_argument(argument))
@@ -205,7 +205,7 @@ impl NameValidator {
             };
             if let Err(error) = self.scope.type_hierarchy.evaluate_type(&candidate) {
                 errors.push(XenoDiagnostic {
-                    location: (*name).clone(),
+                    location: (*name),
                     message: error.to_string(),
                     severity: crate::XenoDiagSeverity::Err,
                 });
@@ -214,12 +214,8 @@ impl NameValidator {
     }
 }
 
-impl<'src> AnalyzerListener<'src> for NameValidator {
-    fn on_before_decl(
-        &mut self,
-        declaration: &Declaration<'src>,
-        errors: &mut Vec<XenoDiagnostic<'src>>,
-    ) {
+impl<'src, 'context> AnalyzerListener<'src> for NameValidator<'context> {
+    fn on_before_decl(&mut self, declaration: &Declaration, errors: &mut Vec<XenoDiagnostic>) {
         self.generic_params.clear();
         if let Declaration::Type { generics, .. } = declaration {
             for (name, constraint) in generics.as_deref().unwrap_or(&[]) {
@@ -227,33 +223,32 @@ impl<'src> AnalyzerListener<'src> for NameValidator {
                     self.validate_known_constraint(constraint, errors);
                 }
                 self.generic_params.insert(
-                    name.v.to_string(),
-                    constraint.map(|constraint| constraint.v.to_string()),
+                    name.text(self.source).to_string(),
+                    constraint.map(|constraint| constraint.text(self.source).to_string()),
                 );
             }
         }
     }
 
-    fn on_after_decl(
-        &mut self,
-        _declaration: &Declaration<'src>,
-        _errors: &mut Vec<XenoDiagnostic<'src>>,
-    ) {
+    fn on_after_decl(&mut self, _declaration: &Declaration, _errors: &mut Vec<XenoDiagnostic>) {
         self.generic_params.clear();
     }
 
-    fn on_simple_type(&mut self, ty: &SimpleType<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {
+    fn on_simple_type(&mut self, ty: &SimpleType, errors: &mut Vec<XenoDiagnostic>) {
         match ty.inner() {
             SimpleType::Identifier(id, arguments) | SimpleType::Array(id, arguments) => {
                 if !self.validate_known_type(id, errors) {
                     return;
                 }
 
-                if self.generic_params.contains_key(id.v) {
+                if self.generic_params.contains_key(id.text(self.source)) {
                     if arguments.is_some() {
                         errors.push(XenoDiagnostic {
-                            location: (*id).clone(),
-                            message: format!("Generic parameter '{}' cannot take arguments.", id.v),
+                            location: (*id),
+                            message: format!(
+                                "Generic parameter '{}' cannot take arguments.",
+                                id.text(self.source)
+                            ),
                             severity: crate::XenoDiagSeverity::Err,
                         });
                     }
@@ -265,30 +260,30 @@ impl<'src> AnalyzerListener<'src> for NameValidator {
         }
     }
 
-    fn on_before_set(&mut self, set: &SetType<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {
+    fn on_before_set(&mut self, set: &SetType, errors: &mut Vec<XenoDiagnostic>) {
         let values = set.values.as_deref().unwrap_or_default();
         // An untyped prefill adopts its first value's narrowest type, so a
         // wider member forces an explicit `set<T>`.
         let target = match &set.element_type {
-            Some(element_type) => {
-                Some(self.resolve_generic_references(simple_to_owned_type(element_type)))
-            }
-            None => values
-                .first()
-                .map(|literal| OwnedType::named(literal_to_owned(literal).narrowest_type_name())),
+            Some(element_type) => Some(
+                self.resolve_generic_references(simple_to_owned_type(element_type, self.source)),
+            ),
+            None => values.first().map(|literal| {
+                OwnedType::named(literal_to_owned(literal, self.source).narrowest_type_name())
+            }),
         };
 
         let mut seen = Vec::new();
         for literal in values {
-            let value = literal_to_owned(literal);
+            let value = literal_to_owned(literal, self.source);
             if seen.iter().any(|previous: &crate::semantic::OwnedLiteral| {
                 previous.same_constant_value(&value)
             }) {
                 errors.push(XenoDiagnostic {
-                    location: literal.token().clone(),
+                    location: literal.token(),
                     message: format!(
                         "Duplicate set value '{}'. Set values must be unique.",
-                        literal.source_text()
+                        literal.source_text(self.source)
                     ),
                     severity: crate::XenoDiagSeverity::Err,
                 });
@@ -305,10 +300,10 @@ impl<'src> AnalyzerListener<'src> for NameValidator {
                 && !hierarchy.is_assignable_to(&narrowest, target)
             {
                 errors.push(XenoDiagnostic {
-                    location: literal.get_last_token().clone(),
+                    location: literal.get_last_token(),
                     message: format!(
                         "Set value '{}' is not compatible with element type '{}'.",
-                        literal.source_text(),
+                        literal.source_text(self.source),
                         target.display_name()
                     ),
                     severity: crate::XenoDiagSeverity::Err,
@@ -319,14 +314,14 @@ impl<'src> AnalyzerListener<'src> for NameValidator {
 
     fn on_before_annotation(
         &mut self,
-        name: &TokenData<'src>,
-        _args: &[Expr<'src>],
-        errors: &mut Vec<XenoDiagnostic<'src>>,
+        name: &TokenData,
+        _args: &[Expr],
+        errors: &mut Vec<XenoDiagnostic>,
     ) {
-        if !self.scope.has_annotation(name.v) {
+        if !self.scope.has_annotation(name.text(self.source)) {
             errors.push(XenoDiagnostic {
-                location: (*name).clone(),
-                message: format!("Unknown annotation '@{}'", name.v),
+                location: (*name),
+                message: format!("Unknown annotation '@{}'", name.text(self.source)),
                 severity: crate::XenoDiagSeverity::Warn,
             });
         }
@@ -364,34 +359,32 @@ mod tests {
         }
     }
 
-    fn token(value: &str) -> TokenData<'_> {
-        TokenData {
-            v: value,
-            l: 0,
-            c: 0,
-        }
+    const FIXTURE_SOURCE: &str = "set string \"a\" 123 ] \"b\" u8 1 16 i16 -256 7 i4 -8 8 >";
+    fn token(value: &str) -> TokenData {
+        let start = FIXTURE_SOURCE.find(value).unwrap();
+        TokenData::new(start, start + value.len())
     }
 
     fn integer<'src>(
         value: i64,
         bits: u64,
-        token: &'src TokenData<'src>,
-        cast: Option<&'src TokenData<'src>>,
-    ) -> Literal<'src> {
+        token: &'src TokenData,
+        cast: Option<&'src TokenData>,
+    ) -> Literal {
         Literal::Int(IntLiteral {
             value: value.into(),
             representation: IntegerRepresentation {
                 signed: value.is_negative(),
                 size: IntegerSize::Bits(bits),
             },
-            token,
-            cast,
+            token: *token,
+            cast: cast.copied(),
         })
     }
 
-    fn validate<'src>(set: &SetType<'src>) -> Vec<XenoDiagnostic<'src>> {
+    fn validate(set: &SetType) -> Vec<XenoDiagnostic> {
         let mut errors = Vec::new();
-        NameValidator::new(&scope()).on_before_set(set, &mut errors);
+        NameValidator::new(&scope(), FIXTURE_SOURCE).on_before_set(set, &mut errors);
         errors
     }
 
@@ -405,14 +398,14 @@ mod tests {
         let closing = token("]");
 
         let errors = validate(&SetType {
-            keyword: &keyword,
-            element_type: Some(SimpleType::Identifier(&element, None)),
+            keyword,
+            element_type: Some(SimpleType::Identifier(element, None)),
             values: Some(vec![
-                Literal::String("a".to_string(), &first),
-                Literal::String("a".to_string(), &duplicate),
+                Literal::String("a".to_string(), first),
+                Literal::String("a".to_string(), duplicate),
                 integer(123, 7, &number, None),
             ]),
-            last_token: &closing,
+            last_token: closing,
         });
 
         assert_eq!(errors.len(), 2, "{errors:#?}");
@@ -420,7 +413,7 @@ mod tests {
         assert!(errors[1]
             .message
             .contains("is not compatible with element type 'string'"));
-        assert_eq!(errors[1].location.v, "123");
+        assert_eq!(errors[1].location.text(FIXTURE_SOURCE), "123");
     }
 
     #[test]
@@ -432,13 +425,13 @@ mod tests {
         let closing = token("]");
 
         let errors = validate(&SetType {
-            keyword: &keyword,
-            element_type: Some(SimpleType::Identifier(&element, None)),
+            keyword,
+            element_type: Some(SimpleType::Identifier(element, None)),
             values: Some(vec![
-                Literal::String("a".to_string(), &first),
-                Literal::String("b".to_string(), &second),
+                Literal::String("a".to_string(), first),
+                Literal::String("b".to_string(), second),
             ]),
-            last_token: &closing,
+            last_token: closing,
         });
 
         assert!(errors.is_empty(), "{errors:#?}");
@@ -454,13 +447,13 @@ mod tests {
         let closing = token("]");
 
         let errors = validate(&SetType {
-            keyword: &keyword,
-            element_type: Some(SimpleType::Identifier(&element, None)),
+            keyword,
+            element_type: Some(SimpleType::Identifier(element, None)),
             values: Some(vec![
                 integer(1, 1, &plain, None),
                 integer(1, 8, &cast_value, Some(&cast)),
             ]),
-            last_token: &closing,
+            last_token: closing,
         });
 
         assert_eq!(errors.len(), 1, "{errors:#?}");
@@ -475,13 +468,13 @@ mod tests {
         let closing = token("]");
 
         let errors = validate(&SetType {
-            keyword: &keyword,
+            keyword,
             element_type: None,
             values: Some(vec![
                 integer(1, 1, &first, None),
                 integer(16, 5, &wider, None),
             ]),
-            last_token: &closing,
+            last_token: closing,
         });
 
         assert_eq!(errors.len(), 1, "{errors:#?}");
@@ -498,13 +491,13 @@ mod tests {
         let closing = token("]");
 
         let errors = validate(&SetType {
-            keyword: &keyword,
+            keyword,
             element_type: None,
             values: Some(vec![
                 integer(16, 5, &first, None),
                 integer(1, 1, &narrower, None),
             ]),
-            last_token: &closing,
+            last_token: closing,
         });
 
         assert!(errors.is_empty(), "{errors:#?}");
@@ -520,14 +513,14 @@ mod tests {
         let closing = token("]");
 
         let errors = validate(&SetType {
-            keyword: &keyword,
-            element_type: Some(SimpleType::Identifier(&element, None)),
+            keyword,
+            element_type: Some(SimpleType::Identifier(element, None)),
             values: Some(vec![
                 integer(-256, 9, &negative, None),
                 integer(1, 1, &one, None),
                 integer(7, 3, &seven, None),
             ]),
-            last_token: &closing,
+            last_token: closing,
         });
 
         assert!(errors.is_empty(), "{errors:#?}");
@@ -542,23 +535,23 @@ mod tests {
         let closing = token("]");
 
         let errors = validate(&SetType {
-            keyword: &keyword,
-            element_type: Some(SimpleType::Identifier(&element, None)),
+            keyword,
+            element_type: Some(SimpleType::Identifier(element, None)),
             values: Some(vec![
                 integer(-8, 4, &minimum, None),
                 integer(7, 3, &maximum, None),
             ]),
-            last_token: &closing,
+            last_token: closing,
         });
 
         assert!(errors.is_empty(), "{errors:#?}");
 
         let above_maximum = token("8");
         let errors = validate(&SetType {
-            keyword: &keyword,
-            element_type: Some(SimpleType::Identifier(&element, None)),
+            keyword,
+            element_type: Some(SimpleType::Identifier(element, None)),
             values: Some(vec![integer(8, 4, &above_maximum, None)]),
-            last_token: &closing,
+            last_token: closing,
         });
 
         assert_eq!(errors.len(), 1, "{errors:#?}");
@@ -574,10 +567,10 @@ mod tests {
         let closing = token(">");
 
         let errors = validate(&SetType {
-            keyword: &keyword,
-            element_type: Some(SimpleType::Identifier(&element, None)),
+            keyword,
+            element_type: Some(SimpleType::Identifier(element, None)),
             values: None,
-            last_token: &closing,
+            last_token: closing,
         });
 
         assert!(errors.is_empty(), "{errors:#?}");

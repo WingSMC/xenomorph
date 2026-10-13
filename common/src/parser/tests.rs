@@ -6,12 +6,13 @@ use crate::{
 };
 
 fn parse<'src>(
-    tokens: &'src crate::lexer::XenoTokens<'src>,
-) -> (Vec<Declaration<'src>>, Vec<XenoDiagnostic<'src>>) {
-    Parser::parse(tokens)
+    tokens: &'src crate::lexer::XenoTokens,
+    text: &'src str,
+) -> (Vec<Declaration>, Vec<XenoDiagnostic>) {
+    Parser::parse(tokens, text)
 }
 
-fn assert_no_errors(diagnostics: &[XenoDiagnostic<'_>]) {
+fn assert_no_errors(diagnostics: &[XenoDiagnostic]) {
     assert!(
         !diagnostics
             .iter()
@@ -20,9 +21,12 @@ fn assert_no_errors(diagnostics: &[XenoDiagnostic<'_>]) {
     );
 }
 
-fn type_declaration<'src>(declaration: &'src Declaration<'src>) -> (&'src str, &'src Type<'src>) {
+fn type_declaration<'src>(
+    declaration: &'src Declaration,
+    text: &'src str,
+) -> (&'src str, &'src Type) {
     match declaration {
-        Declaration::Type { name, ty, .. } => (name.v, &ty.0),
+        Declaration::Type { name, ty, .. } => (name.text(text), &ty.0),
         declaration => panic!("expected type declaration, got {declaration:?}"),
     }
 }
@@ -30,7 +34,7 @@ fn type_declaration<'src>(declaration: &'src Declaration<'src>) -> (&'src str, &
 #[test]
 fn empty_source_has_empty_ast() {
     let tokens = Lexer::tokenize("").expect("empty source must lex");
-    let (ast, diagnostics) = parse(&tokens);
+    let (ast, diagnostics) = parse(&tokens, "");
 
     assert!(ast.is_empty());
     assert!(diagnostics.is_empty());
@@ -40,7 +44,7 @@ fn empty_source_has_empty_ast() {
 fn parses_imports_and_keeps_non_fatal_information() {
     let text = source::documented_import();
     let tokens = Lexer::tokenize(&text).expect("import must lex");
-    let (ast, diagnostics) = parse(&tokens);
+    let (ast, diagnostics) = parse(&tokens, &text);
 
     assert_eq!(ast.len(), 1);
     match &ast[0] {
@@ -65,7 +69,7 @@ fn parses_documentation_and_generics() {
     );
     let text = source::documented(source::TYPE_DOCS, &generic);
     let tokens = Lexer::tokenize(&text).expect("generic type must lex");
-    let (ast, diagnostics) = parse(&tokens);
+    let (ast, diagnostics) = parse(&tokens, &text);
 
     assert_no_errors(&diagnostics);
     assert_eq!(ast.len(), 1);
@@ -77,16 +81,16 @@ fn parses_documentation_and_generics() {
             ty: (Type::Simple(SimpleType::Identifier(identifier, arguments)), _),
             ..
         } => {
-            assert_eq!(*docs, Some(source::TYPE_DOCS));
-            assert_eq!(name.v, source::TYPE_NAME);
-            assert_eq!(identifier.v, "T");
+            assert_eq!(docs.as_deref(), Some(source::TYPE_DOCS));
+            assert_eq!(name.text(&text), source::TYPE_NAME);
+            assert_eq!(identifier.text(&text), "T");
             assert!(arguments.is_none());
             assert_eq!(generics.len(), 2);
-            assert_eq!(generics[0].0.v, "T");
+            assert_eq!(generics[0].0.text(&text), "T");
             assert!(generics[0].1.is_none());
-            assert_eq!(generics[1].0.v, "U");
+            assert_eq!(generics[1].0.text(&text), "U");
             assert_eq!(
-                generics[1].1.expect("U has a constraint").v,
+                generics[1].1.expect("U has a constraint").text(&text),
                 source::IDENTIFIER
             );
         }
@@ -98,49 +102,49 @@ fn parses_documentation_and_generics() {
 fn parses_every_simple_type_and_literal_case() {
     let text = source::all_simple_types();
     let tokens = Lexer::tokenize(&text).expect("simple types must lex");
-    let (ast, diagnostics) = parse(&tokens);
+    let (ast, diagnostics) = parse(&tokens, &text);
 
     assert_no_errors(&diagnostics);
     assert_eq!(ast.len(), 10);
     assert!(matches!(
-        type_declaration(&ast[0]).1,
+        type_declaration(&ast[0], &text).1,
         Type::Simple(SimpleType::Identifier(_, _))
     ));
     assert!(matches!(
-        type_declaration(&ast[1]).1,
+        type_declaration(&ast[1], &text).1,
         Type::Simple(SimpleType::Optional(inner)) if matches!(**inner, SimpleType::Identifier(_, _))
     ));
     assert!(matches!(
-        type_declaration(&ast[2]).1,
+        type_declaration(&ast[2], &text).1,
         Type::Simple(SimpleType::Array(_, _))
     ));
     assert!(matches!(
-        type_declaration(&ast[3]).1,
+        type_declaration(&ast[3], &text).1,
         Type::Simple(SimpleType::Optional(inner)) if matches!(**inner, SimpleType::Array(_, _))
     ));
     assert!(matches!(
-        type_declaration(&ast[4]).1,
+        type_declaration(&ast[4], &text).1,
         Type::Simple(SimpleType::Literal(Literal::Int(_)))
     ));
     assert!(matches!(
-        type_declaration(&ast[5]).1,
+        type_declaration(&ast[5], &text).1,
         Type::Simple(SimpleType::Optional(inner))
             if matches!(**inner, SimpleType::Literal(Literal::Int(_)))
     ));
     assert!(matches!(
-        type_declaration(&ast[6]).1,
+        type_declaration(&ast[6], &text).1,
         Type::Simple(SimpleType::Literal(Literal::Float(_)))
     ));
     assert!(matches!(
-        type_declaration(&ast[7]).1,
+        type_declaration(&ast[7], &text).1,
         Type::Simple(SimpleType::Literal(Literal::String(_, _)))
     ));
     assert!(matches!(
-        type_declaration(&ast[8]).1,
+        type_declaration(&ast[8], &text).1,
         Type::Simple(SimpleType::Literal(Literal::Boolean(true, _)))
     ));
     assert!(matches!(
-        type_declaration(&ast[9]).1,
+        type_declaration(&ast[9], &text).1,
         Type::Simple(SimpleType::Literal(Literal::Boolean(false, _)))
     ));
 }
@@ -149,10 +153,10 @@ fn parses_every_simple_type_and_literal_case() {
 fn numeric_literals_infer_minimum_representations() {
     let text = "type Zero = 0; type Positive = 255; type Negative = -129; type SmallFloat = 1.5; type Precise = 1.234567890123456789;";
     let tokens = Lexer::tokenize(text).expect("numeric literals must lex");
-    let (ast, diagnostics) = parse(&tokens);
+    let (ast, diagnostics) = parse(&tokens, text);
 
     assert_no_errors(&diagnostics);
-    let literal_at = |index| match type_declaration(&ast[index]).1 {
+    let literal_at = |index| match type_declaration(&ast[index], text).1 {
         Type::Simple(SimpleType::Literal(literal)) => literal,
         ty => panic!("expected literal, got {ty:?}"),
     };
@@ -175,26 +179,26 @@ fn numeric_literals_infer_minimum_representations() {
 fn parses_explicit_numeric_literal_representations() {
     let text = "type Signed = 1 as i32; type Unsigned = 1 as u64; type Float = 1.5 as f64; type Exact = 1.25 as decimal; type Big = 1 as bigint;";
     let tokens = Lexer::tokenize(text).expect("numeric casts must lex");
-    let (ast, diagnostics) = parse(&tokens);
+    let (ast, diagnostics) = parse(&tokens, text);
 
     assert_no_errors(&diagnostics);
-    assert!(matches!(type_declaration(&ast[0]).1,
+    assert!(matches!(type_declaration(&ast[0], text).1,
         Type::Simple(SimpleType::Literal(Literal::Int(value)))
             if value.representation.signed
                 && value.representation.size == IntegerSize::Bits(32)
-                && value.cast.is_some_and(|cast| cast.v == "i32")));
-    assert!(matches!(type_declaration(&ast[1]).1,
+                && value.cast.is_some_and(|cast| cast.text(text) == "i32")));
+    assert!(matches!(type_declaration(&ast[1], text).1,
         Type::Simple(SimpleType::Literal(Literal::Int(value)))
             if !value.representation.signed
                 && value.representation.size == IntegerSize::Bits(64)
-                && value.cast.is_some_and(|cast| cast.v == "u64")));
-    assert!(matches!(type_declaration(&ast[2]).1,
+                && value.cast.is_some_and(|cast| cast.text(text) == "u64")));
+    assert!(matches!(type_declaration(&ast[2], text).1,
         Type::Simple(SimpleType::Literal(Literal::Float(value)))
             if value.representation.size == FloatSize::F64));
-    assert!(matches!(type_declaration(&ast[3]).1,
+    assert!(matches!(type_declaration(&ast[3], text).1,
         Type::Simple(SimpleType::Literal(Literal::Float(value)))
             if value.representation.size == FloatSize::Decimal));
-    assert!(matches!(type_declaration(&ast[4]).1,
+    assert!(matches!(type_declaration(&ast[4], text).1,
         Type::Simple(SimpleType::Literal(Literal::Int(value)))
             if value.representation.size == IntegerSize::Arbitrary));
 }
@@ -203,7 +207,7 @@ fn parses_explicit_numeric_literal_representations() {
 fn parses_numeric_casts_in_annotation_arguments() {
     let text = "type Limited = u64 @min(1 as u64);";
     let tokens = Lexer::tokenize(text).expect("numeric cast must lex");
-    let (ast, diagnostics) = parse(&tokens);
+    let (ast, diagnostics) = parse(&tokens, text);
 
     assert_no_errors(&diagnostics);
     let Declaration::Type {
@@ -216,7 +220,7 @@ fn parses_numeric_casts_in_annotation_arguments() {
     assert!(matches!(
         &annotations[0].params[0],
         Expr::Type(Type::Simple(SimpleType::Literal(Literal::Int(integer))))
-            if integer.cast.is_some_and(|cast| cast.v == "u64")
+            if integer.cast.is_some_and(|cast| cast.text(text) == "u64")
     ));
 }
 
@@ -232,7 +236,7 @@ fn rejects_invalid_or_lossy_numeric_literal_casts() {
         ),
     ] {
         let tokens = Lexer::tokenize(text).expect("invalid cast still lexes");
-        let (_, diagnostics) = parse(&tokens);
+        let (_, diagnostics) = parse(&tokens, text);
         assert!(
             diagnostics
                 .iter()
@@ -246,45 +250,45 @@ fn rejects_invalid_or_lossy_numeric_literal_casts() {
 fn postfix_arrays_do_not_conflict_with_tuples() {
     let text = source::array_and_tuple();
     let tokens = Lexer::tokenize(&text).expect("array and tuple types must lex");
-    let (ast, diagnostics) = parse(&tokens);
+    let (ast, diagnostics) = parse(&tokens, &text);
 
     assert_no_errors(&diagnostics);
     assert!(matches!(
-        type_declaration(&ast[0]).1,
+        type_declaration(&ast[0], &text).1,
         Type::Simple(SimpleType::Array(identifier, arguments))
-            if identifier.v == source::IDENTIFIER && arguments.is_none()
+            if identifier.text(&text) == source::IDENTIFIER && arguments.is_none()
     ));
     assert!(matches!(
-        type_declaration(&ast[1]).1,
+        type_declaration(&ast[1], &text).1,
         Type::Simple(SimpleType::Optional(inner))
             if matches!(&**inner, SimpleType::Array(identifier, arguments)
-                if identifier.v == source::IDENTIFIER && arguments.is_none())
+                if identifier.text(&text) == source::IDENTIFIER && arguments.is_none())
     ));
-    assert!(matches!(type_declaration(&ast[2]).1, Type::Tuple(items) if items.len() == 1));
+    assert!(matches!(type_declaration(&ast[2], &text).1, Type::Tuple(items) if items.len() == 1));
 }
 
 #[test]
 fn parses_nested_generic_specializations_as_simple_types() {
     let text = "type Box<T> = T; type Example = Box<Dict<string, Box<u8>>>; type Fields = { value: Box<string>, values: Box<u8>[], };";
     let tokens = Lexer::tokenize(text).expect("generic specializations must lex");
-    let (ast, diagnostics) = parse(&tokens);
+    let (ast, diagnostics) = parse(&tokens, text);
 
     assert_no_errors(&diagnostics);
     assert_eq!(ast.len(), 3);
     assert!(matches!(
-        type_declaration(&ast[1]).1,
+        type_declaration(&ast[1], text).1,
         Type::Simple(SimpleType::Identifier(name, Some(arguments)))
-            if name.v == "Box"
+            if name.text(text) == "Box"
                 && matches!(&arguments[0], SimpleType::Identifier(name, Some(arguments))
-                    if name.v == "Dict" && arguments.len() == 2)
+                    if name.text(text) == "Dict" && arguments.len() == 2)
     ));
     assert!(matches!(
-        type_declaration(&ast[2]).1,
+        type_declaration(&ast[2], text).1,
         Type::Struct(fields)
             if matches!(&fields[0].1, SimpleType::Identifier(name, Some(arguments))
-                    if name.v == "Box" && arguments.len() == 1)
+                    if name.text(text) == "Box" && arguments.len() == 1)
                 && matches!(&fields[1].1, SimpleType::Array(name, Some(arguments))
-                    if name.v == "Box" && arguments.len() == 1)
+                    if name.text(text) == "Box" && arguments.len() == 1)
     ));
 }
 
@@ -292,49 +296,53 @@ fn parses_nested_generic_specializations_as_simple_types() {
 fn parses_every_composite_type_case() {
     let text = source::all_composite_types();
     let tokens = Lexer::tokenize(&text).expect("composite types must lex");
-    let (ast, diagnostics) = parse(&tokens);
+    let (ast, diagnostics) = parse(&tokens, &text);
 
     assert_no_errors(&diagnostics);
     assert_eq!(ast.len(), 8);
-    assert!(matches!(type_declaration(&ast[0]).1, Type::Tuple(items) if items.is_empty()));
-    assert!(matches!(type_declaration(&ast[1]).1, Type::Tuple(items) if items.len() == 2));
+    assert!(matches!(type_declaration(&ast[0], &text).1, Type::Tuple(items) if items.is_empty()));
+    assert!(matches!(type_declaration(&ast[1], &text).1, Type::Tuple(items) if items.len() == 2));
     assert!(matches!(
-        type_declaration(&ast[2]).1,
+        type_declaration(&ast[2], &text).1,
         Type::Set(set)
             if set.element_type.is_none()
                 && set.values.as_ref().is_some_and(|values| values.len() == 2)
     ));
-    assert!(matches!(type_declaration(&ast[3]).1, Type::Struct(fields) if fields.is_empty()));
+    assert!(
+        matches!(type_declaration(&ast[3], &text).1, Type::Struct(fields) if fields.is_empty())
+    );
     assert!(matches!(
-        type_declaration(&ast[4]).1,
+        type_declaration(&ast[4], &text).1,
         Type::Struct(fields)
             if fields.len() == 2
                 && fields[0].2.is_some()
-                && fields[0].2.expect("field docs").v.contains(source::FIELD_DOCS)
+                && fields[0].2.expect("field docs").text(&text).contains(source::FIELD_DOCS)
     ));
-    assert!(matches!(type_declaration(&ast[5]).1, Type::Enum(items) if items.len() == 2));
-    assert!(matches!(type_declaration(&ast[6]).1, Type::Sum(items) if items.len() == 2));
-    assert!(matches!(type_declaration(&ast[7]).1, Type::Intersection(items) if items.len() == 2));
+    assert!(matches!(type_declaration(&ast[5], &text).1, Type::Enum(items) if items.len() == 2));
+    assert!(matches!(type_declaration(&ast[6], &text).1, Type::Sum(items) if items.len() == 2));
+    assert!(
+        matches!(type_declaration(&ast[7], &text).1, Type::Intersection(items) if items.len() == 2)
+    );
 }
 
 #[test]
 fn parses_typed_inferred_and_prefilled_sets() {
     let text = "type Open = set<string>; type Inferred = set [\"a\", \"b\"]; type Typed = set<string> [\"a\", \"b\"]; type Empty = set<string> [];";
     let tokens = Lexer::tokenize(text).expect("set types must lex");
-    let (ast, diagnostics) = parse(&tokens);
+    let (ast, diagnostics) = parse(&tokens, text);
 
     assert_no_errors(&diagnostics);
     assert_eq!(ast.len(), 4);
-    assert!(matches!(type_declaration(&ast[0]).1, Type::Set(set)
-        if matches!(&set.element_type, Some(SimpleType::Identifier(name, None)) if name.v == "string")
+    assert!(matches!(type_declaration(&ast[0], text).1, Type::Set(set)
+        if matches!(&set.element_type, Some(SimpleType::Identifier(name, None)) if name.text(text) == "string")
             && set.values.is_none()));
-    assert!(matches!(type_declaration(&ast[1]).1, Type::Set(set)
+    assert!(matches!(type_declaration(&ast[1], text).1, Type::Set(set)
         if set.element_type.is_none()
             && set.values.as_ref().is_some_and(|values| values.len() == 2)));
-    assert!(matches!(type_declaration(&ast[2]).1, Type::Set(set)
+    assert!(matches!(type_declaration(&ast[2], text).1, Type::Set(set)
         if set.element_type.is_some()
             && set.values.as_ref().is_some_and(|values| values.len() == 2)));
-    assert!(matches!(type_declaration(&ast[3]).1, Type::Set(set)
+    assert!(matches!(type_declaration(&ast[3], text).1, Type::Set(set)
         if set.element_type.is_some()
             && set.values.as_ref().is_some_and(Vec::is_empty)));
 }
@@ -343,14 +351,14 @@ fn parses_typed_inferred_and_prefilled_sets() {
 fn set_prefills_reject_non_literals() {
     let text = "type Bad = set<string> [\"a\", string, \"b\"]; type After = string;";
     let tokens = Lexer::tokenize(text).expect("invalid set prefill must still lex");
-    let (ast, diagnostics) = parse(&tokens);
+    let (ast, diagnostics) = parse(&tokens, text);
 
     assert_eq!(ast.len(), 1, "the following declaration must survive");
-    assert_eq!(type_declaration(&ast[0]).0, "After");
+    assert_eq!(type_declaration(&ast[0], text).0, "After");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic.severity == XenoDiagSeverity::Err
             && diagnostic.message.contains("only literals")
-            && diagnostic.location.v == "string"
+            && diagnostic.location.text(text) == "string"
     }));
 }
 
@@ -358,10 +366,10 @@ fn set_prefills_reject_non_literals() {
 fn rejects_bare_set_and_recovers_at_the_declaration_boundary() {
     let text = "type Bad = set; type After = string;";
     let tokens = Lexer::tokenize(text).expect("bare set must lex");
-    let (ast, diagnostics) = parse(&tokens);
+    let (ast, diagnostics) = parse(&tokens, text);
 
     assert_eq!(ast.len(), 1);
-    assert_eq!(type_declaration(&ast[0]).0, "After");
+    assert_eq!(type_declaration(&ast[0], text).0, "After");
     assert!(diagnostics
         .iter()
         .any(|diagnostic| diagnostic.message.contains("requires an element type")));
@@ -371,7 +379,7 @@ fn rejects_bare_set_and_recovers_at_the_declaration_boundary() {
 fn parses_every_annotation_expression_case() {
     let text = source::all_annotation_expressions();
     let tokens = Lexer::tokenize(&text).expect("annotations must lex");
-    let (ast, diagnostics) = parse(&tokens);
+    let (ast, diagnostics) = parse(&tokens, &text);
 
     assert_no_errors(&diagnostics);
     let Declaration::Type {
@@ -400,12 +408,14 @@ fn parses_every_annotation_expression_case() {
 fn accepts_trailing_separators_in_closed_lists_and_structs() {
     let text = source::trailing_separators();
     let tokens = Lexer::tokenize(&text).expect("trailing separators must lex");
-    let (ast, diagnostics) = parse(&tokens);
+    let (ast, diagnostics) = parse(&tokens, &text);
 
     assert_no_errors(&diagnostics);
     assert_eq!(ast.len(), 3);
-    assert!(matches!(type_declaration(&ast[0]).1, Type::Tuple(items) if items.len() == 1));
-    assert!(matches!(type_declaration(&ast[1]).1, Type::Struct(fields) if fields.len() == 1));
+    assert!(matches!(type_declaration(&ast[0], &text).1, Type::Tuple(items) if items.len() == 1));
+    assert!(
+        matches!(type_declaration(&ast[1], &text).1, Type::Struct(fields) if fields.len() == 1)
+    );
     let Declaration::Type {
         ty: (_, annotations),
         ..
@@ -420,16 +430,16 @@ fn accepts_trailing_separators_in_closed_lists_and_structs() {
 fn struct_field_failures_recover_at_commas_and_closing_braces() {
     let text = source::recoverable_struct();
     let tokens = Lexer::tokenize(&text).expect("recoverable struct must lex");
-    let (ast, diagnostics) = parse(&tokens);
+    let (ast, diagnostics) = parse(&tokens, &text);
 
     assert_eq!(ast.len(), 2, "the following declaration must survive");
     assert!(matches!(
-        type_declaration(&ast[0]).1,
+        type_declaration(&ast[0], &text).1,
         Type::Struct(fields)
-            if fields.iter().map(|(key, _, _)| key.v).collect::<Vec<_>>()
+            if fields.iter().map(|(key, _, _)| key.text(&text)).collect::<Vec<_>>()
                 == ["first", "second", "third", "fourth"]
     ));
-    assert_eq!(type_declaration(&ast[1]).0, source::SECOND_TYPE_NAME);
+    assert_eq!(type_declaration(&ast[1], &text).0, source::SECOND_TYPE_NAME);
     assert!(
         diagnostics
             .iter()
@@ -443,7 +453,7 @@ fn struct_field_failures_recover_at_commas_and_closing_braces() {
 fn warning_only_struct_still_returns_its_declaration() {
     let text = source::struct_with_dangling_docs();
     let tokens = Lexer::tokenize(&text).expect("documented struct must lex");
-    let (ast, diagnostics) = parse(&tokens);
+    let (ast, diagnostics) = parse(&tokens, &text);
 
     assert_eq!(ast.len(), 1);
     assert!(!diagnostics
@@ -459,15 +469,15 @@ fn warning_only_struct_still_returns_its_declaration() {
 fn quoted_strings_are_normalized_to_struct_field_identifiers() {
     let text = "type Payload = { \"type\": string, \"ecu.test\": bool };";
     let tokens = Lexer::tokenize(text).expect("quoted fields must lex");
-    let (ast, diagnostics) = parse(&tokens);
+    let (ast, diagnostics) = parse(&tokens, text);
 
     assert_no_errors(&diagnostics);
     assert!(matches!(
-        type_declaration(&ast[0]).1,
+        type_declaration(&ast[0], text).1,
         Type::Struct(fields)
             if fields.len() == 2
-                && fields[0].0.v == "type"
-                && fields[1].0.v == "ecu.test"
+                && fields[0].0.text(text) == "type"
+                && fields[1].0.text(text) == "ecu.test"
     ));
 }
 
@@ -475,7 +485,7 @@ fn quoted_strings_are_normalized_to_struct_field_identifiers() {
 fn unquoted_type_keyword_is_not_a_struct_field_identifier() {
     let text = "type Payload = { type: string };";
     let tokens = Lexer::tokenize(text).expect("keyword-shaped field must lex");
-    let (_, diagnostics) = parse(&tokens);
+    let (_, diagnostics) = parse(&tokens, text);
 
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic.severity == XenoDiagSeverity::Err
@@ -487,10 +497,10 @@ fn unquoted_type_keyword_is_not_a_struct_field_identifier() {
 fn declaration_recovery_continues_after_semicolon() {
     let text = source::declaration_recovery();
     let tokens = Lexer::tokenize(&text).expect("declarations must lex");
-    let (ast, diagnostics) = parse(&tokens);
+    let (ast, diagnostics) = parse(&tokens, &text);
 
     assert_eq!(ast.len(), 1);
-    assert_eq!(type_declaration(&ast[0]).0, source::SECOND_TYPE_NAME);
+    assert_eq!(type_declaration(&ast[0], &text).0, source::SECOND_TYPE_NAME);
     assert!(diagnostics.iter().any(|diagnostic| diagnostic
         .message
         .contains(source::UNKNOWN_DECLARATION_ERROR)));
@@ -500,10 +510,60 @@ fn declaration_recovery_continues_after_semicolon() {
 fn missing_semicolon_reports_unexpected_eof() {
     let text = source::type_decl_without_semicolon(source::TYPE_NAME, source::IDENTIFIER);
     let tokens = Lexer::tokenize(&text).expect("declaration must lex");
-    let (ast, diagnostics) = parse(&tokens);
+    let (ast, diagnostics) = parse(&tokens, &text);
 
     assert!(ast.is_empty());
     assert!(diagnostics
         .iter()
         .any(|diagnostic| diagnostic.message.contains(source::EOF_ERROR)));
+}
+
+#[test]
+fn incremental_declarations_match_full_parse_after_edits() {
+    let source="/** docs */ type A = { key: string }; type TreeNode = { children: Tree[] }; type Tree = |TreeNode|number;";
+    let lexed = Lexer::lex(source);
+    let old = Parser::parse_incremental(&lexed.tokens, source, None);
+    for offset in source
+        .char_indices()
+        .map(|(i, _)| i)
+        .chain(std::iter::once(source.len()))
+    {
+        for inserted in ["x", "\n", ";", "{", "\"", "/"] {
+            let replacement = format!("{}{}{}", &source[..offset], inserted, &source[offset..]);
+            let tokens = Lexer::lex(&replacement);
+            if tokens.error.is_some() {
+                continue;
+            }
+            let parsed = Parser::parse_incremental(
+                &tokens.tokens,
+                &replacement,
+                Some((&lexed.tokens, source, &old)),
+            );
+            let full = Parser::parse_incremental(&tokens.tokens, &replacement, None);
+            assert_eq!(
+                serde_json::to_value(&parsed.ast).unwrap(),
+                serde_json::to_value(&full.ast).unwrap(),
+                "edit {offset}, {inserted:?}"
+            );
+            assert_eq!(
+                parsed
+                    .diagnostics
+                    .iter()
+                    .map(|d| (&d.message, d.location))
+                    .collect::<Vec<_>>(),
+                full.diagnostics
+                    .iter()
+                    .map(|d| (&d.message, d.location))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+    let replacement = source.replace("key: string", "key: number");
+    let tokens = Lexer::lex(&replacement);
+    let parsed = Parser::parse_incremental(
+        &tokens.tokens,
+        &replacement,
+        Some((&lexed.tokens, source, &old)),
+    );
+    assert_eq!(parsed.reused_declarations, 2);
 }

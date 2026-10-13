@@ -4,6 +4,7 @@ use crate::semantic::TypeDeclarationInfo;
 
 /// Error severity level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum ErrorPhase {
     Lexer,
     Parser,
@@ -50,5 +51,5 @@ pub struct DeclarationInfo {
     /// Length of the declaration name.
     pub name_len: u32,
     /// Semantic metadata collected before validation starts.
-    pub semantic: TypeDeclarationInfo,
+    pub semantic: std::sync::Arc<TypeDeclarationInfo>,
 }

@@ -7,10 +7,10 @@ use crate::parser::{Declaration, Parser};
 #[derive(Clone, Copy, Debug)]
 struct FormatToken {
     variant: TokenVariant,
+    original_start: u32,
     start: usize,
     end: usize,
     line: usize,
-    column: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -31,7 +31,7 @@ pub fn format_xenomorph(source: &str, config: &FormatterConfig) -> String {
         let source = normalize_line_endings(source);
         return convert_line_endings(&source, output_ending);
     };
-    let (ast, _) = Parser::parse(&tokens);
+    let (ast, _) = Parser::parse(&tokens, source);
     format_xenomorph_with_syntax(source, &tokens, &ast, config)
 }
 
@@ -41,36 +41,36 @@ pub fn format_xenomorph(source: &str, config: &FormatterConfig) -> String {
 /// already retain parser results. It does not lex or parse the source again.
 pub fn format_xenomorph_with_syntax(
     source: &str,
-    tokens: &[Token<'_>],
-    ast: &[Declaration<'_>],
+    tokens: &[Token],
+    ast: &[Declaration],
     config: &FormatterConfig,
 ) -> String {
     let output_ending = output_line_ending(source, config.line_ending);
+    let fmt_tokens = format_tokens(source, tokens);
     let source = normalize_line_endings(source);
     let max_line_length = config.max_line_length.max(1);
     let indent_width = config.indent_width.max(1);
 
-    let tokens = format_tokens(&source, tokens);
-    let declarations = type_declaration_ranges(&tokens, ast);
-    let roots = core_root_openers(&tokens, &declarations);
+    let declarations = type_declaration_ranges(&fmt_tokens, ast);
+    let roots = core_root_openers(&fmt_tokens, &declarations);
     let mut breaks = annotation_breaks(
         &source,
-        &tokens,
+        &fmt_tokens,
         &declarations,
         max_line_length,
         indent_width,
     );
     breaks.extend(structural_breaks(
         &source,
-        &tokens,
+        &fmt_tokens,
         &declarations,
         &breaks,
         max_line_length,
         indent_width,
     ));
-    let trailing_commas = trailing_comma_insertions(&source, &tokens, &breaks);
+    let trailing_commas = trailing_comma_insertions(&source, &fmt_tokens, &breaks);
     let wrapped = apply_insertions(&source, &breaks, &trailing_commas);
-    let remapped_tokens = remap_token_lines(&source, &tokens, &breaks);
+    let remapped_tokens = remap_token_lines(&source, &fmt_tokens, &breaks);
     let formatted = reindent(&wrapped, &remapped_tokens, &roots, config);
 
     convert_line_endings(&formatted, output_ending)
@@ -97,18 +97,28 @@ fn convert_line_endings(source: &str, line_ending: &str) -> String {
     }
 }
 
-fn format_tokens(source: &str, tokens: &[Token<'_>]) -> Vec<FormatToken> {
-    let line_starts = line_starts(source);
+fn format_tokens(source: &str, tokens: &[Token]) -> Vec<FormatToken> {
+    let normalized = normalize_line_endings(source);
+    let starts = line_starts(&normalized);
+    let removed: Vec<_> = source
+        .match_indices("\r\n")
+        .map(|(offset, _)| offset)
+        .collect();
+    let normalize_offset =
+        |offset: u32| offset as usize - removed.partition_point(|r| *r < offset as usize);
     tokens
         .iter()
         .map(|(variant, data)| {
-            let start = byte_offset(source, &line_starts, data.l as usize, data.c as usize);
+            let start = normalize_offset(data.start);
+            let line = starts
+                .partition_point(|offset| *offset <= start)
+                .saturating_sub(1);
             FormatToken {
                 variant: *variant,
+                original_start: data.start,
                 start,
-                end: start + normalize_line_endings(data.v).len(),
-                line: data.l as usize,
-                column: data.c as usize,
+                end: normalize_offset(data.end),
+                line,
             }
         })
         .collect()
@@ -122,17 +132,6 @@ fn line_starts(source: &str) -> Vec<usize> {
             .map(|(index, _)| index.saturating_add(1)),
     );
     starts
-}
-
-fn byte_offset(source: &str, starts: &[usize], line: usize, column: usize) -> usize {
-    let start = starts.get(line).copied().unwrap_or(source.len());
-    let end = source[start..]
-        .find('\n')
-        .map_or(source.len(), |offset| start + offset);
-    source[start..end]
-        .char_indices()
-        .nth(column)
-        .map_or(end, |(offset, _)| start + offset)
 }
 
 fn structural_breaks(
@@ -395,20 +394,18 @@ fn annotation_breaks(
     breaks
 }
 
-fn type_declaration_ranges(tokens: &[FormatToken], ast: &[Declaration<'_>]) -> Vec<(usize, usize)> {
+fn type_declaration_ranges(tokens: &[FormatToken], ast: &[Declaration]) -> Vec<(usize, usize)> {
     ast.iter()
         .filter_map(|declaration| {
             let Declaration::Type { from, to, .. } = declaration else {
                 return None;
             };
-            let start = tokens.iter().position(|token| {
-                token.variant == TokenVariant::Type
-                    && token.line == from.l as usize
-                    && token.column == from.c as usize
-            })?;
+            let start = tokens
+                .binary_search_by_key(&from.start, |token| token.original_start)
+                .ok()?;
             let last_syntax_token = tokens
-                .iter()
-                .rposition(|token| token.line == to.l as usize && token.column == to.c as usize)?;
+                .binary_search_by_key(&to.start, |token| token.original_start)
+                .ok()?;
             let end = (last_syntax_token..tokens.len())
                 .find(|candidate| tokens[*candidate].variant == TokenVariant::Semicolon)?;
             Some((start, end))
@@ -819,7 +816,7 @@ mod tests {
     fn cached_syntax_entry_point_matches_the_standalone_formatter() {
         let source = "type Choice = | First | Second @maxlen(20);";
         let tokens = Lexer::tokenize(source).expect("fixture should tokenize");
-        let (ast, diagnostics) = Parser::parse(&tokens);
+        let (ast, diagnostics) = Parser::parse(&tokens, source);
         assert!(diagnostics.is_empty(), "fixture should parse cleanly");
 
         assert_eq!(

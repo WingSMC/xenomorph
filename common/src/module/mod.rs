@@ -1,18 +1,14 @@
-// Ouroboros generates constructors with one argument per stored field.
-#![allow(clippy::too_many_arguments)]
-
-use ouroboros::self_referencing;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 pub mod types;
 
 use crate::config::Config;
-use crate::lexer::{Lexer, Token, XenoTokens};
+use crate::lexer::{Lexed, Lexer, Token, XenoTokens};
 use crate::module::types::{DeclarationInfo, ErrorPhase, ModuleDiagnostic, ModulePath};
-use crate::parser::{Declaration, Parser, XenoAst};
+use crate::parser::{Declaration, Parsed, Parser, XenoAst};
 use crate::plugins::{load_plugins, LoadedPlugin, PluginMode};
 use crate::semantic::{
     Analyzer, MetadataGraph, NameCollisionValidator, TypeDeclarationInfo, BUILTIN_ANNOTATIONS,
@@ -22,15 +18,14 @@ use crate::utils::calculate_hash;
 use crate::XenoDiagSeverity;
 
 /// Information about a single module (one .xen file).
-/// Owns the source text so that all borrows from tokens/ast remain valid.
-#[self_referencing]
+/// Owns the current source and every source-indexed artifact.
 pub struct ModuleData {
     /// The absolute filesystem path.
     pub abs_path: PathBuf,
     /// Module path relative to workspace root, using '/' separators (e.g. "a/b").
     pub module_path: ModulePath,
-    /// Owned source text — tokens and AST borrow from this.
-    pub source: String,
+    /// Owned source text — tokens and AST resolve ranges against this document.
+    pub source: crate::SourceDocument,
     /// Hash of the source text, used for change detection.
     pub hash: u64,
     /// Lexer errors.
@@ -48,16 +43,177 @@ pub struct ModuleData {
     /// Changed flag
     pub changed: bool,
     /// Tokens of the module
-    #[borrows(source)]
-    #[covariant]
-    pub tokens: XenoTokens<'this>,
+    pub lexed: Lexed,
     /// AST of the module
-    #[borrows(tokens)]
-    #[covariant]
-    pub ast: XenoAst<'this>,
-    #[borrows(ast, abs_path, module_path)]
-    #[covariant]
-    pub declarations: HashMap<&'this str, DeclarationInfo>,
+    pub parsed: Parsed,
+    pub declarations: HashMap<String, DeclarationInfo>,
+}
+
+impl ModuleData {
+    pub fn borrow_abs_path(&self) -> &PathBuf {
+        &self.abs_path
+    }
+    pub fn borrow_module_path(&self) -> &ModulePath {
+        &self.module_path
+    }
+    pub fn borrow_source(&self) -> &str {
+        self.source.text()
+    }
+    pub fn borrow_hash(&self) -> &u64 {
+        &self.hash
+    }
+    pub fn borrow_lexer_errors(&self) -> &Vec<ModuleDiagnostic> {
+        &self.lexer_errors
+    }
+    pub fn borrow_parser_errors(&self) -> &Vec<ModuleDiagnostic> {
+        &self.parser_errors
+    }
+    pub fn borrow_analyzer_errors(&self) -> &Vec<ModuleDiagnostic> {
+        &self.analyzer_errors
+    }
+    pub fn borrow_collision_errors(&self) -> &Vec<ModuleDiagnostic> {
+        &self.collision_errors
+    }
+    pub fn borrow_module_errors(&self) -> &Vec<ModuleDiagnostic> {
+        &self.module_errors
+    }
+    pub fn borrow_imports(&self) -> &Vec<ModulePath> {
+        &self.imports
+    }
+    pub fn borrow_tokens(&self) -> &XenoTokens {
+        &self.lexed.tokens
+    }
+    pub fn borrow_ast(&self) -> &XenoAst {
+        &self.parsed.ast
+    }
+    pub fn borrow_declarations(&self) -> &HashMap<String, DeclarationInfo> {
+        &self.declarations
+    }
+    fn diagnostic(&self, error: crate::XenoDiagnostic, phase: ErrorPhase) -> ModuleDiagnostic {
+        let (line, column) = self.source.position(error.location.start, false);
+        ModuleDiagnostic {
+            module_path: self.module_path.clone(),
+            message: error.message,
+            location: Some((line, column, error.location.len())),
+            phase,
+            severity: error.severity,
+        }
+    }
+    fn update(&mut self, source: String, hash: u64) {
+        let lexed = Lexer::relex(self.source.text(), &self.lexed, &source);
+        let parsed = if lexed.error.is_none() {
+            Parser::parse_incremental(
+                &lexed.tokens,
+                &source,
+                Some((&self.lexed.tokens, self.source.text(), &self.parsed)),
+            )
+        } else {
+            Parsed::default()
+        };
+        // A name index selects one of several duplicate declarations. Its
+        // semantic value cannot be reused for a surviving sibling by name.
+        let mut seen = HashSet::new();
+        for declaration in &self.parsed.ast {
+            if let Declaration::Type { name, .. } = declaration {
+                let name = name.text(self.source.text());
+                if !seen.insert(name) {
+                    self.declarations.remove(name);
+                }
+            }
+        }
+        self.source = crate::SourceDocument::new(source);
+        self.hash = hash;
+        self.lexed = lexed;
+        self.parsed = parsed;
+        self.index();
+    }
+    fn index(&mut self) {
+        self.lexer_errors = self
+            .lexed
+            .error
+            .clone()
+            .into_iter()
+            .map(|e| self.diagnostic(e, ErrorPhase::Lexer))
+            .collect();
+        self.parser_errors = self
+            .parsed
+            .diagnostics
+            .iter()
+            .cloned()
+            .map(|e| self.diagnostic(e, ErrorPhase::Parser))
+            .collect();
+        self.imports = self
+            .parsed
+            .ast
+            .iter()
+            .filter_map(|d| match d {
+                Declaration::Import { path, .. } => Some(path.join("/")),
+                _ => None,
+            })
+            .collect();
+        let old_declarations = std::mem::take(&mut self.declarations);
+        let reused: HashSet<_> = self.parsed.reused_indices.iter().copied().collect();
+        self.declarations = self
+            .parsed
+            .ast
+            .iter()
+            .enumerate()
+            .filter_map(|(index, d)| match d {
+                Declaration::Type {
+                    docs,
+                    name,
+                    generics,
+                    ty,
+                    ..
+                } => {
+                    let text = name.text(self.source.text()).to_string();
+                    let (line, column) = self.source.position(name.start, false);
+                    Some((
+                        text.clone(),
+                        DeclarationInfo {
+                            name: text.clone(),
+                            module_path: self.module_path.clone(),
+                            abs_path: self.abs_path.clone(),
+                            docs: docs.clone(),
+                            line,
+                            column,
+                            name_len: name.len(),
+                            semantic: if reused.contains(&index) {
+                                old_declarations.get(&text).map(|d| Arc::clone(&d.semantic))
+                            } else {
+                                None
+                            }
+                            .unwrap_or_else(|| {
+                                Arc::new(TypeDeclarationInfo::from_ast(
+                                    generics.as_deref(),
+                                    &ty.0,
+                                    self.source.text(),
+                                ))
+                            }),
+                        },
+                    ))
+                }
+                _ => None,
+            })
+            .collect();
+        self.analyzer_errors.clear();
+        self.collision_errors.clear();
+        self.module_errors.clear();
+        self.changed = true;
+    }
+}
+
+#[derive(Clone)]
+pub struct ModuleSummary {
+    pub abs_path: PathBuf,
+    pub imports: Vec<ModulePath>,
+    pub declarations: HashMap<String, DeclarationInfo>,
+    pub references: HashSet<String>,
+}
+
+struct Change {
+    path: String,
+    names: HashSet<String>,
 }
 
 /// Determines the workspace root and entry module path from the config.
@@ -110,8 +266,10 @@ fn get_root(config: &Config) -> Result<(PathBuf, String), ModuleDiagnostic> {
 
 /// Thread-safe module registry. Single source of truth for all module data.
 pub struct XenoRegistry {
-    // TODO per-module RwLock
-    pub module_cache: RwLock<HashMap<ModulePath, ModuleData>>,
+    pub module_cache: RwLock<HashMap<ModulePath, Arc<RwLock<ModuleData>>>>,
+    pub index: RwLock<HashMap<ModulePath, ModuleSummary>>,
+    pub hierarchy: RwLock<crate::semantic::TypeHierarchy>,
+    pub coordinator: Mutex<()>,
     pub root: PathBuf,
     pub entry: String,
     pub config: Arc<Config>,
@@ -154,8 +312,13 @@ impl XenoRegistry {
                 .extend(plugin.description.metadata.annotations.clone());
         }
         let analyzer = Analyzer::new(generation_mode, &plugins);
+        let mut hierarchy = crate::semantic::TypeHierarchy::default();
+        hierarchy.insert_metadata(&metadata);
         Ok(XenoRegistry {
             module_cache: RwLock::new(HashMap::default()),
+            index: RwLock::new(HashMap::new()),
+            hierarchy: RwLock::new(hierarchy),
+            coordinator: Mutex::new(()),
             root,
             entry,
             analyzer,
@@ -296,21 +459,15 @@ impl XenoRegistry {
             }
         };
 
-        // Hash-based change detection — skip if unchanged
-        let hash = calculate_hash(&source);
-        {
-            let cache = self.module_cache.read().unwrap();
-            if let Some(existing) = cache.get(&module_path) {
-                if *existing.borrow_hash() == hash {
-                    return self.get_all_errors_for(&module_path);
-                }
-            }
-        }
-
-        self._load_module_inner(module_path, canonical, source, hash)
+        let _update = self.coordinator.lock().unwrap();
+        let changes = self
+            .ingest(module_path, canonical, source)
+            .into_iter()
+            .collect();
+        self.complete_update(changes);
+        self.get_all_cached_errors()
     }
 
-    /// Recursively loads a .xen file from disk and all its imports.
     pub fn load_module(
         &self,
         import_segments: &[&str],
@@ -318,420 +475,398 @@ impl XenoRegistry {
         import_str: Option<&str>,
     ) -> Vec<ModuleDiagnostic> {
         let (module_path, abs_path) = match self.resolve_import(import_segments, import_str) {
-            Err(e) => return vec![e],
-            Ok(fp) => fp,
+            Ok(value) => value,
+            Err(error) => return vec![error],
         };
-
-        // Skip if already loaded unless forced
+        let _update = self.coordinator.lock().unwrap();
         if !force && self.module_cache.read().unwrap().contains_key(&module_path) {
             return vec![];
         }
-
         let source = match fs::read_to_string(&abs_path) {
-            Ok(s) => s,
-            Err(e) => {
-                return vec![ModuleDiagnostic {
-                    module_path,
-                    message: format!("Failed to read file '{}': {}", abs_path.display(), e),
-                    location: None,
-                    phase: ErrorPhase::Module,
-                    severity: XenoDiagSeverity::Err,
-                }];
+            Ok(source) => source,
+            Err(error) => {
+                return vec![Self::runtime_error(format!(
+                    "Failed to read '{}': {error}",
+                    abs_path.display()
+                ))]
             }
         };
-
-        // Hash-based skip when forced
-        let hash = calculate_hash(&source);
-        if force {
-            let r = self.module_cache.read().unwrap();
-            if let Some(existing) = r.get(&module_path) {
-                if *existing.borrow_hash() == hash {
-                    return vec![];
-                }
-            }
-        }
-
-        let is_root_load = import_str.is_none();
-        let initial_errors = self._load_module_inner(module_path, abs_path, source, hash);
-        if !is_root_load {
-            return initial_errors;
-        }
-
-        // Recursive loading analyzes dependencies as soon as they become
-        // available. Re-run validation after the root graph is complete so
-        // cache-wide name constraints do not depend on sibling load order.
-        self.refresh_name_collision_diagnostics();
-        let validation_errors = self.get_all_cached_errors();
-        if self.analyzer.generation_mode
-            && !Self::has_fatal_diagnostics(&initial_errors)
-            && !Self::has_fatal_diagnostics(&validation_errors)
-        {
-            self.generate_all_cached_modules();
-            self.refresh_name_collision_diagnostics();
-        }
-        let mut errors = self.get_all_cached_errors();
-        for diagnostic in initial_errors {
-            if !errors.iter().any(|existing| {
-                existing.module_path == diagnostic.module_path
-                    && existing.message == diagnostic.message
-                    && existing.location == diagnostic.location
-                    && existing.phase == diagnostic.phase
-                    && existing.severity == diagnostic.severity
-            }) {
-                errors.push(diagnostic);
-            }
-        }
-        errors
-    }
-
-    fn _load_module_inner(
-        &self,
-        module_path: ModulePath,
-        abs_path: PathBuf,
-        source: String,
-        hash: u64,
-    ) -> Vec<ModuleDiagnostic> {
-        let mut errors: Vec<ModuleDiagnostic> = Vec::new();
-
-        let md = match Self::_create_module_data(
-            &module_path,
-            abs_path,
-            source,
-            hash,
-            &self.config.debug,
-        ) {
-            Ok(r) => r,
-            Err(e) => {
-                // Do not leave declarations from the previous version visible
-                // when the replacement source cannot be lexed.
-                self.module_cache.write().unwrap().remove(&module_path);
-                errors.extend(e);
-                return errors;
-            }
-        };
-
-        // ── Step 1: Insert into cache immediately to break import cycles ──
-        // Any recursive load_module call for this module will now find it and return early.
-        let imports = md.borrow_imports().to_vec();
-        {
-            self.module_cache
-                .write()
-                .unwrap()
-                .insert(module_path.clone(), md);
-        }
-
-        // ── Step 2: Load imports (cycle-safe now) ──
-        for import in &imports {
-            let segments: Vec<&str> = import.split('/').collect();
-            errors.extend(self.load_module(&segments, false, Some(import)));
-        }
-
-        // ── Step 3: Analyze with full scope (read lock only) ──
-        let (analyzer_errors, import_errors, lexer_errs, parser_errs) = {
-            let cache = self.module_cache.read().unwrap();
-            let md = cache.get(&module_path).unwrap();
-
-            let import_errors = self.validate_imports(md, &module_path);
-            let lexer_errs = md.borrow_lexer_errors().clone();
-            let parser_errs = md.borrow_parser_errors().clone();
-            let generation_allowed = !Self::has_fatal_diagnostics(&errors)
-                && !Self::has_fatal_diagnostics(&import_errors)
-                && !Self::has_fatal_diagnostics(&lexer_errs)
-                && !Self::has_fatal_diagnostics(&parser_errs);
-
-            // When an earlier phase failed, run validators without generator
-            // listeners. Warnings and infos leave generation mode unchanged.
-            let analysis_only;
-            let analyzer = if generation_allowed && !self.analyzer.generation_mode {
-                &self.analyzer
-            } else {
-                analysis_only = Analyzer::new(false, &self.plugins);
-                &analysis_only
-            };
-
-            let xeno_errors = analyzer.run(
-                md.borrow_ast(),
-                md,
-                &imports,
-                &cache,
-                &self.plugins,
-                &self.config.plugins.config,
-            );
-
-            let analyzer_errors: Vec<ModuleDiagnostic> = xeno_errors
-                .iter()
-                .map(|e| ModuleDiagnostic {
-                    module_path: module_path.clone(),
-                    message: e.message.clone(),
-                    location: Some((e.location.l, e.location.c, e.location.v.len() as u32)),
-                    phase: ErrorPhase::Analyzer,
-                    severity: e.severity,
-                })
-                .collect();
-
-            (analyzer_errors, import_errors, lexer_errs, parser_errs)
-        };
-
-        // ── Step 4: Write error fields back into the cached module ──
-        {
-            let mut cache = self.module_cache.write().unwrap();
-            let md = cache.get_mut(&module_path).unwrap();
-            md.with_analyzer_errors_mut(|errs: &mut Vec<ModuleDiagnostic>| {
-                *errs = analyzer_errors.clone()
-            });
-            md.with_module_errors_mut(|errs: &mut Vec<ModuleDiagnostic>| {
-                *errs = import_errors.clone()
-            });
-        }
-
-        errors.extend(lexer_errs);
-        errors.extend(parser_errs);
-        errors.extend(analyzer_errors);
-        errors.extend(import_errors);
-
-        errors
-    }
-
-    /// Re-runs module and semantic validation for every cached module that
-    /// directly or transitively imports `changed_module`.
-    ///
-    /// Importers are returned in dependency order (nearest first). A visited
-    /// set prevents circular imports from revalidating a module more than once.
-    pub fn revalidate_importers(&self, changed_module: &str) -> Vec<ModulePath> {
-        let importers = {
-            let cache = self.module_cache.read().unwrap();
-            Self::transitive_importers(&cache, changed_module)
-        };
-
-        importers
+        let changes = self
+            .ingest(module_path, abs_path, source)
             .into_iter()
-            .filter(|module_path| self.revalidate_cached_module(module_path))
-            .collect()
-    }
-
-    /// Refreshes cache-wide collision diagnostics without rebuilding semantic
-    /// type hierarchies for unaffected modules.
-    pub fn refresh_name_collision_diagnostics(&self) -> Vec<ModulePath> {
-        let diagnostics = {
-            let cache = self.module_cache.read().unwrap();
-            let mut type_owners: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-            for (module_path, module) in cache.iter() {
-                for declaration in module.borrow_declarations().values() {
-                    type_owners
-                        .entry(declaration.name.clone())
-                        .or_default()
-                        .insert(module_path.clone());
-                }
-            }
-
-            let mut static_types: HashSet<String> = BUILTIN_TYPES
-                .iter()
-                .map(|semantic_type| semantic_type.name.to_string())
-                .collect();
-            for plugin in &self.plugins {
-                static_types.extend(plugin.description.metadata.types.keys().cloned());
-            }
-
-            cache
-                .iter()
-                .map(|(module_path, module)| {
-                    let collisions =
-                        NameCollisionValidator::new(module_path, &type_owners, &static_types)
-                            .validate(module.borrow_ast());
-                    let collision_diagnostics = collisions
-                        .into_iter()
-                        .map(|diagnostic| ModuleDiagnostic {
-                            module_path: module_path.clone(),
-                            message: diagnostic.message,
-                            location: Some((
-                                diagnostic.location.l,
-                                diagnostic.location.c,
-                                diagnostic.location.v.len() as u32,
-                            )),
-                            phase: ErrorPhase::Analyzer,
-                            severity: diagnostic.severity,
-                        })
-                        .collect();
-                    (module_path.clone(), collision_diagnostics)
-                })
-                .collect::<HashMap<_, _>>()
-        };
-
-        let mut module_paths: Vec<_> = diagnostics.keys().cloned().collect();
-        module_paths.sort();
-        let mut cache = self.module_cache.write().unwrap();
-        for (module_path, collision_diagnostics) in diagnostics {
-            if let Some(module) = cache.get_mut(&module_path) {
-                module.with_collision_errors_mut(|errors| *errors = collision_diagnostics);
-            }
-        }
-        module_paths
-    }
-
-    fn generate_all_cached_modules(&self) {
-        let module_paths = {
-            let cache = self.module_cache.read().unwrap();
-            Self::dependency_order(&cache, &self.entry)
-        };
-        for module_path in module_paths {
-            self.revalidate_cached_module(&module_path);
-        }
-    }
-
-    fn dependency_order(cache: &HashMap<ModulePath, ModuleData>, entry: &str) -> Vec<ModulePath> {
-        fn visit(
-            module_path: &str,
-            cache: &HashMap<ModulePath, ModuleData>,
-            visiting: &mut HashSet<ModulePath>,
-            visited: &mut HashSet<ModulePath>,
-            result: &mut Vec<ModulePath>,
-        ) {
-            if visited.contains(module_path) || !visiting.insert(module_path.to_string()) {
-                return;
-            }
-            if let Some(module) = cache.get(module_path) {
-                for import in module.borrow_imports() {
-                    visit(import, cache, visiting, visited, result);
-                }
-            }
-            visiting.remove(module_path);
-            if visited.insert(module_path.to_string()) {
-                result.push(module_path.to_string());
-            }
-        }
-
-        let mut visiting = HashSet::new();
-        let mut visited = HashSet::new();
-        let mut result = Vec::new();
-        visit(entry, cache, &mut visiting, &mut visited, &mut result);
-        let mut remaining: Vec<_> = cache
-            .keys()
-            .filter(|module_path| !visited.contains(*module_path))
-            .cloned()
             .collect();
-        remaining.sort();
-        for module_path in remaining {
-            visit(
-                &module_path,
-                cache,
-                &mut visiting,
-                &mut visited,
-                &mut result,
+        self.complete_update(changes);
+        self.get_all_cached_errors()
+    }
+
+    fn ingest(&self, module_path: String, abs_path: PathBuf, source: String) -> Option<Change> {
+        let hash = calculate_hash(&source);
+        let handle = {
+            let mut modules = self.module_cache.write().unwrap();
+            modules
+                .entry(module_path.clone())
+                .or_insert_with(|| {
+                    Arc::new(RwLock::new(
+                        Self::_create_module_data(
+                            &module_path,
+                            abs_path,
+                            String::new(),
+                            calculate_hash(&""),
+                            &self.config.debug,
+                        )
+                        .unwrap(),
+                    ))
+                })
+                .clone()
+        };
+        // Source and all indexes are replaced while the same module writer is held.
+        let mut module = handle.write().unwrap();
+        if self.index.read().unwrap().contains_key(&module_path)
+            && module.hash == hash
+            && module.borrow_source() == source
+        {
+            return None;
+        }
+        let mut names: HashSet<_> = module.declarations.keys().cloned().collect();
+        module.update(source, hash);
+        if self.config.debug.tokens {
+            eprint!("{:?}", module.borrow_tokens());
+        }
+        if self.config.debug.ast {
+            eprint!("{:?}", module.borrow_ast());
+        }
+        let summary = ModuleSummary {
+            abs_path: module.abs_path.clone(),
+            imports: module.imports.clone(),
+            declarations: module.declarations.clone(),
+            references: module
+                .borrow_tokens()
+                .iter()
+                .filter(|(kind, _)| *kind == crate::lexer::TokenVariant::Identifier)
+                .map(|(_, r)| r.text(module.borrow_source()).to_string())
+                .collect(),
+        };
+        names.extend(summary.declarations.keys().cloned());
+        let mut hierarchy = self.hierarchy.write().unwrap();
+        hierarchy.retain_module_declarations(
+            &module_path,
+            &summary.declarations.keys().cloned().collect(),
+        );
+        let index = self.index.read().unwrap();
+        let previous = index.get(&module_path);
+        hierarchy.register_module(module_path.clone(), summary.imports.clone());
+        for d in summary.declarations.values() {
+            if previous
+                .and_then(|m| m.declarations.get(&d.name))
+                .is_some_and(|old| Arc::ptr_eq(&old.semantic, &d.semantic))
+            {
+                continue;
+            }
+            hierarchy.insert_declaration(
+                module_path.clone(),
+                d.name.clone(),
+                (*d.semantic).clone(),
             );
         }
-        result
+        drop(index);
+        self.index
+            .write()
+            .unwrap()
+            .insert(module_path.clone(), summary);
+        Some(Change {
+            path: module_path,
+            names,
+        })
     }
 
-    fn transitive_importers(
-        cache: &HashMap<ModulePath, ModuleData>,
-        changed_module: &str,
-    ) -> Vec<ModulePath> {
-        let mut reverse_imports: HashMap<ModulePath, Vec<ModulePath>> = HashMap::new();
-        for (module_path, module) in cache {
-            for import in module.borrow_imports() {
-                reverse_imports
+    fn complete_update(&self, mut changes: Vec<Change>) {
+        if changes.is_empty() {
+            return;
+        }
+        // Ingest new imports before analyzing any module. No module lock is held
+        // while another module is loaded, including malformed cyclic imports.
+        loop {
+            let pending: BTreeSet<_> = {
+                let index = self.index.read().unwrap();
+                index
+                    .values()
+                    .flat_map(|m| &m.imports)
+                    .filter(|path| !index.contains_key(*path))
+                    .cloned()
+                    .collect()
+            };
+            let mut loaded = false;
+            for path in pending {
+                if let Ok((module, abs)) = self.resolve_import(&[], Some(&path)) {
+                    if let Ok(source) = fs::read_to_string(&abs) {
+                        if let Some(change) = self.ingest(module, abs, source) {
+                            changes.push(change);
+                        }
+                        loaded = true;
+                    }
+                }
+            }
+            if !loaded {
+                break;
+            }
+        }
+        let affected = {
+            let index = self.index.read().unwrap();
+            let mut affected: HashSet<_> = changes.iter().map(|c| c.path.clone()).collect();
+            let names: HashSet<_> = changes.iter().flat_map(|c| c.names.iter()).collect();
+            for (path, module) in index.iter() {
+                if module.references.iter().any(|name| names.contains(name)) {
+                    affected.insert(path.clone());
+                }
+            }
+            let mut reverse: HashMap<&str, Vec<&str>> = HashMap::new();
+            for (path, module) in index.iter() {
+                for import in &module.imports {
+                    reverse.entry(import).or_default().push(path);
+                }
+            }
+            let mut pending: VecDeque<_> = affected.iter().cloned().collect();
+            while let Some(path) = pending.pop_front() {
+                for importer in reverse.get(path.as_str()).into_iter().flatten() {
+                    if affected.insert((*importer).to_string()) {
+                        pending.push_back((*importer).to_string());
+                    }
+                }
+            }
+            affected
+        };
+        let owners = self.collision_owners();
+        let (order, blocked) = self.graph_order();
+        // Kahn's remaining vertices are cycles and every importer of a cycle.
+        for path in blocked {
+            let handle = self.module_cache.read().unwrap().get(&path).cloned();
+            if let Some(handle) = handle {
+                let mut module = handle.write().unwrap();
+                self.update_collisions(&mut module, &path, &owners);
+                module.analyzer_errors.clear();
+                module.module_errors = self.validate_imports(&module, &path);
+                let location = module.borrow_ast().iter().find_map(|d| match d {
+                    Declaration::Import { location, .. } => {
+                        let (line, column) = module.source.position(location.start, false);
+                        Some((line, column, location.len()))
+                    }
+                    _ => None,
+                });
+                module.module_errors.push(ModuleDiagnostic{module_path:path,message:"Module dependency cycle; semantic scans are deferred until the cycle is removed".into(),location,phase:ErrorPhase::Module,severity:XenoDiagSeverity::Err});
+            }
+        }
+        for path in order {
+            let was_blocked = self
+                .get_all_errors_for(&path)
+                .iter()
+                .any(|d| d.message.starts_with("Module dependency cycle"));
+            if affected.contains(&path) || was_blocked {
+                self.revalidate_cached_module(&path, &owners);
+            }
+        }
+    }
+
+    fn graph_order(&self) -> (Vec<String>, Vec<String>) {
+        let index = self.index.read().unwrap();
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        let mut importers: HashMap<String, Vec<String>> = HashMap::new();
+        for (path, module) in index.iter() {
+            let imports: HashSet<_> = module
+                .imports
+                .iter()
+                .filter(|p| index.contains_key(*p))
+                .collect();
+            counts.insert(path.clone(), imports.len());
+            for import in imports {
+                importers
                     .entry(import.clone())
                     .or_default()
-                    .push(module_path.clone());
+                    .push(path.clone());
             }
         }
-        for importers in reverse_imports.values_mut() {
-            importers.sort();
-            importers.dedup();
+        let mut ready: BTreeSet<_> = counts
+            .iter()
+            .filter(|(_, n)| **n == 0)
+            .map(|(p, _)| p.clone())
+            .collect();
+        let mut order = vec![];
+        while let Some(path) = ready.pop_first() {
+            counts.remove(&path);
+            if let Some(parents) = importers.get(&path) {
+                for parent in parents {
+                    let count = counts.get_mut(parent).unwrap();
+                    *count -= 1;
+                    if *count == 0 {
+                        ready.insert(parent.clone());
+                    }
+                }
+            }
+            order.push(path);
         }
+        let mut blocked: Vec<_> = counts.into_keys().collect();
+        blocked.sort();
+        (order, blocked)
+    }
 
+    pub fn revalidate_importers(&self, changed_module: &str) -> Vec<ModulePath> {
+        // Ingestion already performed the coordinated pass. This API reports the
+        // affected modules for callers that publish editor diagnostics.
+        let index = self.index.read().unwrap();
+        Self::transitive_importers(&index, changed_module)
+    }
+    fn collision_owners(&self) -> BTreeMap<String, BTreeSet<String>> {
+        let index = self.index.read().unwrap();
+        let mut owners: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for (path, module) in index.iter() {
+            for name in module.declarations.keys() {
+                owners.entry(name.clone()).or_default().insert(path.clone());
+            }
+        }
+        owners
+    }
+    fn update_collisions(
+        &self,
+        module: &mut ModuleData,
+        path: &str,
+        owners: &BTreeMap<String, BTreeSet<String>>,
+    ) {
+        let static_types = self.metadata.types.keys().cloned().collect();
+        let diagnostics =
+            NameCollisionValidator::new(path, module.borrow_source(), owners, &static_types)
+                .validate(module.borrow_ast());
+        module.collision_errors = diagnostics
+            .into_iter()
+            .map(|d| module.diagnostic(d, ErrorPhase::Analyzer))
+            .collect();
+    }
+    pub fn refresh_name_collision_diagnostics(&self) -> Vec<ModulePath> {
+        let _update = self.coordinator.lock().unwrap();
+        let owners = self.collision_owners();
+        let handles = self.module_cache.read().unwrap().clone();
+        let mut paths = vec![];
+        for (path, handle) in handles {
+            self.update_collisions(&mut handle.write().unwrap(), &path, &owners);
+            paths.push(path);
+        }
+        paths.sort();
+        paths
+    }
+    fn transitive_importers(
+        cache: &HashMap<ModulePath, ModuleSummary>,
+        changed_module: &str,
+    ) -> Vec<ModulePath> {
         let mut visited = HashSet::from([changed_module.to_string()]);
         let mut pending = VecDeque::from([changed_module.to_string()]);
-        let mut result = Vec::new();
-
-        while let Some(imported_module) = pending.pop_front() {
-            let Some(importers) = reverse_imports.get(&imported_module) else {
-                continue;
-            };
-            for importer in importers {
-                if visited.insert(importer.clone()) {
-                    result.push(importer.clone());
-                    pending.push_back(importer.clone());
+        let mut result = vec![];
+        while let Some(path) = pending.pop_front() {
+            let mut next: Vec<_> = cache
+                .iter()
+                .filter(|(_, m)| m.imports.contains(&path))
+                .map(|(p, _)| p.clone())
+                .collect();
+            next.sort();
+            for p in next {
+                if visited.insert(p.clone()) {
+                    pending.push_back(p.clone());
+                    result.push(p);
                 }
             }
         }
-
         result
     }
-
-    fn revalidate_cached_module(&self, module_path: &str) -> bool {
-        let validation = {
-            let cache = self.module_cache.read().unwrap();
-            let Some(module) = cache.get(module_path) else {
-                return false;
-            };
-
-            let imports = module.borrow_imports().to_vec();
-            let import_errors = self.validate_imports(module, module_path);
-            let lexer_errors = module.borrow_lexer_errors().clone();
-            let parser_errors = module.borrow_parser_errors().clone();
-            let imports_have_fatal_diagnostics = imports.iter().any(|import| {
-                cache.get(import).is_some_and(|imported_module| {
-                    imported_module
-                        .borrow_lexer_errors()
-                        .iter()
-                        .chain(imported_module.borrow_parser_errors().iter())
-                        .chain(imported_module.borrow_analyzer_errors().iter())
-                        .chain(imported_module.borrow_collision_errors().iter())
-                        .chain(imported_module.borrow_module_errors().iter())
-                        .any(|diagnostic| diagnostic.severity == XenoDiagSeverity::Err)
-                })
-            });
-            let generation_allowed = !imports_have_fatal_diagnostics
-                && !Self::has_fatal_diagnostics(&import_errors)
-                && !Self::has_fatal_diagnostics(&lexer_errors)
-                && !Self::has_fatal_diagnostics(&parser_errors);
-
-            let analysis_only;
-            let analyzer = if generation_allowed {
-                &self.analyzer
-            } else {
-                analysis_only = Analyzer::new(false, &self.plugins);
-                &analysis_only
-            };
-            let diagnostics = analyzer.run(
-                module.borrow_ast(),
-                module,
-                &imports,
-                &cache,
-                &self.plugins,
-                &self.config.plugins.config,
-            );
-            let analyzer_errors = diagnostics
-                .iter()
-                .map(|diagnostic| ModuleDiagnostic {
-                    module_path: module_path.to_string(),
-                    message: diagnostic.message.clone(),
-                    location: Some((
-                        diagnostic.location.l,
-                        diagnostic.location.c,
-                        diagnostic.location.v.len() as u32,
-                    )),
-                    phase: ErrorPhase::Analyzer,
-                    severity: diagnostic.severity,
-                })
-                .collect::<Vec<_>>();
-
-            (analyzer_errors, import_errors)
-        };
-
-        let mut cache = self.module_cache.write().unwrap();
-        let Some(module) = cache.get_mut(module_path) else {
+    #[cfg(test)]
+    fn dependency_order(
+        cache: &HashMap<ModulePath, ModuleSummary>,
+        entry: &str,
+    ) -> Vec<ModulePath> {
+        fn visit(
+            cache: &HashMap<ModulePath, ModuleSummary>,
+            path: &str,
+            seen: &mut HashSet<String>,
+            out: &mut Vec<String>,
+        ) {
+            if !seen.insert(path.to_string()) {
+                return;
+            }
+            if let Some(m) = cache.get(path) {
+                for i in &m.imports {
+                    visit(cache, i, seen, out)
+                }
+                out.push(path.to_string());
+            }
+        }
+        let mut seen = HashSet::new();
+        let mut out = vec![];
+        visit(cache, entry, &mut seen, &mut out);
+        let mut rest: Vec<_> = cache.keys().collect();
+        rest.sort();
+        for p in rest {
+            visit(cache, p, &mut seen, &mut out)
+        }
+        out
+    }
+    fn revalidate_cached_module(
+        &self,
+        path: &str,
+        owners: &BTreeMap<String, BTreeSet<String>>,
+    ) -> bool {
+        let handle = self.module_cache.read().unwrap().get(path).cloned();
+        let Some(handle) = handle else {
             return false;
         };
-        module.with_analyzer_errors_mut(|errors| *errors = validation.0);
-        module.with_module_errors_mut(|errors| *errors = validation.1);
+        let mut module = handle.write().unwrap();
+        self.update_collisions(&mut module, path, owners);
+        let index = self.index.read().unwrap();
+        let mut hierarchy = self.hierarchy.read().unwrap().clone();
+        hierarchy.set_current_module(path);
+        let scope = crate::semantic::ScopeInfo {
+            module_path: path.into(),
+            abs_path: module.abs_path.clone(),
+            own_types: module.declarations.keys().cloned().collect(),
+            imported_types: module
+                .imports
+                .iter()
+                .filter_map(|p| {
+                    index
+                        .get(p)
+                        .map(|m| (p.clone(), m.declarations.keys().cloned().collect()))
+                })
+                .collect(),
+            builtin_types: self.metadata.types.keys().cloned().collect(),
+            known_annotations: self.metadata.annotations.keys().cloned().collect(),
+            type_hierarchy: hierarchy,
+            annotations: self.metadata.annotations.clone(),
+        };
+        drop(index);
+        let import_errors = self.validate_imports(&module, path);
+        let generation_allowed = !Self::has_fatal_diagnostics(&import_errors)
+            && module.lexer_errors.is_empty()
+            && !Self::has_fatal_diagnostics(&module.parser_errors)
+            && !Self::has_fatal_diagnostics(&module.collision_errors)
+            && module
+                .imports
+                .iter()
+                .all(|p| !Self::has_fatal_diagnostics(&self.get_all_errors_for(p)));
+        let analysis_only = Analyzer::new(false, &self.plugins);
+        let analyzer = if generation_allowed {
+            &self.analyzer
+        } else {
+            &analysis_only
+        };
+        let diagnostics = analyzer.run_scope(
+            module.borrow_ast(),
+            module.borrow_source(),
+            &scope,
+            &self.plugins,
+        );
+        module.analyzer_errors = diagnostics
+            .into_iter()
+            .map(|d| module.diagnostic(d, ErrorPhase::Analyzer))
+            .collect();
+        module.module_errors = import_errors;
         true
     }
 
-    // ── Import resolution & validation ──────────────────────────────
-
-    /// Resolves an import path (e.g. `["a", "b"]`) relative to the workspace root.
     pub fn resolve_import(
         &self,
         import_array: &[&str],
@@ -761,7 +896,10 @@ impl XenoRegistry {
         for decl in module.borrow_ast().iter() {
             if let Declaration::Import { path, location } = decl {
                 let segments = path.to_vec();
-                match self.resolve_import(&segments, None) {
+                match self.resolve_import(
+                    &segments.iter().map(String::as_str).collect::<Vec<_>>(),
+                    None,
+                ) {
                     Ok((_, abs_path)) => {
                         if !abs_path.exists() {
                             errors.push(ModuleDiagnostic {
@@ -771,7 +909,11 @@ impl XenoRegistry {
                                     path.join("/"),
                                     abs_path.display()
                                 ),
-                                location: Some((location.l, location.c, location.v.len() as u32)),
+                                location: Some((
+                                    location.line(module.borrow_source()),
+                                    location.column(module.borrow_source()),
+                                    location.len(),
+                                )),
                                 phase: ErrorPhase::Analyzer,
                                 severity: XenoDiagSeverity::Err,
                             });
@@ -781,7 +923,11 @@ impl XenoRegistry {
                         errors.push(ModuleDiagnostic {
                             module_path: module_path.to_string(),
                             message: format!("Cannot resolve module '{}'", path.join("/")),
-                            location: Some((location.l, location.c, location.v.len() as u32)),
+                            location: Some((
+                                location.line(module.borrow_source()),
+                                location.column(module.borrow_source()),
+                                location.len(),
+                            )),
                             phase: ErrorPhase::Analyzer,
                             severity: XenoDiagSeverity::Err,
                         });
@@ -832,268 +978,111 @@ impl XenoRegistry {
 
     /// Purges every loaded module and returns the number removed.
     pub fn purge_module_cache(&self) -> usize {
-        let mut cache = self.module_cache.write().unwrap();
-        let removed = cache.len();
-        cache.clear();
-        removed
+        let _update = self.coordinator.lock().unwrap();
+        let mut modules = self.module_cache.write().unwrap();
+        let len = modules.len();
+        modules.clear();
+        self.index.write().unwrap().clear();
+        let mut hierarchy = crate::semantic::TypeHierarchy::default();
+        hierarchy.insert_metadata(&self.metadata);
+        *self.hierarchy.write().unwrap() = hierarchy;
+        len
     }
-
-    /// Runs a closure with read access to a module's cached tokens and AST.
-    // allow async closures
-    pub fn with_module<T, F>(&self, module_path: &str, f: F) -> Option<T>
-    where
-        F: for<'a> FnOnce(&'a [Token<'a>], &'a [Declaration<'a>], &'a ModuleData) -> T,
-    {
-        let cache = self.module_cache.read().unwrap();
-        let module = cache.get(module_path)?;
-        Some(f(module.borrow_tokens(), module.borrow_ast(), module))
+    pub fn with_module<T>(
+        &self,
+        path: &str,
+        f: impl for<'a> FnOnce(&'a [Token], &'a [Declaration], &'a ModuleData) -> T,
+    ) -> Option<T> {
+        let handle = self.module_cache.read().unwrap().get(path).cloned()?;
+        let module = handle.read().unwrap();
+        Some(f(module.borrow_tokens(), module.borrow_ast(), &module))
     }
-
-    /// Gets all errors for a specific module.
-    pub fn get_all_errors_for(&self, module_path: &str) -> Vec<ModuleDiagnostic> {
-        let cache = self.module_cache.read().unwrap();
-        if let Some(module) = cache.get(module_path) {
-            let mut all = Vec::new();
-            all.extend(module.borrow_lexer_errors().iter().cloned());
-            all.extend(module.borrow_parser_errors().iter().cloned());
-            all.extend(module.borrow_analyzer_errors().iter().cloned());
-            all.extend(module.borrow_collision_errors().iter().cloned());
-            all.extend(module.borrow_module_errors().iter().cloned());
-            all
-        } else {
-            vec![]
-        }
+    pub fn get_all_errors_for(&self, path: &str) -> Vec<ModuleDiagnostic> {
+        self.with_module(path, |_, _, m| {
+            m.lexer_errors
+                .iter()
+                .chain(&m.parser_errors)
+                .chain(&m.analyzer_errors)
+                .chain(&m.collision_errors)
+                .chain(&m.module_errors)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
     }
-
     fn get_all_cached_errors(&self) -> Vec<ModuleDiagnostic> {
-        let cache = self.module_cache.read().unwrap();
-        let mut module_paths: Vec<_> = cache.keys().cloned().collect();
-        module_paths.sort();
-        module_paths
+        let mut paths: Vec<_> = self.module_cache.read().unwrap().keys().cloned().collect();
+        paths.sort();
+        paths
             .into_iter()
-            .flat_map(|module_path| {
-                let module = cache
-                    .get(&module_path)
-                    .expect("cached module path should remain available");
-                module
-                    .borrow_lexer_errors()
-                    .iter()
-                    .chain(module.borrow_parser_errors())
-                    .chain(module.borrow_analyzer_errors())
-                    .chain(module.borrow_collision_errors())
-                    .chain(module.borrow_module_errors())
-                    .cloned()
-                    .collect::<Vec<_>>()
-            })
+            .flat_map(|p| self.get_all_errors_for(&p))
             .collect()
     }
-
-    /// Gets errors of a specific phase for a module.
-    pub fn get_errors_by_phase(
-        &self,
-        module_path: &str,
-        phase: ErrorPhase,
-    ) -> Vec<ModuleDiagnostic> {
-        let cache = self.module_cache.read().unwrap();
-        if let Some(module) = cache.get(module_path) {
-            match phase {
-                ErrorPhase::Lexer => module.borrow_lexer_errors().clone(),
-                ErrorPhase::Parser => module.borrow_parser_errors().clone(),
-                ErrorPhase::Analyzer => module
-                    .borrow_analyzer_errors()
-                    .iter()
-                    .chain(module.borrow_collision_errors())
-                    .cloned()
-                    .collect(),
-                ErrorPhase::Module => module.borrow_module_errors().clone(),
-            }
-        } else {
-            vec![]
-        }
+    pub fn get_errors_by_phase(&self, path: &str, phase: ErrorPhase) -> Vec<ModuleDiagnostic> {
+        self.get_all_errors_for(path)
+            .into_iter()
+            .filter(|d| d.phase == phase)
+            .collect()
     }
-
-    // ── Declaration lookup ──────────────────────────────────────────
-
     pub fn find_declaration(&self, current_module: &str, name: &str) -> Option<DeclarationInfo> {
-        self._find_declaration(
-            current_module,
-            name,
-            &self.module_cache.read().unwrap(),
-            &mut HashSet::new(),
-        )
+        let index = self.index.read().unwrap();
+        let module = index.get(current_module)?;
+        module
+            .declarations
+            .get(name)
+            .or_else(|| {
+                module
+                    .imports
+                    .iter()
+                    .find_map(|p| index.get(p)?.declarations.get(name))
+            })
+            .cloned()
     }
-
-    fn _find_declaration<'s, 'c: 's>(
-        &self,
-        current_module: &'c str,
-        name: &str,
-        cache: &'c HashMap<String, ModuleData>,
-        tried: &'s mut HashSet<&'c str>,
-    ) -> Option<DeclarationInfo> {
-        tried.insert(current_module);
-
-        let module = cache.get(current_module)?;
-        if let Some(d) = module.borrow_declarations().get(&name) {
-            return Some(d.clone());
-        }
-
-        for import in module.borrow_imports() {
-            if tried.contains(import.as_str()) {
-                continue;
-            }
-            tried.insert(import);
-            if let Some(m) = cache.get(import) {
-                if let Some(d) = m.borrow_declarations().get(name) {
-                    return Some(d.clone());
-                }
-            }
-        }
-
-        None
-    }
-
     pub fn get_all_declarations_in_scope(&self, current_module: &str) -> Vec<DeclarationInfo> {
-        let mut decls = Vec::new();
-        self._get_all_declarations_in_scope(
-            current_module,
-            &mut decls,
-            &self.module_cache.read().unwrap(),
-            &mut HashSet::new(),
-        );
-        decls
-    }
-
-    fn _get_all_declarations_in_scope<'s, 'c: 's>(
-        &self,
-        current_module: &'c str,
-        decls: &mut Vec<DeclarationInfo>,
-        cache: &'c HashMap<String, ModuleData>,
-        tried: &'s mut HashSet<&'c str>,
-    ) {
-        tried.insert(current_module);
-
-        if let Some(m) = cache.get(current_module) {
-            decls.extend(m.borrow_declarations().values().cloned());
-
-            for import in m.borrow_imports() {
-                if tried.contains(import.as_str()) {
-                    continue;
-                }
-                if let Some(im) = cache.get(import) {
-                    decls.extend(im.borrow_declarations().values().cloned());
-                }
+        let index = self.index.read().unwrap();
+        let Some(module) = index.get(current_module) else {
+            return vec![];
+        };
+        let mut result: Vec<_> = module.declarations.values().cloned().collect();
+        for p in &module.imports {
+            if let Some(m) = index.get(p) {
+                result.extend(m.declarations.values().cloned())
             }
         }
+        result
     }
-
-    // ── Internal ────────────────────────────────────────────────────
 
     fn _create_module_data(
         module_path: &ModulePath,
         abs_path: PathBuf,
         source: String,
         hash: u64,
-        debug: &crate::config::DebugConfig,
+        _debug: &crate::config::DebugConfig,
     ) -> Result<ModuleData, Vec<ModuleDiagnostic>> {
-        // Collect parser errors via shared mutability since ouroboros closures
-        // can't write to head fields during construction.
-        let parser_errors_cell: std::cell::RefCell<Vec<ModuleDiagnostic>> =
-            std::cell::RefCell::new(Vec::new());
-
-        let mut md = ModuleDataTryBuilder {
+        let lexed = Lexer::lex(&source);
+        let parsed = if lexed.error.is_none() {
+            Parser::parse_incremental(&lexed.tokens, &source, None)
+        } else {
+            Parsed::default()
+        };
+        let mut module = ModuleData {
             abs_path,
             module_path: module_path.clone(),
-            source,
+            source: crate::SourceDocument::new(source),
             hash,
+            lexed,
+            parsed,
+            lexer_errors: vec![],
+            parser_errors: vec![],
+            analyzer_errors: vec![],
+            collision_errors: vec![],
+            module_errors: vec![],
+            imports: vec![],
             changed: true,
-            lexer_errors: Vec::new(),
-            parser_errors: Vec::new(),
-            analyzer_errors: Vec::new(),
-            collision_errors: Vec::new(),
-            module_errors: Vec::new(),
-            imports: Vec::new(),
-            tokens_builder: |source| {
-                Lexer::tokenize(source)
-                    .inspect(|ts| {
-                        if debug.tokens {
-                            eprint!("{:?}", ts);
-                        }
-                    })
-                    .map_err(|e| {
-                        vec![ModuleDiagnostic {
-                            module_path: module_path.clone(),
-                            message: e.message.to_string(),
-                            location: Some((e.location.l, e.location.c, e.location.v.len() as u32)),
-                            phase: ErrorPhase::Lexer,
-                            severity: e.severity,
-                        }]
-                    })
-            },
-            ast_builder: |tokens| {
-                let (ast, diagnostics) = Parser::parse(tokens);
-
-                if debug.ast {
-                    eprint!("{:?}", ast);
-                }
-
-                parser_errors_cell
-                    .borrow_mut()
-                    .extend(diagnostics.iter().map(|e| ModuleDiagnostic {
-                        module_path: module_path.clone(),
-                        message: e.message.to_string(),
-                        location: Some((e.location.l, e.location.c, e.location.v.len() as u32)),
-                        phase: ErrorPhase::Parser,
-                        severity: e.severity,
-                    }));
-
-                Ok(ast)
-            },
-            declarations_builder: |ast: &XenoAst, abs_path: &PathBuf, module_path: &ModulePath| {
-                Ok(ast
-                    .iter()
-                    .filter_map(|d| match d {
-                        Declaration::Type {
-                            docs,
-                            name,
-                            generics,
-                            ty,
-                            ..
-                        } => Some((
-                            name.v,
-                            DeclarationInfo {
-                                name: name.v.to_string(),
-                                module_path: module_path.to_string(),
-                                abs_path: abs_path.clone(),
-                                docs: docs.map(|d| d.to_string()),
-                                line: name.l,
-                                column: name.c,
-                                name_len: name.v.len() as u32,
-                                semantic: TypeDeclarationInfo::from_ast(generics.as_deref(), &ty.0),
-                            },
-                        )),
-                        _ => None,
-                    })
-                    .collect())
-            },
-        }
-        .try_build()?;
-
-        // Populate parser_errors field from what was collected during build
-        let collected_parser_errors = parser_errors_cell.into_inner();
-        md.with_parser_errors_mut(|errs| *errs = collected_parser_errors);
-
-        // Populate imports list
-        let import_list: Vec<ModulePath> = md
-            .borrow_ast()
-            .iter()
-            .filter_map(|d| match d {
-                Declaration::Import { path, .. } => Some(path.join("/")),
-                _ => None,
-            })
-            .collect();
-        md.with_imports_mut(|imports| *imports = import_list);
-
-        Ok(md)
+            declarations: HashMap::new(),
+        };
+        module.index();
+        Ok(module)
     }
 }
 
@@ -1114,6 +1103,22 @@ mod tests {
         XenoDiagSeverity,
     };
 
+    fn summaries(cache: &HashMap<String, ModuleData>) -> HashMap<String, super::ModuleSummary> {
+        cache
+            .iter()
+            .map(|(p, m)| {
+                (
+                    p.clone(),
+                    super::ModuleSummary {
+                        abs_path: m.abs_path.clone(),
+                        imports: m.imports.clone(),
+                        declarations: m.declarations.clone(),
+                        references: HashSet::new(),
+                    },
+                )
+            })
+            .collect()
+    }
     fn diagnostic(severity: XenoDiagSeverity) -> ModuleDiagnostic {
         ModuleDiagnostic {
             module_path: "test".to_string(),
@@ -1173,7 +1178,7 @@ mod tests {
         );
 
         assert_eq!(
-            XenoRegistry::transitive_importers(&cache, "leaf"),
+            XenoRegistry::transitive_importers(&summaries(&cache), "leaf"),
             vec!["a".to_string(), "b".to_string(), "top".to_string()]
         );
     }
@@ -1188,7 +1193,15 @@ mod tests {
             parsed_module("test", "type Test = string;"),
         );
         let registry = XenoRegistry {
-            module_cache: std::sync::RwLock::new(cache),
+            index: std::sync::RwLock::new(summaries(&cache)),
+            hierarchy: std::sync::RwLock::new(crate::semantic::TypeHierarchy::default()),
+            coordinator: std::sync::Mutex::new(()),
+            module_cache: std::sync::RwLock::new(
+                cache
+                    .into_iter()
+                    .map(|(p, m)| (p, Arc::new(std::sync::RwLock::new(m))))
+                    .collect(),
+            ),
             root: PathBuf::new(),
             entry: "test".to_string(),
             analyzer: Analyzer::new(false, &empty_plugins),
@@ -1229,8 +1242,13 @@ mod tests {
             .map(|semantic_type| semantic_type.name.to_string())
             .collect();
         errors.extend(
-            NameCollisionValidator::new(module_path, &type_owners, &static_types)
-                .validate(module.borrow_ast()),
+            NameCollisionValidator::new(
+                module_path,
+                module.borrow_source(),
+                &type_owners,
+                &static_types,
+            )
+            .validate(module.borrow_ast()),
         );
         errors
             .into_iter()
@@ -1480,7 +1498,15 @@ mod tests {
             parsed_module("late", "type Late = string;"),
         );
         let registry = XenoRegistry {
-            module_cache: std::sync::RwLock::new(cache),
+            index: std::sync::RwLock::new(summaries(&cache)),
+            hierarchy: std::sync::RwLock::new(crate::semantic::TypeHierarchy::default()),
+            coordinator: std::sync::Mutex::new(()),
+            module_cache: std::sync::RwLock::new(
+                cache
+                    .into_iter()
+                    .map(|(p, m)| (p, Arc::new(std::sync::RwLock::new(m))))
+                    .collect(),
+            ),
             root: PathBuf::new(),
             entry: "early".to_string(),
             analyzer: Analyzer::new(false, &empty_plugins),
@@ -1511,7 +1537,15 @@ mod tests {
             parsed_module("second", "type Shared = u8;"),
         );
         let registry = XenoRegistry {
-            module_cache: std::sync::RwLock::new(cache),
+            index: std::sync::RwLock::new(summaries(&cache)),
+            hierarchy: std::sync::RwLock::new(crate::semantic::TypeHierarchy::default()),
+            coordinator: std::sync::Mutex::new(()),
+            module_cache: std::sync::RwLock::new(
+                cache
+                    .into_iter()
+                    .map(|(p, m)| (p, Arc::new(std::sync::RwLock::new(m))))
+                    .collect(),
+            ),
             root: PathBuf::new(),
             entry: "first".to_string(),
             analyzer: Analyzer::new(false, &empty_plugins),
@@ -1549,7 +1583,7 @@ mod tests {
         );
 
         assert_eq!(
-            XenoRegistry::dependency_order(&cache, "entry"),
+            XenoRegistry::dependency_order(&summaries(&cache), "entry"),
             vec!["leaf", "middle", "entry"]
         );
     }
@@ -1713,5 +1747,163 @@ mod tests {
         assert!(errors
             .iter()
             .any(|error| error.contains("expects 1 argument(s), got 2")));
+    }
+}
+
+#[cfg(test)]
+mod update_tests {
+    use super::*;
+    fn registry() -> XenoRegistry {
+        let root = std::env::temp_dir().join(format!(
+            "xeno-update-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("index.xen"), "type Root = string;").unwrap();
+        let mut config = Config::default_with_workdir(root);
+        config.parser.entry = "index".into();
+        XenoRegistry::with_config(config, false).unwrap()
+    }
+    #[test]
+    fn cycles_defer_scans_and_recover_without_blocking_recursive_types() {
+        let registry = registry();
+        fs::write(registry.root.join("a.xen"), "import b; type A = B;").unwrap();
+        fs::write(registry.root.join("b.xen"), "import a; type B = number;").unwrap();
+        registry.load_module_from_source(
+            &registry.root.join("index.xen"),
+            "import a; type Root = A;".into(),
+        );
+        for path in ["a", "b", "index"] {
+            assert!(registry
+                .get_all_errors_for(path)
+                .iter()
+                .any(|d| d.message.contains("cycle")));
+        }
+        let errors = registry.load_module_from_source(
+            &registry.root.join("b.xen"),
+            "type B = number; type TreeNode = { children: Tree[] }; type Tree = |TreeNode|number;"
+                .into(),
+        );
+        assert!(
+            !errors.iter().any(|d| d.severity == XenoDiagSeverity::Err),
+            "{errors:?}"
+        );
+        fs::remove_dir_all(&registry.root).unwrap();
+    }
+    #[test]
+    fn invalid_source_clears_old_indexes_and_updates_dependents() {
+        let registry = registry();
+        fs::write(registry.root.join("a.xen"), "type A = number;").unwrap();
+        registry.load_module_from_source(
+            &registry.root.join("index.xen"),
+            "import a; type Root = A;".into(),
+        );
+        let handle = registry.module_cache.read().unwrap()["a"].clone();
+        registry.load_module_from_source(&registry.root.join("a.xen"), "\u{e9}".into());
+        assert!(registry.find_declaration("index", "A").is_none());
+        assert!(registry
+            .get_all_errors_for("index")
+            .iter()
+            .any(|d| d.message.contains("Unknown type 'A'")));
+        assert_eq!(handle.read().unwrap().borrow_source(), "\u{e9}");
+        registry.load_module_from_source(&registry.root.join("a.xen"), "type A = string;".into());
+        assert!(!registry
+            .get_all_errors_for("index")
+            .iter()
+            .any(|d| d.severity == XenoDiagSeverity::Err));
+        fs::remove_dir_all(&registry.root).unwrap();
+    }
+
+    #[test]
+    fn declaration_metadata_is_reused_and_unresolved_references_are_invalidated() {
+        let registry = registry();
+        registry.load_module_from_source(
+            &registry.root.join("index.xen"),
+            "type First = string; type Second = number;".into(),
+        );
+        let first = registry
+            .find_declaration("index", "First")
+            .unwrap()
+            .semantic;
+        let second = registry
+            .find_declaration("index", "Second")
+            .unwrap()
+            .semantic;
+        registry.load_module_from_source(
+            &registry.root.join("index.xen"),
+            "\n\ntype First = string; type Second = bool;".into(),
+        );
+        let updated = registry.find_declaration("index", "First").unwrap();
+        assert!(Arc::ptr_eq(&first, &updated.semantic));
+        assert_eq!(updated.line, 2);
+        assert!(!Arc::ptr_eq(
+            &second,
+            &registry
+                .find_declaration("index", "Second")
+                .unwrap()
+                .semantic
+        ));
+
+        fs::write(
+            registry.root.join("consumer.xen"),
+            "import index; type Consumer = Missing;",
+        )
+        .unwrap();
+        registry.load_module(&["consumer"], true, None);
+        assert!(registry
+            .get_all_errors_for("consumer")
+            .iter()
+            .any(|d| d.message.contains("Unknown type 'Missing'")));
+        registry.load_module_from_source(
+            &registry.root.join("index.xen"),
+            "type Missing = string;".into(),
+        );
+        assert!(!registry
+            .get_all_errors_for("consumer")
+            .iter()
+            .any(|d| d.message.contains("Unknown type 'Missing'")));
+        fs::remove_dir_all(&registry.root).unwrap();
+    }
+
+    #[test]
+    fn self_import_is_deferred_and_an_unchanged_document_preserves_metadata() {
+        let registry = registry();
+        let path = registry.root.join("index.xen");
+        registry.load_module_from_source(&path, "import index; type Root = string;".into());
+        assert!(registry
+            .get_all_errors_for("index")
+            .iter()
+            .any(|d| d.message.contains("cycle")));
+        registry.load_module_from_source(&path, "type Root = string;".into());
+        let root = registry.find_declaration("index", "Root").unwrap().semantic;
+        registry.load_module_from_source(&path, "type Root = string;".into());
+        assert!(Arc::ptr_eq(
+            &root,
+            &registry.find_declaration("index", "Root").unwrap().semantic
+        ));
+        assert!(registry.get_all_errors_for("index").is_empty());
+        fs::remove_dir_all(&registry.root).unwrap();
+    }
+
+    #[test]
+    fn removing_duplicate_declarations_rebuilds_the_surviving_semantic_type() {
+        let registry = registry();
+        let path = registry.root.join("index.xen");
+        registry.load_module_from_source(
+            &path,
+            "type Duplicate = string; type Duplicate = number;".into(),
+        );
+        registry.load_module_from_source(&path, "type Duplicate = string;".into());
+        let declaration = registry.find_declaration("index", "Duplicate").unwrap();
+        assert_eq!(
+            declaration.semantic.body,
+            crate::semantic::OwnedType::named("string")
+        );
+        assert!(registry.get_all_errors_for("index").is_empty());
+        fs::remove_dir_all(&registry.root).unwrap();
     }
 }

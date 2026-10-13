@@ -11,17 +11,10 @@ pub mod semantic;
 mod test_strings;
 pub mod utils;
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct TokenData<'src> {
-    /** The value of the token */
-    pub v: &'src str,
-    /** The line number of the token (0 indexed) */
-    pub l: u32,
-    /** The column number of the token (0 indexed) */
-    pub c: u32,
-}
+pub use xenomorph_plugin_api::source::{SourceDocument, TextRange, TokenData};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum XenoDiagSeverity {
     Err,
     Warn,
@@ -29,8 +22,8 @@ pub enum XenoDiagSeverity {
 }
 
 #[derive(Clone, Debug)]
-pub struct XenoDiagnostic<'diag> {
-    pub location: TokenData<'diag>,
+pub struct XenoDiagnostic {
+    pub location: TokenData,
     pub message: String,
     pub severity: XenoDiagSeverity,
 }

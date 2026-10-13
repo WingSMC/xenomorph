@@ -13,14 +13,16 @@ enum IfChainState {
 
 /// Validates that @elseif / @else only appear after @if or @elseif.
 /// Uses a stack so chain state is scoped per type (expression list).
-pub struct IfChainValidator {
+pub struct IfChainValidator<'context> {
+    source: &'context str,
     stack: Vec<IfChainState>,
     annotation_depth: usize,
 }
 
-impl IfChainValidator {
-    pub fn new() -> Self {
+impl<'context> IfChainValidator<'context> {
+    pub fn new(source: &'context str) -> Self {
         Self {
+            source,
             stack: Vec::new(),
             annotation_depth: 0,
         }
@@ -37,29 +39,29 @@ impl IfChainValidator {
 
 // ── Built-in listeners ──────────────────────────────────────────────
 
-impl<'src> AnalyzerListener<'src> for IfChainValidator {
-    fn on_before_type(&mut self, _exprs: &XenoType<'src>, _errors: &mut Vec<XenoDiagnostic<'src>>) {
+impl<'src, 'context> AnalyzerListener<'src> for IfChainValidator<'context> {
+    fn on_before_type(&mut self, _exprs: &XenoType, _errors: &mut Vec<XenoDiagnostic>) {
         self.stack.push(IfChainState::None);
     }
 
-    fn on_after_type(&mut self, _exprs: &XenoType<'src>, _errors: &mut Vec<XenoDiagnostic<'src>>) {
+    fn on_after_type(&mut self, _exprs: &XenoType, _errors: &mut Vec<XenoDiagnostic>) {
         self.stack.pop();
     }
 
     fn on_before_annotation(
         &mut self,
-        name: &TokenData<'src>,
-        _args: &[Expr<'src>],
-        errors: &mut Vec<XenoDiagnostic<'src>>,
+        name: &TokenData,
+        _args: &[Expr],
+        errors: &mut Vec<XenoDiagnostic>,
     ) {
         if self.annotation_depth == 0 {
-            match name.v {
+            match name.text(self.source) {
                 "if" => self.set(IfChainState::AfterIf),
                 "elseif" => match self.current() {
                     IfChainState::AfterIf => {}
                     _ => {
                         errors.push(XenoDiagnostic {
-                            location: (*name).clone(),
+                            location: (*name),
                             message: "'@elseif' must follow an '@if' or another '@elseif'."
                                 .to_string(),
                             severity: crate::XenoDiagSeverity::Err,
@@ -71,7 +73,7 @@ impl<'src> AnalyzerListener<'src> for IfChainValidator {
                     IfChainState::AfterIf => self.set(IfChainState::AfterElse),
                     _ => {
                         errors.push(XenoDiagnostic {
-                            location: (*name).clone(),
+                            location: (*name),
                             message: "'@else' must follow an '@if' or '@elseif'.".to_string(),
                             severity: crate::XenoDiagSeverity::Err,
                         });
@@ -86,9 +88,9 @@ impl<'src> AnalyzerListener<'src> for IfChainValidator {
 
     fn on_after_annotation(
         &mut self,
-        _name: &TokenData<'src>,
-        _args: &[Expr<'src>],
-        _errors: &mut Vec<XenoDiagnostic<'src>>,
+        _name: &TokenData,
+        _args: &[Expr],
+        _errors: &mut Vec<XenoDiagnostic>,
     ) {
         self.annotation_depth = self.annotation_depth.saturating_sub(1);
     }
@@ -108,7 +110,7 @@ mod tests {
 
     fn validate(src: &str) -> Vec<String> {
         let tokens = Lexer::tokenize(src).expect("source must lex");
-        let (ast, parser_diagnostics) = Parser::parse(&tokens);
+        let (ast, parser_diagnostics) = Parser::parse(&tokens, src);
         assert!(
             !parser_diagnostics
                 .iter()
@@ -116,33 +118,33 @@ mod tests {
             "source must parse: {parser_diagnostics:#?}"
         );
 
-        let mut validator = IfChainValidator::new();
+        let mut validator = IfChainValidator::new(src);
         let mut diagnostics = Vec::new();
         for declaration in &ast {
             if let Declaration::Type { ty, .. } = declaration {
                 validator.on_before_type(ty, &mut diagnostics);
                 for annotation in &ty.1 {
                     validator.on_before_annotation(
-                        annotation.ident,
+                        &annotation.ident,
                         &annotation.params,
                         &mut diagnostics,
                     );
                     for parameter in &annotation.params {
                         if let crate::parser::Expr::Annotation(nested) = parameter {
                             validator.on_before_annotation(
-                                nested.ident,
+                                &nested.ident,
                                 &nested.params,
                                 &mut diagnostics,
                             );
                             validator.on_after_annotation(
-                                nested.ident,
+                                &nested.ident,
                                 &nested.params,
                                 &mut diagnostics,
                             );
                         }
                     }
                     validator.on_after_annotation(
-                        annotation.ident,
+                        &annotation.ident,
                         &annotation.params,
                         &mut diagnostics,
                     );

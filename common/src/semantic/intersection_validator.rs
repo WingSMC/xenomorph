@@ -9,15 +9,17 @@ use crate::{
 /// Rejects source intersections whose member domains are provably disjoint.
 /// The hierarchy also normalizes these expressions to `NEVER`, so downstream
 /// semantic queries retain correct bottom-type behavior after the diagnostic.
-pub struct IntersectionValidator {
-    scope: ScopeInfo,
+pub struct IntersectionValidator<'context> {
+    scope: &'context ScopeInfo,
+    source: &'context str,
     generic_params: HashMap<String, Option<String>>,
 }
 
-impl IntersectionValidator {
-    pub fn new(scope: &ScopeInfo) -> Self {
+impl<'context> IntersectionValidator<'context> {
+    pub fn new(scope: &'context ScopeInfo, source: &'context str) -> Self {
         Self {
-            scope: scope.clone(),
+            scope,
+            source,
             generic_params: HashMap::new(),
         }
     }
@@ -50,33 +52,29 @@ impl IntersectionValidator {
     }
 }
 
-impl<'src> AnalyzerListener<'src> for IntersectionValidator {
-    fn on_before_decl(
-        &mut self,
-        declaration: &Declaration<'src>,
-        _errors: &mut Vec<XenoDiagnostic<'src>>,
-    ) {
+impl<'src, 'context> AnalyzerListener<'src> for IntersectionValidator<'context> {
+    fn on_before_decl(&mut self, declaration: &Declaration, _errors: &mut Vec<XenoDiagnostic>) {
         self.generic_params.clear();
         if let Declaration::Type { generics, .. } = declaration {
             self.generic_params
                 .extend(generics.as_deref().unwrap_or_default().iter().map(
                     |(name, constraint)| {
                         (
-                            name.v.to_string(),
-                            constraint.map(|constraint| constraint.v.to_string()),
+                            name.text(self.source).to_string(),
+                            constraint.map(|constraint| constraint.text(self.source).to_string()),
                         )
                     },
                 ));
         }
     }
 
-    fn on_before_type(&mut self, (ty, _): &XenoType<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {
+    fn on_before_type(&mut self, (ty, _): &XenoType, errors: &mut Vec<XenoDiagnostic>) {
         let Type::Intersection(items) = ty else {
             return;
         };
         let resolved = items
             .iter()
-            .map(simple_to_owned_type)
+            .map(|item| simple_to_owned_type(item, self.source))
             .map(|item| self.resolve_generic(item))
             .collect::<Vec<_>>();
         if !self.scope.type_hierarchy.intersection_is_never(&resolved) {
@@ -92,7 +90,7 @@ impl<'src> AnalyzerListener<'src> for IntersectionValidator {
                     (
                         items
                             .last()
-                            .map(|item| item.get_last_token().clone())
+                            .map(|item| item.get_last_token())
                             .unwrap_or_default(),
                         format!(
                             "Types '{}' cannot be intersected because their intersection is NEVER.",
@@ -106,7 +104,7 @@ impl<'src> AnalyzerListener<'src> for IntersectionValidator {
                 },
                 |(left, right)| {
                     (
-                        items[right].get_last_token().clone(),
+                        items[right].get_last_token(),
                         format!(
                             "Types '{}' and '{}' cannot be intersected because their intersection is NEVER.",
                             resolved[left].display_name(),
@@ -122,11 +120,7 @@ impl<'src> AnalyzerListener<'src> for IntersectionValidator {
         });
     }
 
-    fn on_after_decl(
-        &mut self,
-        _declaration: &Declaration<'src>,
-        _errors: &mut Vec<XenoDiagnostic<'src>>,
-    ) {
+    fn on_after_decl(&mut self, _declaration: &Declaration, _errors: &mut Vec<XenoDiagnostic>) {
         self.generic_params.clear();
     }
 }
@@ -162,12 +156,10 @@ mod tests {
         }
     }
 
-    fn token(value: &str) -> TokenData<'_> {
-        TokenData {
-            v: value,
-            l: 0,
-            c: 0,
-        }
+    const FIXTURE_SOURCE: &str = "u8 string number";
+    fn token(value: &str) -> TokenData {
+        let start = FIXTURE_SOURCE.find(value).unwrap();
+        TokenData::new(start, start + value.len())
     }
 
     #[test]
@@ -176,21 +168,21 @@ mod tests {
         let right = token("string");
         let ty = (
             Type::Intersection(vec![
-                SimpleType::Identifier(&left, None),
-                SimpleType::Identifier(&right, None),
+                SimpleType::Identifier(left, None),
+                SimpleType::Identifier(right, None),
             ]),
             Vec::new(),
         );
         let mut diagnostics = Vec::new();
 
-        IntersectionValidator::new(&scope()).on_before_type(&ty, &mut diagnostics);
+        IntersectionValidator::new(&scope(), FIXTURE_SOURCE).on_before_type(&ty, &mut diagnostics);
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(
             diagnostics[0].message,
             "Types 'u8' and 'string' cannot be intersected because their intersection is NEVER."
         );
-        assert_eq!(diagnostics[0].location.v, "string");
+        assert_eq!(diagnostics[0].location.text(FIXTURE_SOURCE), "string");
     }
 
     #[test]
@@ -199,14 +191,14 @@ mod tests {
         let right = token("number");
         let ty = (
             Type::Intersection(vec![
-                SimpleType::Identifier(&left, None),
-                SimpleType::Identifier(&right, None),
+                SimpleType::Identifier(left, None),
+                SimpleType::Identifier(right, None),
             ]),
             Vec::new(),
         );
         let mut diagnostics = Vec::new();
 
-        IntersectionValidator::new(&scope()).on_before_type(&ty, &mut diagnostics);
+        IntersectionValidator::new(&scope(), FIXTURE_SOURCE).on_before_type(&ty, &mut diagnostics);
 
         assert!(diagnostics.is_empty());
     }
@@ -217,14 +209,14 @@ mod tests {
         let right = token("string");
         let ty = (
             Type::Intersection(vec![
-                SimpleType::Optional(Box::new(SimpleType::Identifier(&left, None))),
-                SimpleType::Optional(Box::new(SimpleType::Identifier(&right, None))),
+                SimpleType::Optional(Box::new(SimpleType::Identifier(left, None))),
+                SimpleType::Optional(Box::new(SimpleType::Identifier(right, None))),
             ]),
             Vec::new(),
         );
         let mut diagnostics = Vec::new();
 
-        IntersectionValidator::new(&scope()).on_before_type(&ty, &mut diagnostics);
+        IntersectionValidator::new(&scope(), FIXTURE_SOURCE).on_before_type(&ty, &mut diagnostics);
 
         assert!(diagnostics.is_empty());
     }
@@ -235,14 +227,14 @@ mod tests {
         let right = token("string");
         let ty = (
             Type::Intersection(vec![
-                SimpleType::Optional(Box::new(SimpleType::Identifier(&left, None))),
-                SimpleType::Identifier(&right, None),
+                SimpleType::Optional(Box::new(SimpleType::Identifier(left, None))),
+                SimpleType::Identifier(right, None),
             ]),
             Vec::new(),
         );
         let mut diagnostics = Vec::new();
 
-        IntersectionValidator::new(&scope()).on_before_type(&ty, &mut diagnostics);
+        IntersectionValidator::new(&scope(), FIXTURE_SOURCE).on_before_type(&ty, &mut diagnostics);
 
         assert_eq!(diagnostics.len(), 1);
     }

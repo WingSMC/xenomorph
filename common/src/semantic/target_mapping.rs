@@ -8,18 +8,19 @@ use super::{simple_to_owned_type, OwnedType, TypeHierarchy};
 ///
 /// Transparent aliases and built-in type utilities are evaluated recursively.
 /// Source declarations and generic parameters remain representable by name.
-pub fn unsupported_target_type_diagnostic<'src>(
+pub fn unsupported_target_type_diagnostic(
     target: &str,
-    ty: &SimpleType<'src>,
+    ty: &SimpleType,
     hierarchy: &TypeHierarchy,
+    source: &str,
     has_native_mapping: impl FnMut(&str) -> bool,
-) -> Option<XenoDiagnostic<'src>> {
+) -> Option<XenoDiagnostic> {
     let identifier = simple_type_identifier(ty)?;
-    let evaluated = hierarchy.resolve_for_target(&simple_to_owned_type(ty));
+    let evaluated = hierarchy.resolve_for_target(&simple_to_owned_type(ty, source));
     let type_name = first_unmapped_target_type(&evaluated, hierarchy, has_native_mapping)?;
 
     Some(XenoDiagnostic {
-        location: identifier.clone(),
+        location: *identifier,
         message: format!(
             "{target} cannot represent type '{type_name}' because it has no native mapping."
         ),
@@ -27,7 +28,7 @@ pub fn unsupported_target_type_diagnostic<'src>(
     })
 }
 
-fn simple_type_identifier<'src>(ty: &SimpleType<'src>) -> Option<&'src TokenData<'src>> {
+fn simple_type_identifier(ty: &SimpleType) -> Option<&TokenData> {
     match ty.inner() {
         SimpleType::Identifier(identifier, _) | SimpleType::Array(identifier, _) => {
             Some(identifier)
@@ -103,12 +104,9 @@ mod tests {
 
     #[test]
     fn reports_resolved_unmapped_alias_at_the_source_identifier() {
-        let alias = TokenData {
-            v: "Alias",
-            l: 3,
-            c: 7,
-        };
-        let ty = SimpleType::Identifier(&alias, None);
+        let fixture_source = "Alias";
+        let alias = TokenData::new(0, 5);
+        let ty = SimpleType::Identifier(alias, None);
         let mut hierarchy = TypeHierarchy::default();
         hierarchy.set_current_module("test");
         hierarchy.register_module("test", Vec::new());
@@ -124,12 +122,15 @@ mod tests {
             },
         );
 
-        let diagnostic = unsupported_target_type_diagnostic("Target", &ty, &hierarchy, |_| false)
+        let diagnostic =
+            unsupported_target_type_diagnostic("Target", &ty, &hierarchy, fixture_source, |_| {
+                false
+            })
             .expect("the resolved static type has no native mapping");
 
-        assert_eq!(diagnostic.location.v, "Alias");
-        assert_eq!(diagnostic.location.l, 3);
-        assert_eq!(diagnostic.location.c, 7);
+        assert_eq!(diagnostic.location.text(fixture_source), "Alias");
+        assert_eq!(diagnostic.location.line(fixture_source), 0);
+        assert_eq!(diagnostic.location.column(fixture_source), 0);
         assert_eq!(
             diagnostic.message,
             "Target cannot represent type 'unmapped' because it has no native mapping."
@@ -139,16 +140,9 @@ mod tests {
 
     #[test]
     fn accepts_mapped_static_types_and_source_declarations() {
-        let mapped = TokenData {
-            v: "unmapped",
-            l: 0,
-            c: 0,
-        };
-        let source = TokenData {
-            v: "SourceType",
-            l: 0,
-            c: 0,
-        };
+        let fixture_source = "unmapped SourceType";
+        let mapped = TokenData::new(0, 8);
+        let source = TokenData::new(9, 19);
         let mut hierarchy = TypeHierarchy::default();
         hierarchy.set_current_module("test");
         hierarchy.register_module("test", Vec::new());
@@ -166,15 +160,17 @@ mod tests {
 
         assert!(unsupported_target_type_diagnostic(
             "Target",
-            &SimpleType::Identifier(&mapped, None),
+            &SimpleType::Identifier(mapped, None),
             &hierarchy,
+            fixture_source,
             |name| name == "unmapped",
         )
         .is_none());
         assert!(unsupported_target_type_diagnostic(
             "Target",
-            &SimpleType::Identifier(&source, None),
+            &SimpleType::Identifier(source, None),
             &hierarchy,
+            fixture_source,
             |_| false,
         )
         .is_none());
@@ -182,21 +178,10 @@ mod tests {
 
     #[test]
     fn accepts_utility_results_when_their_nested_types_are_mapped() {
-        let pick = TokenData {
-            v: "Pick",
-            l: 1,
-            c: 2,
-        };
-        let user = TokenData {
-            v: "User",
-            l: 1,
-            c: 7,
-        };
-        let key = TokenData {
-            v: "\"id\"",
-            l: 1,
-            c: 13,
-        };
+        let fixture_source = "Pick User \"id\"";
+        let pick = TokenData::new(0, 4);
+        let user = TokenData::new(5, 9);
+        let key = TokenData::new(10, 14);
         let mut hierarchy = TypeHierarchy::default();
         hierarchy.set_current_module("test");
         hierarchy.register_module("test", Vec::new());
@@ -218,18 +203,20 @@ mod tests {
             },
         );
         let ty = SimpleType::Identifier(
-            &pick,
+            pick,
             Some(vec![
-                SimpleType::Identifier(&user, None),
-                SimpleType::Literal(crate::parser::Literal::String("id".to_string(), &key)),
+                SimpleType::Identifier(user, None),
+                SimpleType::Literal(crate::parser::Literal::String("id".to_string(), key)),
             ]),
         );
 
-        assert!(
-            unsupported_target_type_diagnostic("Target", &ty, &hierarchy, |name| {
-                matches!(name, "string" | "Dict")
-            })
-            .is_none()
-        );
+        assert!(unsupported_target_type_diagnostic(
+            "Target",
+            &ty,
+            &hierarchy,
+            fixture_source,
+            |name| { matches!(name, "string" | "Dict") }
+        )
+        .is_none());
     }
 }

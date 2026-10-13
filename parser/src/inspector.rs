@@ -74,7 +74,7 @@ fn inspect_source(source: &str) -> InspectResult<'_> {
             return InspectResult {
                 tokens: Vec::new(),
                 ast: Vec::new(),
-                diagnostics: vec![inspect_diagnostic(&diagnostic)],
+                diagnostics: vec![inspect_diagnostic(&diagnostic, source)],
             };
         }
     };
@@ -83,24 +83,27 @@ fn inspect_source(source: &str) -> InspectResult<'_> {
         .iter()
         .map(|(kind, data)| InspectToken {
             kind: format!("{kind:?}"),
-            lexeme: data.v,
-            range: token_range(data),
+            lexeme: data.text(source),
+            range: token_range(data, source),
         })
         .collect();
-    let (ast, diagnostics) = Parser::parse(&tokens);
+    let (ast, diagnostics) = Parser::parse(&tokens, source);
     let inspect_ast = ast
         .iter()
-        .map(|declaration| declaration_node(declaration, &tokens))
+        .map(|declaration| declaration_node(declaration, &tokens, source))
         .collect();
 
     InspectResult {
         tokens: inspect_tokens,
         ast: inspect_ast,
-        diagnostics: diagnostics.iter().map(inspect_diagnostic).collect(),
+        diagnostics: diagnostics
+            .iter()
+            .map(|value| inspect_diagnostic(value, source))
+            .collect(),
     }
 }
 
-fn inspect_diagnostic(diagnostic: &XenoDiagnostic<'_>) -> InspectDiagnostic {
+fn inspect_diagnostic(diagnostic: &XenoDiagnostic, source: &str) -> InspectDiagnostic {
     let severity = match diagnostic.severity {
         XenoDiagSeverity::Err => "error",
         XenoDiagSeverity::Warn => "warning",
@@ -110,17 +113,17 @@ fn inspect_diagnostic(diagnostic: &XenoDiagnostic<'_>) -> InspectDiagnostic {
     InspectDiagnostic {
         severity,
         message: diagnostic.message.clone(),
-        range: token_range(&diagnostic.location),
+        range: token_range(&diagnostic.location, source),
     }
 }
 
-fn token_range(token: &TokenData<'_>) -> InspectRange {
+fn token_range(token: &TokenData, source: &str) -> InspectRange {
     let start = InspectPosition {
-        line: token.l,
-        character: token.c,
+        line: token.line(source),
+        character: token.column(source),
     };
     let mut end = start;
-    for character in token.v.chars() {
+    for character in token.text(source).chars() {
         if character == '\n' {
             end.line += 1;
             end.character = 0;
@@ -131,10 +134,10 @@ fn token_range(token: &TokenData<'_>) -> InspectRange {
     InspectRange { start, end }
 }
 
-fn range_from_to(start: &TokenData<'_>, end: &TokenData<'_>) -> InspectRange {
+fn range_from_to(start: &TokenData, end: &TokenData, source: &str) -> InspectRange {
     InspectRange {
-        start: token_range(start).start,
-        end: token_range(end).end,
+        start: token_range(start, source).start,
+        end: token_range(end, source).end,
     }
 }
 
@@ -148,13 +151,16 @@ fn range_covering_nodes(children: &[AstNode]) -> Option<InspectRange> {
 }
 
 fn declaration_range(
-    tokens: &[Token<'_>],
-    start: &TokenData<'_>,
-    end_hint: &TokenData<'_>,
+    tokens: &[Token],
+    start: &TokenData,
+    end_hint: &TokenData,
+    source: &str,
 ) -> InspectRange {
     let start = tokens
         .iter()
-        .position(|(_, data)| (data.l, data.c) == (start.l, start.c))
+        .position(|(_, data)| {
+            (data.line(source), data.column(source)) == (start.line(source), start.column(source))
+        })
         .and_then(|index| index.checked_sub(1))
         .and_then(|index| tokens.get(index))
         .filter(|(kind, _)| *kind == TokenVariant::Documentation)
@@ -163,11 +169,13 @@ fn declaration_range(
     let end = tokens
         .iter()
         .find(|(kind, data)| {
-            *kind == TokenVariant::Semicolon && (data.l, data.c) >= (end_hint.l, end_hint.c)
+            *kind == TokenVariant::Semicolon
+                && (data.line(source), data.column(source))
+                    >= (end_hint.line(source), end_hint.column(source))
         })
         .map(|(_, data)| data)
         .unwrap_or(end_hint);
-    range_from_to(start, end)
+    range_from_to(start, end, source)
 }
 
 fn node(
@@ -184,21 +192,21 @@ fn node(
     }
 }
 
-fn token_node(kind: &'static str, token: &TokenData<'_>) -> AstNode {
+fn token_node(kind: &'static str, token: &TokenData, source: &str) -> AstNode {
     node(
         kind,
-        Some(token.v.to_string()),
-        Some(token_range(token)),
+        Some(token.text(source).to_string()),
+        Some(token_range(token, source)),
         Vec::new(),
     )
 }
 
-fn declaration_node(declaration: &Declaration<'_>, tokens: &[Token<'_>]) -> AstNode {
+fn declaration_node(declaration: &Declaration, tokens: &[Token], source: &str) -> AstNode {
     match declaration {
         Declaration::Import { path, location } => node(
             "ImportDeclaration",
             Some(path.join("/")),
-            Some(declaration_range(tokens, location, location)),
+            Some(declaration_range(tokens, location, location, source)),
             Vec::new(),
         ),
         Declaration::Type {
@@ -218,7 +226,7 @@ fn declaration_node(declaration: &Declaration<'_>, tokens: &[Token<'_>]) -> AstN
                     Vec::new(),
                 ));
             }
-            children.push(token_node("Name", name));
+            children.push(token_node("Name", name, source));
             if let Some(generics) = generics {
                 children.push(node(
                     "Generics",
@@ -229,32 +237,34 @@ fn declaration_node(declaration: &Declaration<'_>, tokens: &[Token<'_>]) -> AstN
                         .map(|(generic, constraint)| {
                             let constraint_nodes = constraint
                                 .iter()
-                                .map(|constraint| token_node("Constraint", constraint))
+                                .map(|constraint| token_node("Constraint", constraint, source))
                                 .collect();
                             node(
                                 "GenericParameter",
-                                Some(generic.v.to_string()),
-                                Some(token_range(generic)),
+                                Some(generic.text(source).to_string()),
+                                Some(token_range(generic, source)),
                                 constraint_nodes,
                             )
                         })
                         .collect(),
                 ));
             }
-            children.push(type_node(&ty.0));
+            children.push(type_node(&ty.0, source));
             if !ty.1.is_empty() {
                 children.push(node(
                     "Annotations",
                     None,
                     None,
-                    ty.1.iter().map(annotation_node).collect(),
+                    ty.1.iter()
+                        .map(|value| annotation_node(value, source))
+                        .collect(),
                 ));
             }
 
             node(
                 "TypeDeclaration",
-                Some(name.v.to_string()),
-                Some(declaration_range(tokens, from, to)),
+                Some(name.text(source).to_string()),
+                Some(declaration_range(tokens, from, to, source)),
                 children,
             )
         }
@@ -277,24 +287,27 @@ fn declaration_node(declaration: &Declaration<'_>, tokens: &[Token<'_>]) -> AstN
             node(
                 "CustomDeclaration",
                 Some(match name {
-                    Some(name) => format!("{} ({plugin_id}/{decl_id})", name.v),
+                    Some(name) => format!("{} ({plugin_id}/{decl_id})", name.text(source)),
                     None => format!("{plugin_id}/{decl_id}"),
                 }),
-                name.map(|name| token_range(name)),
+                name.map(|name| token_range(&name, source)),
                 children,
             )
         }
     }
 }
 
-fn type_node(ty: &Type<'_>) -> AstNode {
+fn type_node(ty: &Type, source: &str) -> AstNode {
     match ty {
-        Type::Simple(simple) => simple_type_node(simple),
+        Type::Simple(simple) => simple_type_node(simple, source),
         Type::Tuple(types) => node(
             "TupleType",
             None,
             None,
-            types.iter().map(simple_type_node).collect(),
+            types
+                .iter()
+                .map(|value| simple_type_node(value, source))
+                .collect(),
         ),
         Type::Set(set) => {
             let mut children = Vec::new();
@@ -303,7 +316,7 @@ fn type_node(ty: &Type<'_>) -> AstNode {
                     "ElementType",
                     None,
                     None,
-                    vec![simple_type_node(element_type)],
+                    vec![simple_type_node(element_type, source)],
                 ));
             }
             if let Some(values) = &set.values {
@@ -313,7 +326,7 @@ fn type_node(ty: &Type<'_>) -> AstNode {
                     None,
                     values
                         .iter()
-                        .map(|literal| literal_node("Literal", literal))
+                        .map(|literal| literal_node("Literal", literal, source))
                         .collect(),
                 ));
             }
@@ -323,70 +336,82 @@ fn type_node(ty: &Type<'_>) -> AstNode {
             "StructType",
             None,
             None,
-            fields.iter().map(field_node).collect(),
+            fields
+                .iter()
+                .map(|value| field_node(value, source))
+                .collect(),
         ),
         Type::Enum(fields) => node(
             "EnumType",
             None,
             None,
-            fields.iter().map(field_node).collect(),
+            fields
+                .iter()
+                .map(|value| field_node(value, source))
+                .collect(),
         ),
         Type::Sum(types) => node(
             "SumType",
             None,
             None,
-            types.iter().map(simple_type_node).collect(),
+            types
+                .iter()
+                .map(|value| simple_type_node(value, source))
+                .collect(),
         ),
         Type::Intersection(types) => node(
             "IntersectionType",
             None,
             None,
-            types.iter().map(simple_type_node).collect(),
+            types
+                .iter()
+                .map(|value| simple_type_node(value, source))
+                .collect(),
         ),
     }
 }
 
-fn simple_type_node(ty: &SimpleType<'_>) -> AstNode {
+fn simple_type_node(ty: &SimpleType, source: &str) -> AstNode {
     match ty {
         SimpleType::Optional(inner) => node(
             "OptionalType",
             None,
-            Some(token_range(ty.get_last_token())),
-            vec![simple_type_node(inner)],
+            Some(token_range(&ty.get_last_token(), source)),
+            vec![simple_type_node(inner, source)],
         ),
-        SimpleType::Literal(literal) => literal_node("Literal", literal),
+        SimpleType::Literal(literal) => literal_node("Literal", literal, source),
         SimpleType::Identifier(token, arguments) => node(
             "IdentifierType",
-            Some(token.v.to_string()),
+            Some(token.text(source).to_string()),
             Some(InspectRange {
-                start: token_range(token).start,
-                end: token_range(ty.get_last_token()).end,
+                start: token_range(token, source).start,
+                end: token_range(&ty.get_last_token(), source).end,
             }),
             arguments
                 .as_deref()
                 .unwrap_or(&[])
                 .iter()
-                .map(simple_type_node)
+                .map(|value| simple_type_node(value, source))
                 .collect(),
         ),
         SimpleType::Array(token, arguments) => node(
             "ArrayType",
-            Some(token.v.to_string()),
+            Some(token.text(source).to_string()),
             Some(InspectRange {
-                start: token_range(token).start,
-                end: token_range(ty.get_last_token()).end,
+                start: token_range(token, source).start,
+                end: token_range(&ty.get_last_token(), source).end,
             }),
             arguments
                 .as_deref()
                 .unwrap_or(&[])
                 .iter()
-                .map(simple_type_node)
+                .map(|value| simple_type_node(value, source))
                 .collect(),
         ),
     }
 }
 
-fn literal_node(kind: &'static str, literal: &Literal<'_>) -> AstNode {
+fn literal_node(kind: &'static str, literal: &Literal, source: &str) -> AstNode {
     let (label, children) = match literal {
         Literal::Int(value) => {
             let size = match value.representation.size {
@@ -395,7 +420,7 @@ fn literal_node(kind: &'static str, literal: &Literal<'_>) -> AstNode {
                 }
                 IntegerSize::Arbitrary => "arbitrary precision".to_string(),
             };
-            let source = if value.cast.is_some() {
+            let representation_source = if value.cast.is_some() {
                 "explicit"
             } else {
                 "inferred"
@@ -409,8 +434,8 @@ fn literal_node(kind: &'static str, literal: &Literal<'_>) -> AstNode {
                 value.value.to_string(),
                 vec![node(
                     "IntegerRepresentation",
-                    Some(format!("{signedness}, {size}, {source}")),
-                    value.cast.map(token_range),
+                    Some(format!("{signedness}, {size}, {representation_source}")),
+                    value.cast.map(|value| token_range(&value, source)),
                     Vec::new(),
                 )],
             )
@@ -421,7 +446,7 @@ fn literal_node(kind: &'static str, literal: &Literal<'_>) -> AstNode {
                 FloatSize::F64 => "f64",
                 FloatSize::Decimal => "decimal",
             };
-            let source = if value.cast.is_some() {
+            let representation_source = if value.cast.is_some() {
                 "explicit"
             } else {
                 "inferred"
@@ -431,10 +456,10 @@ fn literal_node(kind: &'static str, literal: &Literal<'_>) -> AstNode {
                 vec![node(
                     "FloatRepresentation",
                     Some(format!(
-                        "signed, {size}, precision {}, scale {}, {source}",
+                        "signed, {size}, precision {}, scale {}, {representation_source}",
                         value.representation.precision, value.representation.scale
                     )),
-                    value.cast.map(token_range),
+                    value.cast.map(|value| token_range(&value, source)),
                     Vec::new(),
                 )],
             )
@@ -446,45 +471,53 @@ fn literal_node(kind: &'static str, literal: &Literal<'_>) -> AstNode {
         kind,
         Some(label),
         Some(InspectRange {
-            start: token_range(literal.token()).start,
-            end: token_range(literal.get_last_token()).end,
+            start: token_range(&literal.token(), source).start,
+            end: token_range(&literal.get_last_token(), source).end,
         }),
         children,
     )
 }
 
-fn field_node(field: &xenomorph_common::parser::KeyValExpr<'_>) -> AstNode {
+fn field_node(field: &xenomorph_common::parser::KeyValExpr, source: &str) -> AstNode {
     let (name, ty, docs) = field;
     let mut children = Vec::new();
     if let Some(docs) = docs {
-        children.push(token_node("Documentation", docs));
+        children.push(token_node("Documentation", docs, source));
     }
-    children.push(simple_type_node(ty));
+    children.push(simple_type_node(ty, source));
     node(
         "Field",
-        Some(name.v.to_string()),
+        Some(name.text(source).to_string()),
         Some(InspectRange {
-            start: token_range(name).start,
-            end: token_range(ty.get_last_token()).end,
+            start: token_range(name, source).start,
+            end: token_range(&ty.get_last_token(), source).end,
         }),
         children,
     )
 }
 
-fn annotation_node(annotation: &Annotation<'_>) -> AstNode {
+fn annotation_node(annotation: &Annotation, source: &str) -> AstNode {
     node(
         "Annotation",
-        Some(annotation.ident.v.to_string()),
-        Some(range_from_to(annotation.ident, annotation.get_last_token())),
-        annotation.params.iter().map(expression_node).collect(),
+        Some(annotation.ident.text(source).to_string()),
+        Some(range_from_to(
+            &annotation.ident,
+            &annotation.get_last_token(),
+            source,
+        )),
+        annotation
+            .params
+            .iter()
+            .map(|value| expression_node(value, source))
+            .collect(),
     )
 }
 
-fn expression_node(expression: &Expr<'_>) -> AstNode {
+fn expression_node(expression: &Expr, source: &str) -> AstNode {
     match expression {
-        Expr::Regex(token) => token_node("RegexExpression", token),
-        Expr::Annotation(annotation) => annotation_node(annotation),
-        Expr::Type(ty) => type_node(ty),
+        Expr::Regex(token) => token_node("RegexExpression", token, source),
+        Expr::Annotation(annotation) => annotation_node(annotation, source),
+        Expr::Type(ty) => type_node(ty, source),
     }
 }
 

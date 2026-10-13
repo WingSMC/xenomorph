@@ -75,6 +75,7 @@ xenomorph_common::export_plugin!(PLUGIN);
 // ── Generator listener ──────────────────────────────────────────────
 
 struct TsGenerator {
+    source: String,
     workdir: PathBuf,
     out: String,
     abs_path: PathBuf,
@@ -95,6 +96,7 @@ struct TsGenerator {
 impl TsGenerator {
     fn new() -> Self {
         Self {
+            source: String::new(),
             workdir: PathBuf::new(),
             out: String::new(),
             abs_path: PathBuf::new(),
@@ -108,6 +110,10 @@ impl TsGenerator {
 }
 
 impl<'src> AnalyzerListener<'src> for TsGenerator {
+    fn set_source(&mut self, source: &str) {
+        self.source.clear();
+        self.source.push_str(source);
+    }
     fn on_before_module(&mut self, scope: &ScopeInfo) {
         self.abs_path = scope.abs_path.clone();
         self.module_path = scope.module_path.clone();
@@ -134,8 +140,8 @@ impl<'src> AnalyzerListener<'src> for TsGenerator {
 
     fn on_before_ast(
         &mut self,
-        ast: &[Declaration<'src>],
-        _errors: &mut Vec<xenomorph_common::XenoDiagnostic<'src>>,
+        ast: &[Declaration],
+        _errors: &mut Vec<xenomorph_common::XenoDiagnostic>,
     ) {
         // Generate type declarations
         for decl in ast {
@@ -147,27 +153,36 @@ impl<'src> AnalyzerListener<'src> for TsGenerator {
                 ..
             } = decl
             {
-                generate_type_decl(&mut self.out, docs, name.v, generics.as_deref(), t);
+                generate_type_decl(
+                    &mut self.out,
+                    docs,
+                    name.text(&self.source),
+                    generics.as_deref(),
+                    t,
+                    &self.source,
+                );
             }
         }
     }
 
-    fn on_before_decl(&mut self, decl: &Declaration<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {
+    fn on_before_decl(&mut self, decl: &Declaration, errors: &mut Vec<XenoDiagnostic>) {
         if let Declaration::Type { name, generics, .. } = decl {
-            report_typescript_keyword(name, "type", errors);
+            report_typescript_keyword(name, "type", errors, &self.source);
             for (generic, _) in generics.as_deref().unwrap_or_default() {
-                report_typescript_keyword(generic, "generic parameter", errors);
+                report_typescript_keyword(generic, "generic parameter", errors, &self.source);
             }
         }
     }
 
-    fn on_simple_type(&mut self, ty: &SimpleType<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {
+    fn on_simple_type(&mut self, ty: &SimpleType, errors: &mut Vec<XenoDiagnostic>) {
         if self.annotation_depth == 0 {
-            if let Some(diagnostic) =
-                unsupported_target_type_diagnostic("TypeScript", ty, &self.type_hierarchy, |name| {
-                    has_native_typescript_mapping(name)
-                })
-            {
+            if let Some(diagnostic) = unsupported_target_type_diagnostic(
+                "TypeScript",
+                ty,
+                &self.type_hierarchy,
+                &self.source,
+                has_native_typescript_mapping,
+            ) {
                 errors.push(diagnostic);
             }
         }
@@ -179,10 +194,10 @@ impl<'src> AnalyzerListener<'src> for TsGenerator {
         if let Literal::Float(float) = literal {
             if !xenomorph_common::parser::decimal_roundtrips_as(&float.value, FloatSize::F64) {
                 errors.push(XenoDiagnostic {
-                    location: float.cast.unwrap_or(float.token).clone(),
+                    location: float.cast.unwrap_or(float.token),
                     message: format!(
                         "TypeScript cannot represent floating-point literal '{}' exactly with its built-in number type.",
-                        float.token.v
+                        float.token.text(&self.source)
                     ),
                     severity: XenoDiagSeverity::Err,
                 });
@@ -192,18 +207,18 @@ impl<'src> AnalyzerListener<'src> for TsGenerator {
 
     fn on_before_annotation(
         &mut self,
-        _name: &TokenData<'src>,
-        _args: &[Expr<'src>],
-        _errors: &mut Vec<XenoDiagnostic<'src>>,
+        _name: &TokenData,
+        _args: &[Expr],
+        _errors: &mut Vec<XenoDiagnostic>,
     ) {
         self.annotation_depth += 1;
     }
 
     fn on_after_annotation(
         &mut self,
-        _name: &TokenData<'src>,
-        _args: &[Expr<'src>],
-        _errors: &mut Vec<XenoDiagnostic<'src>>,
+        _name: &TokenData,
+        _args: &[Expr],
+        _errors: &mut Vec<XenoDiagnostic>,
     ) {
         self.annotation_depth = self.annotation_depth.saturating_sub(1);
     }
@@ -236,13 +251,17 @@ impl<'src> AnalyzerListener<'src> for TsGenerator {
 
 fn generate_type_decl(
     out: &mut String,
-    docs: &Option<&str>,
+    docs: &Option<String>,
     name: &str,
-    generics: Option<&[(&TokenData, Option<&TokenData>)]>,
+    generics: Option<&[(TokenData, Option<TokenData>)]>,
     t: &XenoType,
+    source: &str,
 ) {
-    let annotations: Vec<String> = t.1.iter().map(format_annotation).collect();
-    let generic_params = format_generic_params(generics);
+    let annotations: Vec<String> =
+        t.1.iter()
+            .map(|value| format_annotation(value, source))
+            .collect();
+    let generic_params = format_generic_params(generics, source);
 
     // JSDoc
     if docs.is_some() || !annotations.is_empty() {
@@ -259,23 +278,29 @@ fn generate_type_decl(
     }
 
     if let Type::Struct(fields) = &t.0 {
-        generate_interface(out, name, &generic_params, fields);
+        generate_interface(out, name, &generic_params, fields, source);
         return;
     }
 
     if let Type::Enum(variants) = &t.0 {
-        generate_enum(out, name, variants);
+        generate_enum(out, name, variants, source);
         return;
     }
 
     if let Type::Set(set) = &t.0 {
         if let Some(values) = &set.values {
-            let elems = values.iter().map(literal_to_ts).collect::<Vec<_>>();
+            let elems = values
+                .iter()
+                .map(|value| literal_to_ts(value, source))
+                .collect::<Vec<_>>();
             let constraint = set
                 .element_type
                 .as_ref()
                 .map_or_else(String::new, |element| {
-                    format!(" satisfies readonly {}[]", simple_type_to_ts(element))
+                    format!(
+                        " satisfies readonly {}[]",
+                        simple_type_to_ts(element, source)
+                    )
                 });
             out.push_str(&format!(
                 "export const {name}_TYPE_VALUES = [{}] as const{constraint};\n",
@@ -290,7 +315,10 @@ fn generate_type_decl(
 
     if let Type::Tuple(items) = &t.0 {
         if is_all_required_literals(items) {
-            let values = items.iter().map(simple_type_to_ts).collect::<Vec<_>>();
+            let values = items
+                .iter()
+                .map(|value| simple_type_to_ts(value, source))
+                .collect::<Vec<_>>();
             out.push_str(&format!(
                 "export const {name}_TYPE_VALUES = [{}] as const;\n",
                 values.join(", ")
@@ -302,25 +330,31 @@ fn generate_type_decl(
         }
     }
 
-    let ts = type_to_ts(&t.0);
+    let ts = type_to_ts(&t.0, source);
     out.push_str(&format!("export type {name}{generic_params} = {ts};\n\n"));
 }
 
 // ── Interface (struct) generation ───────────────────────────────────
 
-fn generate_interface(out: &mut String, name: &str, generic_params: &str, fields: &[KeyValExpr]) {
+fn generate_interface(
+    out: &mut String,
+    name: &str,
+    generic_params: &str,
+    fields: &[KeyValExpr],
+    source: &str,
+) {
     out.push_str(&format!("export interface {name}{generic_params} {{\n"));
     for (key, value, docs) in fields {
-        let ts_type = simple_type_to_ts(value);
+        let ts_type = simple_type_to_ts(value, source);
         let optional = is_optional(value);
 
         if let Some(docs) = docs {
-            push_jsdoc(out, extract_documentation(docs), "  ");
+            push_jsdoc(out, extract_documentation(docs, source), "  ");
         }
         let opt = if optional { "?" } else { "" };
         out.push_str(&format!(
             "  {}{opt}: {ts_type};\n",
-            typescript_property_name(key.v)
+            typescript_property_name(key.text(source))
         ));
     }
     out.push_str("}\n\n");
@@ -328,10 +362,10 @@ fn generate_interface(out: &mut String, name: &str, generic_params: &str, fields
 
 // ── Enum generation ─────────────────────────────────────────────────
 
-fn generate_enum(out: &mut String, name: &str, variants: &[KeyValExpr]) {
+fn generate_enum(out: &mut String, name: &str, variants: &[KeyValExpr], source: &str) {
     let all_numeric = variants.iter().all(|(_, value, _)| match value {
         SimpleType::Literal(Literal::Float(_)) => true,
-        SimpleType::Literal(Literal::Int(integer)) => !integer_uses_bigint(integer),
+        SimpleType::Literal(Literal::Int(integer)) => !integer_uses_bigint(integer, source),
         _ => false,
     });
 
@@ -339,26 +373,26 @@ fn generate_enum(out: &mut String, name: &str, variants: &[KeyValExpr]) {
         out.push_str(&format!("export enum {name} {{\n"));
         for (key, value, docs) in variants {
             if let Some(docs) = docs {
-                push_jsdoc(out, extract_documentation(docs), "  ");
+                push_jsdoc(out, extract_documentation(docs, source), "  ");
             }
             out.push_str(&format!(
                 "  {} = {},\n",
-                typescript_property_name(key.v),
-                simple_type_to_ts(value)
+                typescript_property_name(key.text(source)),
+                simple_type_to_ts(value, source)
             ));
         }
         out.push_str("}\n\n");
     } else {
         out.push_str(&format!("export type {name} =\n"));
         for (index, (key, value, docs)) in variants.iter().enumerate() {
-            let payload_ts = simple_type_to_ts(value);
+            let payload_ts = simple_type_to_ts(value, source);
             if let Some(docs) = docs {
-                push_jsdoc(out, extract_documentation(docs), "  ");
+                push_jsdoc(out, extract_documentation(docs, source), "  ");
             }
             let suffix = if index + 1 == variants.len() { ";" } else { "" };
             out.push_str(&format!(
                 "  | {{ kind: \"{}\"; value: {payload_ts} }}{suffix}\n",
-                key.v
+                key.text(source)
             ));
         }
         out.push('\n');
@@ -367,14 +401,14 @@ fn generate_enum(out: &mut String, name: &str, variants: &[KeyValExpr]) {
 
 // ── AST → TypeScript string ─────────────────────────────────────────
 
-fn type_to_ts(ty: &Type) -> String {
+fn type_to_ts(ty: &Type, source: &str) -> String {
     match ty {
-        Type::Simple(simple) => optional_aware_ts(simple),
+        Type::Simple(simple) => optional_aware_ts(simple, source),
         Type::Tuple(items) => format!(
             "[{}]",
             items
                 .iter()
-                .map(optional_aware_ts)
+                .map(|value| optional_aware_ts(value, source))
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -382,10 +416,10 @@ fn type_to_ts(ty: &Type) -> String {
             (_, Some(values)) if values.is_empty() => "never".to_string(),
             (_, Some(values)) => values
                 .iter()
-                .map(literal_to_ts)
+                .map(|value| literal_to_ts(value, source))
                 .collect::<Vec<_>>()
                 .join(" | "),
-            (Some(element), None) => format!("Set<{}>", simple_type_to_ts(element)),
+            (Some(element), None) => format!("Set<{}>", simple_type_to_ts(element, source)),
             (None, None) => unreachable!("the parser rejects sets without a type or prefill"),
         },
         Type::Struct(fields) => format!(
@@ -394,9 +428,9 @@ fn type_to_ts(ty: &Type) -> String {
                 .iter()
                 .map(|(key, value, docs)| format!(
                     "{}{}: {}",
-                    inline_jsdoc(*docs),
-                    typescript_property_name(key.v),
-                    simple_type_to_ts(value)
+                    inline_jsdoc(docs.as_ref(), source),
+                    typescript_property_name(key.text(source)),
+                    simple_type_to_ts(value, source)
                 ))
                 .collect::<Vec<_>>()
                 .join("; ")
@@ -406,21 +440,21 @@ fn type_to_ts(ty: &Type) -> String {
             .map(|(key, value, docs)| {
                 format!(
                     "{}{{ kind: \"{}\"; value: {} }}",
-                    inline_jsdoc(*docs),
-                    key.v,
-                    simple_type_to_ts(value)
+                    inline_jsdoc(docs.as_ref(), source),
+                    key.text(source),
+                    simple_type_to_ts(value, source)
                 )
             })
             .collect::<Vec<_>>()
             .join(" | "),
         Type::Sum(items) => items
             .iter()
-            .map(optional_aware_ts)
+            .map(|value| optional_aware_ts(value, source))
             .collect::<Vec<_>>()
             .join(" | "),
         Type::Intersection(items) => items
             .iter()
-            .map(simple_type_to_ts)
+            .map(|value| simple_type_to_ts(value, source))
             .collect::<Vec<_>>()
             .join(" & "),
     }
@@ -428,38 +462,41 @@ fn type_to_ts(ty: &Type) -> String {
 
 /// Struct fields spell optionality with `?:`. Aliases, tuples, and unions have
 /// no such marker, so it has to become an explicit `| undefined`.
-fn optional_aware_ts(ty: &SimpleType) -> String {
+fn optional_aware_ts(ty: &SimpleType, source: &str) -> String {
     match ty.is_optional() {
-        true => format!("{} | undefined", simple_type_to_ts(ty)),
-        false => simple_type_to_ts(ty),
+        true => format!("{} | undefined", simple_type_to_ts(ty, source)),
+        false => simple_type_to_ts(ty, source),
     }
 }
 
-fn simple_type_to_ts(ty: &SimpleType) -> String {
+fn simple_type_to_ts(ty: &SimpleType, source: &str) -> String {
     match ty.inner() {
-        SimpleType::Literal(literal) => literal_to_ts(literal),
+        SimpleType::Literal(literal) => literal_to_ts(literal, source),
         SimpleType::Identifier(identifier, arguments) => {
-            named_type_to_ts(identifier.v, arguments.as_deref())
+            named_type_to_ts(identifier.text(source), arguments.as_deref(), source)
         }
         SimpleType::Array(identifier, arguments) => {
-            format!("{}[]", named_type_to_ts(identifier.v, arguments.as_deref()))
+            format!(
+                "{}[]",
+                named_type_to_ts(identifier.text(source), arguments.as_deref(), source)
+            )
         }
         SimpleType::Optional(_) => unreachable!("inner() unwraps every optional layer"),
     }
 }
 
-fn named_type_to_ts(name: &str, arguments: Option<&[SimpleType]>) -> String {
+fn named_type_to_ts(name: &str, arguments: Option<&[SimpleType]>, source: &str) -> String {
     if let ("Dict", Some([key, value])) = (name, arguments) {
         return format!(
             "Record<{}, {}>",
-            simple_type_to_ts(key),
-            simple_type_to_ts(value)
+            simple_type_to_ts(key, source),
+            simple_type_to_ts(value, source)
         );
     }
 
     // Utilities are operations: TypeScript spells several of them differently.
     if let Some([target, ..]) = arguments {
-        let target = simple_type_to_ts(target);
+        let target = simple_type_to_ts(target, source);
         match name {
             "Keyof" => return format!("keyof {target}"),
             "Required" => return format!("NonNullable<{target}>"),
@@ -475,7 +512,7 @@ fn named_type_to_ts(name: &str, arguments: Option<&[SimpleType]>) -> String {
             "{base}<{}>",
             arguments
                 .iter()
-                .map(simple_type_to_ts)
+                .map(|value| simple_type_to_ts(value, source))
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -484,7 +521,10 @@ fn named_type_to_ts(name: &str, arguments: Option<&[SimpleType]>) -> String {
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-fn format_generic_params(generics: Option<&[(&TokenData, Option<&TokenData>)]>) -> String {
+fn format_generic_params(
+    generics: Option<&[(TokenData, Option<TokenData>)]>,
+    source: &str,
+) -> String {
     let Some(generics) = generics.filter(|generics| !generics.is_empty()) else {
         return String::new();
     };
@@ -494,11 +534,14 @@ fn format_generic_params(generics: Option<&[(&TokenData, Option<&TokenData>)]>) 
         generics
             .iter()
             .map(
-                |(name, constraint)| match constraint.map(|constraint| constraint.v) {
+                |(name, constraint)| match constraint.map(|constraint| constraint.text(source)) {
                     Some("KeyTrait") => {
-                        format!("{} extends string | number | bigint | symbol", name.v)
+                        format!(
+                            "{} extends string | number | bigint | symbol",
+                            name.text(source)
+                        )
                     }
-                    _ => name.v.to_string(),
+                    _ => name.text(source).to_string(),
                 },
             )
             .collect::<Vec<_>>()
@@ -529,9 +572,11 @@ fn has_native_typescript_mapping(name: &str) -> bool {
     name == "Dict" || native_type_to_ts(name).is_some()
 }
 
-fn literal_to_ts(lit: &Literal) -> String {
+fn literal_to_ts(lit: &Literal, source: &str) -> String {
     match lit {
-        Literal::Int(integer) if integer_uses_bigint(integer) => format!("{}n", integer.value),
+        Literal::Int(integer) if integer_uses_bigint(integer, source) => {
+            format!("{}n", integer.value)
+        }
         Literal::Int(integer) => integer.value.to_string(),
         Literal::Float(float) => float.value.to_string(),
         Literal::String(s, _) => format!("\"{s}\""),
@@ -539,11 +584,13 @@ fn literal_to_ts(lit: &Literal) -> String {
     }
 }
 
-fn integer_uses_bigint(integer: &IntLiteral<'_>) -> bool {
-    if integer
-        .cast
-        .is_some_and(|cast| matches!(cast.v, "i64" | "i128" | "u64" | "u128" | "bigint"))
-    {
+fn integer_uses_bigint(integer: &IntLiteral, source: &str) -> bool {
+    if integer.cast.is_some_and(|cast| {
+        matches!(
+            cast.text(source),
+            "i64" | "i128" | "u64" | "u128" | "bigint"
+        )
+    }) {
         return true;
     }
 
@@ -556,20 +603,28 @@ fn integer_uses_bigint(integer: &IntLiteral<'_>) -> bool {
         })
 }
 
-fn format_annotation(annotation: &Annotation) -> String {
+fn format_annotation(annotation: &Annotation, source: &str) -> String {
     if annotation.params.is_empty() {
-        format!("@{}", annotation.ident.v)
+        format!("@{}", annotation.ident.text(source))
     } else {
-        let arg_strs: Vec<String> = annotation.params.iter().map(expr_to_ts).collect();
-        format!("@{}({})", annotation.ident.v, arg_strs.join(", "))
+        let arg_strs: Vec<String> = annotation
+            .params
+            .iter()
+            .map(|value| expr_to_ts(value, source))
+            .collect();
+        format!(
+            "@{}({})",
+            annotation.ident.text(source),
+            arg_strs.join(", ")
+        )
     }
 }
 
-fn expr_to_ts(expr: &Expr) -> String {
+fn expr_to_ts(expr: &Expr, source: &str) -> String {
     match expr {
-        Expr::Regex(token) => token.v.to_string(),
-        Expr::Annotation(annotation) => format_annotation(annotation),
-        Expr::Type(ty) => type_to_ts(ty),
+        Expr::Regex(token) => token.text(source).to_string(),
+        Expr::Annotation(annotation) => format_annotation(annotation, source),
+        Expr::Type(ty) => type_to_ts(ty, source),
     }
 }
 
@@ -594,11 +649,11 @@ fn format_jsdoc(docs: &str, indent: &str) -> String {
     result
 }
 
-fn inline_jsdoc(docs: Option<&xenomorph_common::TokenData>) -> String {
+fn inline_jsdoc(docs: Option<&xenomorph_common::TokenData>, source: &str) -> String {
     docs.map(|docs| {
         format!(
             "/** {} */ ",
-            extract_documentation(docs)
+            extract_documentation(docs, source)
                 .split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" ")
@@ -726,17 +781,18 @@ fn is_typescript_keyword(candidate: &str) -> bool {
     )
 }
 
-fn report_typescript_keyword<'src>(
-    identifier: &TokenData<'src>,
+fn report_typescript_keyword(
+    identifier: &TokenData,
     kind: &str,
-    errors: &mut Vec<XenoDiagnostic<'src>>,
+    errors: &mut Vec<XenoDiagnostic>,
+    source: &str,
 ) {
-    if is_typescript_keyword(identifier.v) {
+    if is_typescript_keyword(identifier.text(source)) {
         errors.push(XenoDiagnostic {
-            location: identifier.clone(),
+            location: *identifier,
             message: format!(
                 "TypeScript {kind} identifier '{}' conflicts with a reserved keyword.",
-                identifier.v
+                identifier.text(source)
             ),
             severity: XenoDiagSeverity::Err,
         });
@@ -746,6 +802,7 @@ fn report_typescript_keyword<'src>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    const FIXTURE_SOURCE: &str = "displayName string /** Name shown to users. */ T HasLength U value match /^[A-Z]+$/ Dict symbol u64 Marker Alias K KeyTrait 9007199254740991 9007199254740992 1.234567890123456789 1.25 decimal ecu.test class type set \"a\" \"b\" ] >";
     use xenomorph_common::parser::{
         FloatLiteral, FloatRepresentation, IntegerRepresentation, IntegerSize, SetType,
     };
@@ -753,28 +810,21 @@ mod tests {
         OwnedType, TypeDeclarationInfo, TypeHierarchy, BUILTIN_TYPES,
     };
 
+    fn fixture_generator() -> TsGenerator {
+        let mut g = TsGenerator::new();
+        g.set_source(FIXTURE_SOURCE);
+        g
+    }
     #[test]
     fn test_type_and_field_docs_are_preserved() {
-        let key = xenomorph_common::TokenData {
-            v: "displayName",
-            l: 0,
-            c: 0,
-        };
-        let field_type = xenomorph_common::TokenData {
-            v: "string",
-            l: 0,
-            c: 0,
-        };
-        let field_docs = xenomorph_common::TokenData {
-            v: "/** Name shown to users. */",
-            l: 0,
-            c: 0,
-        };
+        let key = xenomorph_common::TokenData::new(0, 11);
+        let field_type = xenomorph_common::TokenData::new(12, 18);
+        let field_docs = xenomorph_common::TokenData::new(19, 46);
         let ty = (
             Type::Struct(vec![(
                 key,
-                SimpleType::Identifier(&field_type, None),
-                Some(&field_docs),
+                SimpleType::Identifier(field_type, None),
+                Some(field_docs),
             )]),
             vec![],
         );
@@ -782,10 +832,11 @@ mod tests {
 
         generate_type_decl(
             &mut out,
-            &Some("A user-facing profile."),
+            &Some("A user-facing profile.".to_string()),
             "Profile",
             None,
             &ty,
+            FIXTURE_SOURCE,
         );
 
         assert!(out.contains(" * A user-facing profile."));
@@ -795,47 +846,53 @@ mod tests {
 
     #[test]
     fn test_type_alias_includes_generic_parameters() {
-        let type_parameter = xenomorph_common::TokenData { v: "T", l: 0, c: 0 };
-        let constraint = xenomorph_common::TokenData {
-            v: "HasLength",
-            l: 0,
-            c: 0,
-        };
-        let aliased_type = xenomorph_common::TokenData { v: "T", l: 0, c: 0 };
-        let generics = [(&type_parameter, Some(&constraint))];
+        let type_parameter = xenomorph_common::TokenData::new(47, 48);
+        let constraint = xenomorph_common::TokenData::new(49, 58);
+        let aliased_type = xenomorph_common::TokenData::new(47, 48);
+        let generics = [(type_parameter, Some(constraint))];
         let ty = (
-            Type::Simple(SimpleType::Identifier(&aliased_type, None)),
+            Type::Simple(SimpleType::Identifier(aliased_type, None)),
             vec![],
         );
         let mut out = String::new();
 
-        generate_type_decl(&mut out, &None, "UserName", Some(&generics), &ty);
+        generate_type_decl(
+            &mut out,
+            &None,
+            "UserName",
+            Some(&generics),
+            &ty,
+            FIXTURE_SOURCE,
+        );
 
         assert_eq!(out, "export type UserName<T> = T;\n\n");
     }
 
     #[test]
     fn test_interface_includes_multiple_generic_parameters() {
-        let first_parameter = xenomorph_common::TokenData { v: "T", l: 0, c: 0 };
-        let second_parameter = xenomorph_common::TokenData { v: "U", l: 0, c: 0 };
-        let field_name = xenomorph_common::TokenData {
-            v: "value",
-            l: 0,
-            c: 0,
-        };
-        let field_type = xenomorph_common::TokenData { v: "T", l: 0, c: 0 };
-        let generics = [(&first_parameter, None), (&second_parameter, None)];
+        let first_parameter = xenomorph_common::TokenData::new(47, 48);
+        let second_parameter = xenomorph_common::TokenData::new(59, 60);
+        let field_name = xenomorph_common::TokenData::new(61, 66);
+        let field_type = xenomorph_common::TokenData::new(47, 48);
+        let generics = [(first_parameter, None), (second_parameter, None)];
         let ty = (
             Type::Struct(vec![(
                 field_name,
-                SimpleType::Identifier(&field_type, None),
+                SimpleType::Identifier(field_type, None),
                 None,
             )]),
             vec![],
         );
         let mut out = String::new();
 
-        generate_type_decl(&mut out, &None, "Container", Some(&generics), &ty);
+        generate_type_decl(
+            &mut out,
+            &None,
+            "Container",
+            Some(&generics),
+            &ty,
+            FIXTURE_SOURCE,
+        );
 
         assert_eq!(
             out,
@@ -848,12 +905,12 @@ mod tests {
         let key = token("ecu.test");
         let field_type = token("string");
         let ty = (
-            Type::Struct(vec![(key, SimpleType::Identifier(&field_type, None), None)]),
+            Type::Struct(vec![(key, SimpleType::Identifier(field_type, None), None)]),
             vec![],
         );
         let mut out = String::new();
 
-        generate_type_decl(&mut out, &None, "Payload", None, &ty);
+        generate_type_decl(&mut out, &None, "Payload", None, &ty, FIXTURE_SOURCE);
 
         assert!(out.contains("  \"ecu.test\": string;"));
     }
@@ -865,15 +922,15 @@ mod tests {
         let value = token("string");
         let declaration = Declaration::Type {
             docs: None,
-            name: &name,
+            name,
             generics: None,
-            ty: (Type::Simple(SimpleType::Identifier(&value, None)), vec![]),
-            from: &from,
-            to: &value,
+            ty: (Type::Simple(SimpleType::Identifier(value, None)), vec![]),
+            from,
+            to: value,
         };
         let mut errors = Vec::new();
 
-        TsGenerator::new().on_before_decl(&declaration, &mut errors);
+        fixture_generator().on_before_decl(&declaration, &mut errors);
 
         assert_eq!(errors.len(), 1);
         assert_eq!(
@@ -884,31 +941,19 @@ mod tests {
 
     #[test]
     fn test_match_annotation_is_preserved_in_jsdoc() {
-        let string_type = xenomorph_common::TokenData {
-            v: "string",
-            l: 0,
-            c: 0,
-        };
-        let match_name = xenomorph_common::TokenData {
-            v: "match",
-            l: 0,
-            c: 7,
-        };
-        let regex = xenomorph_common::TokenData {
-            v: "/^[A-Z]+$/",
-            l: 0,
-            c: 13,
-        };
+        let string_type = xenomorph_common::TokenData::new(12, 18);
+        let match_name = xenomorph_common::TokenData::new(67, 72);
+        let regex = xenomorph_common::TokenData::new(73, 83);
         let ty = (
-            Type::Simple(SimpleType::Identifier(&string_type, None)),
+            Type::Simple(SimpleType::Identifier(string_type, None)),
             vec![Annotation {
-                ident: &match_name,
-                params: vec![Expr::Regex(&regex)],
+                ident: match_name,
+                params: vec![Expr::Regex(regex)],
             }],
         );
         let mut out = String::new();
 
-        generate_type_decl(&mut out, &None, "Uppercase", None, &ty);
+        generate_type_decl(&mut out, &None, "Uppercase", None, &ty, FIXTURE_SOURCE);
 
         assert_eq!(
             out,
@@ -916,12 +961,9 @@ mod tests {
         );
     }
 
-    fn token(value: &str) -> TokenData<'_> {
-        TokenData {
-            v: value,
-            l: 0,
-            c: 0,
-        }
+    fn token(value: &str) -> TokenData {
+        let start = FIXTURE_SOURCE.find(value).unwrap();
+        TokenData::new(start, start + value.len())
     }
 
     #[test]
@@ -932,19 +974,19 @@ mod tests {
         let closing = token("]");
         let ty = (
             Type::Set(SetType {
-                keyword: &keyword,
+                keyword,
                 element_type: None,
                 values: Some(vec![
-                    Literal::String("a".to_string(), &first),
-                    Literal::String("b".to_string(), &second),
+                    Literal::String("a".to_string(), first),
+                    Literal::String("b".to_string(), second),
                 ]),
-                last_token: &closing,
+                last_token: closing,
             }),
             vec![],
         );
         let mut out = String::new();
 
-        generate_type_decl(&mut out, &None, "A", None, &ty);
+        generate_type_decl(&mut out, &None, "A", None, &ty, FIXTURE_SOURCE);
 
         assert_eq!(
             out,
@@ -961,19 +1003,19 @@ mod tests {
         let closing = token("]");
         let ty = (
             Type::Set(SetType {
-                keyword: &keyword,
-                element_type: Some(SimpleType::Identifier(&element, None)),
+                keyword,
+                element_type: Some(SimpleType::Identifier(element, None)),
                 values: Some(vec![
-                    Literal::String("a".to_string(), &first),
-                    Literal::String("b".to_string(), &second),
+                    Literal::String("a".to_string(), first),
+                    Literal::String("b".to_string(), second),
                 ]),
-                last_token: &closing,
+                last_token: closing,
             }),
             vec![],
         );
         let mut out = String::new();
 
-        generate_type_decl(&mut out, &None, "A", None, &ty);
+        generate_type_decl(&mut out, &None, "A", None, &ty, FIXTURE_SOURCE);
 
         assert_eq!(
             out,
@@ -988,16 +1030,16 @@ mod tests {
         let closing = token(">");
         let ty = (
             Type::Set(SetType {
-                keyword: &keyword,
-                element_type: Some(SimpleType::Identifier(&element, None)),
+                keyword,
+                element_type: Some(SimpleType::Identifier(element, None)),
                 values: None,
-                last_token: &closing,
+                last_token: closing,
             }),
             vec![],
         );
         let mut out = String::new();
 
-        generate_type_decl(&mut out, &None, "A", None, &ty);
+        generate_type_decl(&mut out, &None, "A", None, &ty, FIXTURE_SOURCE);
 
         assert_eq!(out, "export type A = Set<string>;\n\n");
     }
@@ -1008,14 +1050,14 @@ mod tests {
         let second = token("\"b\"");
         let ty = (
             Type::Tuple(vec![
-                SimpleType::Literal(Literal::String("a".to_string(), &first)),
-                SimpleType::Literal(Literal::String("b".to_string(), &second)),
+                SimpleType::Literal(Literal::String("a".to_string(), first)),
+                SimpleType::Literal(Literal::String("b".to_string(), second)),
             ]),
             vec![],
         );
         let mut out = String::new();
 
-        generate_type_decl(&mut out, &None, "P", None, &ty);
+        generate_type_decl(&mut out, &None, "P", None, &ty, FIXTURE_SOURCE);
 
         assert_eq!(
             out,
@@ -1071,45 +1113,32 @@ mod tests {
             key_parameter.constraint_scope.as_deref(),
         ));
 
-        let dict = TokenData {
-            v: "Dict",
-            l: 0,
-            c: 0,
-        };
-        let symbol = TokenData {
-            v: "symbol",
-            l: 0,
-            c: 0,
-        };
-        let value = TokenData {
-            v: "string",
-            l: 0,
-            c: 0,
-        };
+        let dict = TokenData::new(84, 88);
+        let symbol = TokenData::new(89, 95);
+        let value = TokenData::new(12, 18);
         let ty = SimpleType::Identifier(
-            &dict,
+            dict,
             Some(vec![
-                SimpleType::Identifier(&symbol, None),
-                SimpleType::Identifier(&value, None),
+                SimpleType::Identifier(symbol, None),
+                SimpleType::Identifier(value, None),
             ]),
         );
 
-        assert_eq!(simple_type_to_ts(&ty), "Record<symbol, string>");
+        assert_eq!(
+            simple_type_to_ts(&ty, FIXTURE_SOURCE),
+            "Record<symbol, string>"
+        );
 
-        let wide_integer = TokenData {
-            v: "u64",
-            l: 0,
-            c: 0,
-        };
+        let wide_integer = TokenData::new(96, 99);
         let wide_integer_dict = SimpleType::Identifier(
-            &dict,
+            dict,
             Some(vec![
-                SimpleType::Identifier(&wide_integer, None),
-                SimpleType::Identifier(&value, None),
+                SimpleType::Identifier(wide_integer, None),
+                SimpleType::Identifier(value, None),
             ]),
         );
         assert_eq!(
-            simple_type_to_ts(&wide_integer_dict),
+            simple_type_to_ts(&wide_integer_dict, FIXTURE_SOURCE),
             "Record<bigint, string>"
         );
     }
@@ -1122,13 +1151,10 @@ mod tests {
             generic_params: None,
             parents: None,
         };
-        let marker = TokenData {
-            v: "Marker",
-            l: 0,
-            c: 0,
-        };
-        let ty = SimpleType::Identifier(&marker, None);
+        let marker = TokenData::new(100, 106);
+        let ty = SimpleType::Identifier(marker, None);
         let mut generator = TsGenerator::new();
+        generator.set_source(FIXTURE_SOURCE);
         generator.type_hierarchy.insert_semantic_type(&MARKER);
         let mut errors = Vec::new();
 
@@ -1149,13 +1175,10 @@ mod tests {
             generic_params: None,
             parents: None,
         };
-        let alias = TokenData {
-            v: "Alias",
-            l: 0,
-            c: 0,
-        };
-        let ty = SimpleType::Identifier(&alias, None);
+        let alias = TokenData::new(107, 112);
+        let ty = SimpleType::Identifier(alias, None);
         let mut generator = TsGenerator::new();
+        generator.set_source(FIXTURE_SOURCE);
         generator.type_hierarchy.set_current_module("test");
         generator.type_hierarchy.register_module("test", Vec::new());
         generator.type_hierarchy.insert_semantic_type(&MARKER);
@@ -1182,43 +1205,27 @@ mod tests {
 
     #[test]
     fn key_trait_generics_include_all_native_typescript_key_types() {
-        let parameter = TokenData { v: "K", l: 0, c: 0 };
-        let constraint = TokenData {
-            v: "KeyTrait",
-            l: 0,
-            c: 3,
-        };
+        let parameter = TokenData::new(113, 114);
+        let constraint = TokenData::new(115, 123);
 
         assert_eq!(
-            format_generic_params(Some(&[(&parameter, Some(&constraint))])),
+            format_generic_params(Some(&[(parameter, Some(constraint))]), FIXTURE_SOURCE),
             "<K extends string | number | bigint | symbol>"
         );
     }
 
     #[test]
     fn integer_literals_use_number_or_bigint_without_precision_loss() {
-        let safe_token = TokenData {
-            v: "9007199254740991",
-            l: 0,
-            c: 0,
-        };
-        let unsafe_token = TokenData {
-            v: "9007199254740992",
-            l: 0,
-            c: 0,
-        };
-        let u64_token = TokenData {
-            v: "u64",
-            l: 0,
-            c: 20,
-        };
+        let safe_token = TokenData::new(124, 140);
+        let unsafe_token = TokenData::new(141, 157);
+        let u64_token = TokenData::new(96, 99);
         let safe = Literal::Int(IntLiteral {
             value: 9_007_199_254_740_991_i64.into(),
             representation: IntegerRepresentation {
                 signed: false,
                 size: IntegerSize::Bits(53),
             },
-            token: &safe_token,
+            token: safe_token,
             cast: None,
         });
         let unsafe_integer = Literal::Int(IntLiteral {
@@ -1227,7 +1234,7 @@ mod tests {
                 signed: false,
                 size: IntegerSize::Bits(54),
             },
-            token: &unsafe_token,
+            token: unsafe_token,
             cast: None,
         });
         let explicit_u64 = Literal::Int(IntLiteral {
@@ -1236,34 +1243,34 @@ mod tests {
                 signed: false,
                 size: IntegerSize::Bits(64),
             },
-            token: &safe_token,
-            cast: Some(&u64_token),
+            token: safe_token,
+            cast: Some(u64_token),
         });
 
-        assert_eq!(literal_to_ts(&safe), "9007199254740991");
-        assert_eq!(literal_to_ts(&unsafe_integer), "9007199254740992n");
-        assert_eq!(literal_to_ts(&explicit_u64), "1n");
+        assert_eq!(literal_to_ts(&safe, FIXTURE_SOURCE), "9007199254740991");
+        assert_eq!(
+            literal_to_ts(&unsafe_integer, FIXTURE_SOURCE),
+            "9007199254740992n"
+        );
+        assert_eq!(literal_to_ts(&explicit_u64, FIXTURE_SOURCE), "1n");
     }
 
     #[test]
     fn overprecise_float_reports_a_generation_error() {
-        let token = TokenData {
-            v: "1.234567890123456789",
-            l: 0,
-            c: 0,
-        };
+        let token = TokenData::new(158, 178);
         let ty = SimpleType::Literal(Literal::Float(FloatLiteral {
-            value: token.v.parse().expect("valid decimal"),
+            value: token.text(FIXTURE_SOURCE).parse().expect("valid decimal"),
             representation: FloatRepresentation {
                 signed: true,
                 precision: 19,
                 scale: 18,
                 size: FloatSize::Decimal,
             },
-            token: &token,
+            token,
             cast: None,
         }));
         let mut generator = TsGenerator::new();
+        generator.set_source(FIXTURE_SOURCE);
         let mut errors = Vec::new();
 
         generator.on_simple_type(&ty, &mut errors);
@@ -1274,35 +1281,28 @@ mod tests {
 
     #[test]
     fn exactly_representable_decimal_cast_uses_number() {
-        let token = TokenData {
-            v: "1.25",
-            l: 0,
-            c: 0,
-        };
-        let decimal = TokenData {
-            v: "decimal",
-            l: 0,
-            c: 8,
-        };
+        let token = TokenData::new(179, 183);
+        let decimal = TokenData::new(184, 191);
         let literal = Literal::Float(FloatLiteral {
-            value: token.v.parse().expect("valid decimal"),
+            value: token.text(FIXTURE_SOURCE).parse().expect("valid decimal"),
             representation: FloatRepresentation {
                 signed: true,
                 precision: 3,
                 scale: 2,
                 size: FloatSize::Decimal,
             },
-            token: &token,
-            cast: Some(&decimal),
+            token,
+            cast: Some(decimal),
         });
         let ty = SimpleType::Literal(literal.clone());
         let mut generator = TsGenerator::new();
+        generator.set_source(FIXTURE_SOURCE);
         let mut errors = Vec::new();
 
         generator.on_simple_type(&ty, &mut errors);
 
         assert!(errors.is_empty());
-        assert_eq!(literal_to_ts(&literal), "1.25");
+        assert_eq!(literal_to_ts(&literal, FIXTURE_SOURCE), "1.25");
     }
 
     #[test]

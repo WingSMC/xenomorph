@@ -9,17 +9,19 @@ use crate::{
     TokenData, XenoDiagnostic,
 };
 
-pub struct AnnotationValidator {
-    scope: ScopeInfo,
+pub struct AnnotationValidator<'context> {
+    scope: &'context ScopeInfo,
+    source: &'context str,
     type_stack: Vec<Vec<OwnedType>>,
     generic_params: HashMap<String, Option<String>>,
     annotation_depth: usize,
 }
 
-impl AnnotationValidator {
-    pub fn new(scope: &ScopeInfo) -> Self {
+impl<'context> AnnotationValidator<'context> {
+    pub fn new(scope: &'context ScopeInfo, source: &'context str) -> Self {
         Self {
-            scope: scope.clone(),
+            scope,
+            source,
             type_stack: Vec::new(),
             generic_params: HashMap::new(),
             annotation_depth: 0,
@@ -30,14 +32,14 @@ impl AnnotationValidator {
         self.type_stack.last().map_or(&[], Vec::as_slice)
     }
 
-    fn resolve_types(&self, ty: &AstType<'_>) -> Vec<OwnedType> {
+    fn resolve_types(&self, ty: &AstType) -> Vec<OwnedType> {
         let candidate = match &ty.0 {
             // Validators on a standalone optional type apply to its present
             // value, preserving the established source behavior. Composite
             // types retain optionality because it changes what `|` and `&`
             // can guarantee as a whole.
-            Type::Simple(simple) => simple_to_owned_type(simple.inner()),
-            ty => type_to_owned_type(ty),
+            Type::Simple(simple) => simple_to_owned_type(simple.inner(), self.source),
+            ty => type_to_owned_type(ty, self.source),
         };
         vec![self.resolve_generic_references(candidate)]
     }
@@ -126,11 +128,11 @@ impl AnnotationValidator {
         }
     }
 
-    fn validate_applicability<'src>(
+    fn validate_applicability(
         &self,
         annotation: &OwnedAnnotation,
-        name: &TokenData<'src>,
-        errors: &mut Vec<XenoDiagnostic<'src>>,
+        name: &TokenData,
+        errors: &mut Vec<XenoDiagnostic>,
     ) {
         if self.annotation_depth > 0 {
             return;
@@ -143,7 +145,7 @@ impl AnnotationValidator {
         for candidate in self.current_types() {
             if !self.type_matches_constraint(candidate, &target.constraint) {
                 errors.push(XenoDiagnostic {
-                    location: (*name).clone(),
+                    location: (*name),
                     message: format!(
                         "Annotation '@{}' is not applicable to type '{}'. Required {}(s): {}.",
                         annotation.name,
@@ -157,12 +159,12 @@ impl AnnotationValidator {
         }
     }
 
-    fn validate_args<'src>(
+    fn validate_args(
         &self,
         annotation: &OwnedAnnotation,
-        name: &TokenData<'src>,
-        args: &[Expr<'src>],
-        errors: &mut Vec<XenoDiagnostic<'src>>,
+        name: &TokenData,
+        args: &[Expr],
+        errors: &mut Vec<XenoDiagnostic>,
     ) {
         let expected_params = annotation.explicit_parameters();
         let invalid_count = if annotation.variadic {
@@ -173,7 +175,7 @@ impl AnnotationValidator {
         if invalid_count {
             errors.push(XenoDiagnostic {
                 severity: crate::XenoDiagSeverity::Err,
-                location: (*name).clone(),
+                location: (*name),
                 message: format!(
                     "Annotation '@{}' expects {}{} argument(s), got {}.",
                     annotation.name,
@@ -214,12 +216,13 @@ impl AnnotationValidator {
         }
     }
 
-    fn arg_matches_constraint(&self, arg: &Expr<'_>, required: &OwnedConstraint) -> bool {
+    fn arg_matches_constraint(&self, arg: &Expr, required: &OwnedConstraint) -> bool {
         match required {
             OwnedConstraint::Type(required) => match arg {
-                Expr::Type(Type::Simple(simple)) => self
-                    .scope
-                    .descends_from_semantic_type(&simple_to_owned_type(simple), required),
+                Expr::Type(Type::Simple(simple)) => self.scope.descends_from_semantic_type(
+                    &simple_to_owned_type(simple, self.source),
+                    required,
+                ),
                 _ => false,
             },
             OwnedConstraint::Trait(required) => self
@@ -237,7 +240,7 @@ impl AnnotationValidator {
         }
     }
 
-    fn arg_matches_trait(&self, arg: &Expr<'_>, required: &OwnedTrait) -> bool {
+    fn arg_matches_trait(&self, arg: &Expr, required: &OwnedTrait) -> bool {
         match &required.kind {
             OwnedTraitKind::Expression => true,
             OwnedTraitKind::Literal => matches!(
@@ -248,7 +251,7 @@ impl AnnotationValidator {
                 Expr::Type(Type::Simple(SimpleType::Literal(literal))) => {
                     let candidate = match literal {
                         Literal::Int(_) | Literal::Float(_) => {
-                            OwnedType::named(literal.semantic_type_name())
+                            OwnedType::named(literal.semantic_type_name(self.source))
                         }
                         Literal::String(_, _) => OwnedType::named("string"),
                         Literal::Boolean(_, _) => OwnedType::named("bool"),
@@ -263,7 +266,7 @@ impl AnnotationValidator {
             }
             OwnedTraitKind::Type => match arg {
                 Expr::Type(Type::Simple(SimpleType::Identifier(identifier, _))) => {
-                    self.scope.has_type(identifier.v)
+                    self.scope.has_type(identifier.text(self.source))
                 }
                 _ => false,
             },
@@ -271,7 +274,7 @@ impl AnnotationValidator {
             OwnedTraitKind::Semantic => match arg {
                 Expr::Type(Type::Simple(simple)) => self
                     .scope
-                    .implements_trait(&simple_to_owned_type(simple), &required.name),
+                    .implements_trait(&simple_to_owned_type(simple, self.source), &required.name),
                 _ => false,
             },
             OwnedTraitKind::Struct => matches!(arg, Expr::Type(Type::Struct(_))),
@@ -290,30 +293,29 @@ impl AnnotationValidator {
         }
     }
 
-    fn expr_location<'src>(expr: &Expr<'src>) -> TokenData<'src> {
+    fn expr_location(expr: &Expr) -> TokenData {
         match expr {
-            Expr::Regex(token) => (*token).clone(),
-            Expr::Annotation(annotation) => (*annotation.ident).clone(),
+            Expr::Regex(token) => *token,
+            Expr::Annotation(annotation) => annotation.ident,
             Expr::Type(ty) => Self::type_location(ty),
         }
     }
 
-    fn type_location<'src>(ty: &Type<'src>) -> TokenData<'src> {
+    fn type_location(ty: &Type) -> TokenData {
         match ty {
-            Type::Simple(simple) => simple.get_last_token().clone(),
+            Type::Simple(simple) => simple.get_last_token(),
             Type::Tuple(items) | Type::Sum(items) | Type::Intersection(items) => items
                 .first()
-                .map(|item| item.get_last_token().clone())
+                .map(|item| item.get_last_token())
                 .unwrap_or_default(),
-            Type::Set(set) => set.last_token.clone(),
-            Type::Struct(fields) | Type::Enum(fields) => fields
-                .first()
-                .map(|(key, _, _)| (*key).clone())
-                .unwrap_or_default(),
+            Type::Set(set) => set.last_token,
+            Type::Struct(fields) | Type::Enum(fields) => {
+                fields.first().map(|(key, _, _)| *key).unwrap_or_default()
+            }
         }
     }
 
-    fn arg_type_name(arg: &Expr<'_>) -> &'static str {
+    fn arg_type_name(arg: &Expr) -> &'static str {
         match arg {
             Expr::Regex(_) => "regex literal",
             Expr::Annotation(_) => "annotation",
@@ -337,16 +339,12 @@ impl AnnotationValidator {
     }
 }
 
-impl<'src> AnalyzerListener<'src> for AnnotationValidator {
-    fn on_before_type(&mut self, ty: &AstType<'src>, _errors: &mut Vec<XenoDiagnostic<'src>>) {
+impl<'src, 'context> AnalyzerListener<'src> for AnnotationValidator<'context> {
+    fn on_before_type(&mut self, ty: &AstType, _errors: &mut Vec<XenoDiagnostic>) {
         self.type_stack.push(self.resolve_types(ty));
     }
 
-    fn on_before_decl(
-        &mut self,
-        declaration: &Declaration<'src>,
-        _errors: &mut Vec<XenoDiagnostic<'src>>,
-    ) {
+    fn on_before_decl(&mut self, declaration: &Declaration, _errors: &mut Vec<XenoDiagnostic>) {
         self.generic_params.clear();
         if let Declaration::Type { generics, .. } = declaration {
             self.generic_params
@@ -357,33 +355,30 @@ impl<'src> AnalyzerListener<'src> for AnnotationValidator {
                         .iter()
                         .map(|(name, constraint)| {
                             (
-                                name.v.to_string(),
-                                constraint.map(|constraint| constraint.v.to_string()),
+                                name.text(self.source).to_string(),
+                                constraint
+                                    .map(|constraint| constraint.text(self.source).to_string()),
                             )
                         }),
                 );
         }
     }
 
-    fn on_after_decl(
-        &mut self,
-        _declaration: &Declaration<'src>,
-        _errors: &mut Vec<XenoDiagnostic<'src>>,
-    ) {
+    fn on_after_decl(&mut self, _declaration: &Declaration, _errors: &mut Vec<XenoDiagnostic>) {
         self.generic_params.clear();
     }
 
-    fn on_after_type(&mut self, _ty: &AstType<'src>, _errors: &mut Vec<XenoDiagnostic<'src>>) {
+    fn on_after_type(&mut self, _ty: &AstType, _errors: &mut Vec<XenoDiagnostic>) {
         self.type_stack.pop();
     }
 
     fn on_before_annotation(
         &mut self,
-        name: &TokenData<'src>,
-        args: &[Expr<'src>],
-        errors: &mut Vec<XenoDiagnostic<'src>>,
+        name: &TokenData,
+        args: &[Expr],
+        errors: &mut Vec<XenoDiagnostic>,
     ) {
-        if let Some(annotation) = self.scope.find_annotation(name.v) {
+        if let Some(annotation) = self.scope.find_annotation(name.text(self.source)) {
             self.validate_applicability(annotation, name, errors);
             self.validate_args(annotation, name, args, errors);
         }
@@ -392,9 +387,9 @@ impl<'src> AnalyzerListener<'src> for AnnotationValidator {
 
     fn on_after_annotation(
         &mut self,
-        _name: &TokenData<'src>,
-        _args: &[Expr<'src>],
-        _errors: &mut Vec<XenoDiagnostic<'src>>,
+        _name: &TokenData,
+        _args: &[Expr],
+        _errors: &mut Vec<XenoDiagnostic>,
     ) {
         self.annotation_depth = self.annotation_depth.saturating_sub(1);
     }
@@ -410,11 +405,11 @@ mod tests {
     use crate::parser::{Annotation, IntLiteral, IntegerRepresentation, IntegerSize};
     use crate::semantic::{TypeDeclarationInfo, TypeHierarchy, BUILTIN_ANNOTATIONS, BUILTIN_TYPES};
 
-    fn scope(ast: &[Declaration<'_>]) -> ScopeInfo {
+    fn scope(ast: &[Declaration], source: &str) -> ScopeInfo {
         let own_types = ast
             .iter()
             .filter_map(|declaration| match declaration {
-                Declaration::Type { name, .. } => Some(name.v.to_string()),
+                Declaration::Type { name, .. } => Some(name.text(source).to_string()),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -431,8 +426,8 @@ mod tests {
             {
                 type_hierarchy.insert_declaration(
                     "test",
-                    name.v,
-                    TypeDeclarationInfo::from_ast(generics.as_deref(), &ty.0),
+                    name.text(source),
+                    TypeDeclarationInfo::from_ast(generics.as_deref(), &ty.0, source),
                 );
             }
         }
@@ -455,7 +450,7 @@ mod tests {
         }
     }
 
-    fn int_arg<'src>(value: &'src TokenData<'src>) -> Expr<'src> {
+    fn int_arg(value: &TokenData) -> Expr {
         Expr::Type(Type::Simple(SimpleType::Literal(Literal::Int(
             IntLiteral {
                 value: BigInt::from(5),
@@ -463,7 +458,7 @@ mod tests {
                     signed: false,
                     size: IntegerSize::Bits(3),
                 },
-                token: value,
+                token: *value,
                 cast: None,
             },
         ))))
@@ -471,29 +466,18 @@ mod tests {
 
     #[test]
     fn annotation_applicability_resolves_custom_literal_aliases() {
-        let a_name = TokenData { v: "A", l: 0, c: 5 };
-        let b_name = TokenData { v: "B", l: 1, c: 5 };
-        let string_literal = TokenData {
-            v: "\"literal\"",
-            l: 0,
-            c: 9,
-        };
-        let a_reference = TokenData { v: "A", l: 1, c: 9 };
-        let max = TokenData {
-            v: "max",
-            l: 1,
-            c: 12,
-        };
-        let value = TokenData {
-            v: "5",
-            l: 1,
-            c: 16,
-        };
+        let source = "A B \"literal\" A max 5";
+        let a_name = TokenData::new(0, 1);
+        let b_name = TokenData::new(2, 3);
+        let string_literal = TokenData::new(4, 13);
+        let a_reference = TokenData::new(14, 15);
+        let max = TokenData::new(16, 19);
+        let value = TokenData::new(20, 21);
         let max_args = vec![int_arg(&value)];
         let b_type = (
-            Type::Simple(SimpleType::Identifier(&a_reference, None)),
+            Type::Simple(SimpleType::Identifier(a_reference, None)),
             vec![Annotation {
-                ident: &max,
+                ident: max,
                 params: max_args.clone(),
             }],
         );
@@ -501,28 +485,29 @@ mod tests {
         let ast = vec![
             Declaration::Type {
                 docs: None,
-                name: &a_name,
+                name: a_name,
                 generics: None,
                 ty: (
                     Type::Simple(SimpleType::Literal(Literal::String(
                         "literal".to_string(),
-                        &string_literal,
+                        string_literal,
                     ))),
                     vec![],
                 ),
-                from: &from,
-                to: &from,
+                from,
+                to: from,
             },
             Declaration::Type {
                 docs: None,
-                name: &b_name,
+                name: b_name,
                 generics: None,
                 ty: b_type.clone(),
-                from: &from,
-                to: &from,
+                from,
+                to: from,
             },
         ];
-        let mut validator = AnnotationValidator::new(&scope(&ast));
+        let scope = scope(&ast, source);
+        let mut validator = AnnotationValidator::new(&scope, source);
         let mut errors = Vec::new();
 
         validator.on_before_ast(&ast, &mut errors);
@@ -537,29 +522,18 @@ mod tests {
 
     #[test]
     fn annotation_applicability_accepts_custom_numeric_aliases() {
-        let a_name = TokenData { v: "A", l: 0, c: 5 };
-        let b_name = TokenData { v: "B", l: 1, c: 5 };
-        let u8_type = TokenData {
-            v: "u8",
-            l: 0,
-            c: 9,
-        };
-        let a_reference = TokenData { v: "A", l: 1, c: 9 };
-        let max = TokenData {
-            v: "max",
-            l: 1,
-            c: 12,
-        };
-        let value = TokenData {
-            v: "5",
-            l: 1,
-            c: 16,
-        };
+        let source = "A B u8 A max 5";
+        let a_name = TokenData::new(0, 1);
+        let b_name = TokenData::new(2, 3);
+        let u8_type = TokenData::new(4, 6);
+        let a_reference = TokenData::new(7, 8);
+        let max = TokenData::new(9, 12);
+        let value = TokenData::new(13, 14);
         let max_args = vec![int_arg(&value)];
         let b_type = (
-            Type::Simple(SimpleType::Identifier(&a_reference, None)),
+            Type::Simple(SimpleType::Identifier(a_reference, None)),
             vec![Annotation {
-                ident: &max,
+                ident: max,
                 params: max_args.clone(),
             }],
         );
@@ -567,22 +541,23 @@ mod tests {
         let ast = vec![
             Declaration::Type {
                 docs: None,
-                name: &a_name,
+                name: a_name,
                 generics: None,
-                ty: (Type::Simple(SimpleType::Identifier(&u8_type, None)), vec![]),
-                from: &from,
-                to: &from,
+                ty: (Type::Simple(SimpleType::Identifier(u8_type, None)), vec![]),
+                from,
+                to: from,
             },
             Declaration::Type {
                 docs: None,
-                name: &b_name,
+                name: b_name,
                 generics: None,
                 ty: b_type.clone(),
-                from: &from,
-                to: &from,
+                from,
+                to: from,
             },
         ];
-        let mut validator = AnnotationValidator::new(&scope(&ast));
+        let scope = scope(&ast, source);
+        let mut validator = AnnotationValidator::new(&scope, source);
         let mut errors = Vec::new();
 
         validator.on_before_ast(&ast, &mut errors);

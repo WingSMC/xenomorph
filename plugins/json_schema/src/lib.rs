@@ -53,6 +53,7 @@ const DRAFT: &str = "https://json-schema.org/draft/2020-12/schema";
 // ── Generator listener ──────────────────────────────────────────────
 
 struct JsonSchemaGenerator {
+    source: String,
     workdir: PathBuf,
     /// Accumulated `$defs` for the current module.
     defs: Map<String, Value>,
@@ -74,7 +75,7 @@ struct JsonSchemaGenerator {
 }
 
 struct SchemaContext<'ast, 'src> {
-    declarations: HashMap<&'src str, &'ast Declaration<'src>>,
+    declarations: HashMap<&'src str, &'ast Declaration>,
     substitutions: Vec<HashMap<String, Value>>,
     resolving_specializations: HashSet<String>,
 }
@@ -105,6 +106,7 @@ fn create_generator(config: &Config) -> Box<dyn for<'a> AnalyzerListener<'a>> {
 impl JsonSchemaGenerator {
     fn new() -> Self {
         Self {
+            source: String::new(),
             workdir: PathBuf::new(),
             defs: Map::new(),
             abs_path: PathBuf::new(),
@@ -157,9 +159,9 @@ impl JsonSchemaGenerator {
 
     fn type_decl_to_schema(
         &self,
-        docs: &Option<&str>,
+        docs: &Option<String>,
         name: &str,
-        generics: Option<&[(&TokenData<'_>, Option<&TokenData<'_>>)]>,
+        generics: Option<&[(TokenData, Option<TokenData>)]>,
         t: &XenoType,
         context: &mut SchemaContext<'_, '_>,
     ) -> Value {
@@ -169,20 +171,20 @@ impl JsonSchemaGenerator {
 
         for (parameter, constraint) in generic_parameters {
             generic_defs.insert(
-                parameter.v.to_string(),
+                parameter.text(&self.source).to_string(),
                 self.generic_parameter_schema(
-                    parameter.v,
-                    constraint.map(|constraint| constraint.v),
+                    parameter.text(&self.source),
+                    constraint.map(|constraint| constraint.text(&self.source)),
                     context,
                 ),
             );
             parameter_refs.insert(
-                parameter.v.to_string(),
+                parameter.text(&self.source).to_string(),
                 json!({
                     "$ref": format!(
                         "#/$defs/{}/$defs/{}",
                         escape_json_pointer_token(name),
-                        escape_json_pointer_token(parameter.v)
+                        escape_json_pointer_token(parameter.text(&self.source))
                     )
                 }),
             );
@@ -210,9 +212,15 @@ impl JsonSchemaGenerator {
                             .iter()
                             .map(|(parameter, constraint)| {
                                 let mut metadata = Map::new();
-                                metadata.insert("name".to_string(), json!(parameter.v));
+                                metadata.insert(
+                                    "name".to_string(),
+                                    json!(parameter.text(&self.source)),
+                                );
                                 if let Some(constraint) = constraint {
-                                    metadata.insert("constraint".to_string(), json!(constraint.v));
+                                    metadata.insert(
+                                        "constraint".to_string(),
+                                        json!(constraint.text(&self.source)),
+                                    );
                                 }
                                 Value::Object(metadata)
                             })
@@ -254,7 +262,7 @@ impl JsonSchemaGenerator {
 
     fn anonym_type_to_schema(&self, ty: &XenoType, context: &mut SchemaContext<'_, '_>) -> Value {
         let mut base = self.type_to_schema(&ty.0, context);
-        apply_annotations(&mut base, &ty.1);
+        apply_annotations(&mut base, &ty.1, &self.source);
         base
     }
 
@@ -282,13 +290,15 @@ impl JsonSchemaGenerator {
 
     fn simple_type_to_schema(&self, ty: &SimpleType, context: &mut SchemaContext<'_, '_>) -> Value {
         let base = match ty.inner() {
-            SimpleType::Literal(literal) => literal_to_schema(literal),
-            SimpleType::Identifier(identifier, arguments) => {
-                self.named_type_to_schema(identifier.v, arguments.as_deref(), context)
-            }
+            SimpleType::Literal(literal) => literal_to_schema(literal, &self.source),
+            SimpleType::Identifier(identifier, arguments) => self.named_type_to_schema(
+                identifier.text(&self.source),
+                arguments.as_deref(),
+                context,
+            ),
             SimpleType::Array(identifier, arguments) => json!({
                 "type": "array",
-                "items": self.named_type_to_schema(identifier.v, arguments.as_deref(), context),
+                "items": self.named_type_to_schema(identifier.text(&self.source), arguments.as_deref(), context),
             }),
             SimpleType::Optional(_) => unreachable!("inner() unwraps every optional layer"),
         };
@@ -303,7 +313,7 @@ impl JsonSchemaGenerator {
     fn named_type_to_schema(
         &self,
         name: &str,
-        arguments: Option<&[SimpleType<'_>]>,
+        arguments: Option<&[SimpleType]>,
         context: &mut SchemaContext<'_, '_>,
     ) -> Value {
         if arguments.is_none() {
@@ -351,7 +361,9 @@ impl JsonSchemaGenerator {
                     let substitutions = parameters
                         .iter()
                         .zip(argument_schemas)
-                        .map(|((parameter, _), argument)| (parameter.v.to_string(), argument))
+                        .map(|((parameter, _), argument)| {
+                            (parameter.text(&self.source).to_string(), argument)
+                        })
                         .collect();
                     context.substitutions.push(substitutions);
                     let schema = self.anonym_type_to_schema(ty, context);
@@ -369,10 +381,13 @@ impl JsonSchemaGenerator {
 
     /// Type utilities are operations, so they are evaluated into a concrete
     /// schema rather than referenced by name.
-    fn utility_to_schema(&self, name: &str, arguments: &[SimpleType<'_>]) -> Option<Value> {
+    fn utility_to_schema(&self, name: &str, arguments: &[SimpleType]) -> Option<Value> {
         let candidate = OwnedType::Named {
             name: name.to_string(),
-            arguments: arguments.iter().map(simple_to_owned_type).collect(),
+            arguments: arguments
+                .iter()
+                .map(|ty| simple_to_owned_type(ty, &self.source))
+                .collect(),
         };
         let evaluated = self.type_hierarchy.evaluate_type(&candidate).ok()?;
         (evaluated != candidate).then(|| self.owned_type_to_schema(&evaluated))
@@ -548,7 +563,7 @@ impl JsonSchemaGenerator {
                         .as_deref()
                         .unwrap_or_default()
                         .iter()
-                        .map(literal_to_schema)
+                        .map(|literal| literal_to_schema(literal, &self.source))
                         .collect(),
                 )
             },
@@ -574,10 +589,14 @@ impl JsonSchemaGenerator {
         let mut required: Vec<Value> = Vec::new();
 
         for (key, value, docs) in fields {
-            let schema = with_description(self.simple_type_to_schema(value, context), *docs);
-            properties.insert(key.v.to_string(), schema);
+            let schema = with_description(
+                self.simple_type_to_schema(value, context),
+                *docs,
+                &self.source,
+            );
+            properties.insert(key.text(&self.source).to_string(), schema);
             if !is_optional(value) {
-                required.push(json!(key.v));
+                required.push(json!(key.text(&self.source)));
             }
         }
 
@@ -621,6 +640,7 @@ impl JsonSchemaGenerator {
                     SimpleType::Literal(literal) => Some(with_description(
                         json!({ "const": literal_to_json(literal) }),
                         *docs,
+                        &self.source,
                     )),
                     _ => None,
                 })
@@ -635,13 +655,14 @@ impl JsonSchemaGenerator {
                         json!({
                             "type": "object",
                             "properties": {
-                                "kind": { "const": key.v },
+                                "kind": { "const": key.text(&self.source) },
                                 "value": self.simple_type_to_schema(value, context),
                             },
                             "required": ["kind", "value"],
                             "additionalProperties": false,
                         }),
                         *docs,
+                        &self.source,
                     )
                 })
                 .collect();
@@ -651,6 +672,10 @@ impl JsonSchemaGenerator {
 }
 
 impl<'src> AnalyzerListener<'src> for JsonSchemaGenerator {
+    fn set_source(&mut self, source: &str) {
+        self.source.clear();
+        self.source.push_str(source);
+    }
     fn on_before_module(&mut self, scope: &ScopeInfo) {
         self.abs_path = scope.abs_path.clone();
         self.module_path = scope.module_path.clone();
@@ -663,13 +688,13 @@ impl<'src> AnalyzerListener<'src> for JsonSchemaGenerator {
 
     fn on_before_ast(
         &mut self,
-        ast: &[Declaration<'src>],
-        _errors: &mut Vec<xenomorph_common::XenoDiagnostic<'src>>,
+        ast: &[Declaration],
+        _errors: &mut Vec<xenomorph_common::XenoDiagnostic>,
     ) {
         let declarations = ast
             .iter()
             .filter_map(|declaration| match declaration {
-                Declaration::Type { name, .. } => Some((name.v, declaration)),
+                Declaration::Type { name, .. } => Some((name.text(&self.source), declaration)),
                 Declaration::Import { .. } | Declaration::Custom { .. } => None,
             })
             .collect::<HashMap<_, _>>();
@@ -692,19 +717,26 @@ impl<'src> AnalyzerListener<'src> for JsonSchemaGenerator {
                 ..
             } = decl
             {
-                let schema =
-                    self.type_decl_to_schema(docs, name.v, generics.as_deref(), t, &mut context);
-                self.defs.insert(name.v.to_string(), schema);
+                let schema = self.type_decl_to_schema(
+                    docs,
+                    name.text(&self.source),
+                    generics.as_deref(),
+                    t,
+                    &mut context,
+                );
+                self.defs
+                    .insert(name.text(&self.source).to_string(), schema);
             }
         }
     }
 
-    fn on_simple_type(&mut self, ty: &SimpleType<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {
+    fn on_simple_type(&mut self, ty: &SimpleType, errors: &mut Vec<XenoDiagnostic>) {
         if self.annotation_depth == 0 {
             if let Some(diagnostic) = unsupported_target_type_diagnostic(
                 "JSON Schema",
                 ty,
                 &self.type_hierarchy,
+                &self.source,
                 |name| builtin_to_schema(name).is_some(),
             ) {
                 errors.push(diagnostic);
@@ -714,18 +746,18 @@ impl<'src> AnalyzerListener<'src> for JsonSchemaGenerator {
 
     fn on_before_annotation(
         &mut self,
-        _name: &TokenData<'src>,
-        _args: &[Expr<'src>],
-        _errors: &mut Vec<XenoDiagnostic<'src>>,
+        _name: &TokenData,
+        _args: &[Expr],
+        _errors: &mut Vec<XenoDiagnostic>,
     ) {
         self.annotation_depth += 1;
     }
 
     fn on_after_annotation(
         &mut self,
-        _name: &TokenData<'src>,
-        _args: &[Expr<'src>],
-        _errors: &mut Vec<XenoDiagnostic<'src>>,
+        _name: &TokenData,
+        _args: &[Expr],
+        _errors: &mut Vec<XenoDiagnostic>,
     ) {
         self.annotation_depth = self.annotation_depth.saturating_sub(1);
     }
@@ -800,7 +832,7 @@ fn trait_constraint_to_schema(name: &str) -> Option<Value> {
 /// Applies xenomorph validation annotations as JSON Schema keywords. The
 /// keyword used for length depends on whether the base schema is a string or
 /// an array.
-fn apply_annotations(schema: &mut Value, annotations: &[Annotation]) {
+fn apply_annotations(schema: &mut Value, annotations: &[Annotation], source: &str) {
     let is_array = schema_type_is(schema, "array");
     let map = match schema {
         Value::Object(map) => map,
@@ -809,7 +841,7 @@ fn apply_annotations(schema: &mut Value, annotations: &[Annotation]) {
 
     for annotation in annotations {
         let number = first_number_arg(&annotation.params);
-        match annotation.ident.v {
+        match annotation.ident.text(source) {
             "min" => insert_number(map, "minimum", number),
             "max" => insert_number(map, "maximum", number),
             "gt" => insert_number(map, "exclusiveMinimum", number),
@@ -828,7 +860,7 @@ fn apply_annotations(schema: &mut Value, annotations: &[Annotation]) {
             "minlen" => insert_number(map, if is_array { "minItems" } else { "minLength" }, number),
             "maxlen" => insert_number(map, if is_array { "maxItems" } else { "maxLength" }, number),
             "match" => {
-                if let Some(pattern) = first_regex_arg(&annotation.params) {
+                if let Some(pattern) = first_regex_arg(&annotation.params, source) {
                     map.insert("pattern".to_string(), json!(pattern));
                 }
             }
@@ -855,9 +887,9 @@ fn first_number_arg(args: &[Expr]) -> Option<Value> {
     None
 }
 
-fn first_regex_arg(args: &[Expr]) -> Option<String> {
+fn first_regex_arg(args: &[Expr], source: &str) -> Option<String> {
     args.iter().find_map(|arg| match arg {
-        Expr::Regex(token) => Some(regex_source(token.v)),
+        Expr::Regex(token) => Some(regex_source(token.text(source))),
         _ => None,
     })
 }
@@ -970,8 +1002,8 @@ fn owned_literal_to_schema(literal: &OwnedLiteral) -> Value {
     Value::Object(schema)
 }
 
-fn literal_to_schema(literal: &Literal) -> Value {
-    owned_literal_to_schema(&literal_to_owned(literal))
+fn literal_to_schema(literal: &Literal, source: &str) -> Value {
+    owned_literal_to_schema(&literal_to_owned(literal, source))
 }
 
 fn exact_json_number(value: &impl ToString) -> Value {
@@ -995,11 +1027,15 @@ fn is_optional(ty: &SimpleType) -> bool {
     ty.is_optional()
 }
 
-fn with_description(mut schema: Value, docs: Option<&xenomorph_common::TokenData>) -> Value {
+fn with_description(
+    mut schema: Value,
+    docs: Option<xenomorph_common::TokenData>,
+    source: &str,
+) -> Value {
     if let (Value::Object(map), Some(docs)) = (&mut schema, docs) {
         map.insert(
             "description".to_string(),
-            json!(extract_documentation(docs)),
+            json!(extract_documentation(&docs, source)),
         );
     }
     schema
@@ -1056,12 +1092,18 @@ fn escape_json_pointer_token(token: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const FIXTURE_SOURCE: &str = "displayName string /** Name shown to users. */ Active 1 /** The active state. */ u64 symbol match /^[A-Z]+$/";
     use xenomorph_common::{
         lexer::Lexer,
         parser::{IntLiteral, IntegerRepresentation, IntegerSize, Parser},
         XenoDiagSeverity,
     };
 
+    fn fixture_generator() -> JsonSchemaGenerator {
+        let mut generator = JsonSchemaGenerator::new();
+        generator.set_source(FIXTURE_SOURCE);
+        generator
+    }
     fn empty_context<'ast, 'src>() -> SchemaContext<'ast, 'src> {
         SchemaContext {
             declarations: HashMap::new(),
@@ -1070,12 +1112,12 @@ mod tests {
         }
     }
 
-    fn parse(source: &str) -> Vec<Declaration<'_>> {
+    fn parse(source: &str) -> Vec<Declaration> {
         let tokens = Box::leak(Box::new(
             Lexer::tokenize(Box::leak(source.to_string().into_boxed_str()))
                 .expect("JSON Schema fixture should lex"),
         ));
-        let (ast, diagnostics) = Parser::parse(tokens);
+        let (ast, diagnostics) = Parser::parse(tokens, source);
         assert!(
             diagnostics.is_empty(),
             "unexpected diagnostics: {diagnostics:#?}"
@@ -1086,6 +1128,7 @@ mod tests {
     fn generate_defs(source: &str) -> Map<String, Value> {
         let ast = parse(source);
         let mut generator = JsonSchemaGenerator::new();
+        generator.set_source(source);
         generator.type_hierarchy.set_current_module("test");
         generator.type_hierarchy.register_module("test", Vec::new());
         for semantic_type in xenomorph_common::semantic::BUILTIN_TYPES {
@@ -1098,10 +1141,11 @@ mod tests {
             {
                 generator.type_hierarchy.insert_declaration(
                     "test",
-                    name.v,
+                    name.text(source),
                     xenomorph_common::semantic::TypeDeclarationInfo::from_ast(
                         generics.as_deref(),
                         &ty.0,
+                        source,
                     ),
                 );
             }
@@ -1154,32 +1198,20 @@ mod tests {
 
     #[test]
     fn test_type_and_field_docs_are_preserved() {
-        let key = xenomorph_common::TokenData {
-            v: "displayName",
-            l: 0,
-            c: 0,
-        };
-        let field_type = xenomorph_common::TokenData {
-            v: "string",
-            l: 0,
-            c: 0,
-        };
-        let field_docs = xenomorph_common::TokenData {
-            v: "/** Name shown to users. */",
-            l: 0,
-            c: 0,
-        };
+        let key = xenomorph_common::TokenData::new(0, 11);
+        let field_type = xenomorph_common::TokenData::new(12, 18);
+        let field_docs = xenomorph_common::TokenData::new(19, 46);
         let ty = (
             Type::Struct(vec![(
                 key,
-                SimpleType::Identifier(&field_type, None),
-                Some(&field_docs),
+                SimpleType::Identifier(field_type, None),
+                Some(field_docs),
             )]),
             vec![],
         );
 
-        let schema = JsonSchemaGenerator::new().type_decl_to_schema(
-            &Some("A user-facing profile."),
+        let schema = fixture_generator().type_decl_to_schema(
+            &Some("A user-facing profile.".to_string()),
             "Profile",
             None,
             &ty,
@@ -1196,17 +1228,9 @@ mod tests {
 
     #[test]
     fn test_numeric_enum_member_docs_are_preserved() {
-        let key = xenomorph_common::TokenData {
-            v: "Active",
-            l: 0,
-            c: 0,
-        };
-        let literal = xenomorph_common::TokenData { v: "1", l: 0, c: 0 };
-        let docs = xenomorph_common::TokenData {
-            v: "/** The active state. */",
-            l: 0,
-            c: 0,
-        };
+        let key = xenomorph_common::TokenData::new(47, 53);
+        let literal = xenomorph_common::TokenData::new(54, 55);
+        let docs = xenomorph_common::TokenData::new(56, 80);
         let variants = vec![(
             key,
             SimpleType::Literal(Literal::Int(IntLiteral {
@@ -1215,13 +1239,13 @@ mod tests {
                     signed: false,
                     size: IntegerSize::Bits(1),
                 },
-                token: &literal,
+                token: literal,
                 cast: None,
             })),
-            Some(&docs),
+            Some(docs),
         )];
 
-        let schema = JsonSchemaGenerator::new().enum_to_schema(&variants, &mut empty_context());
+        let schema = fixture_generator().enum_to_schema(&variants, &mut empty_context());
 
         assert_eq!(schema["oneOf"][0]["const"], json!(1));
         assert_eq!(
@@ -1320,23 +1344,19 @@ mod tests {
 
     #[test]
     fn explicitly_sized_literal_preserves_json_schema_bounds() {
-        let value = xenomorph_common::TokenData { v: "1", l: 0, c: 0 };
-        let target = xenomorph_common::TokenData {
-            v: "u64",
-            l: 0,
-            c: 5,
-        };
+        let value = xenomorph_common::TokenData::new(54, 55);
+        let target = xenomorph_common::TokenData::new(81, 84);
         let literal = Literal::Int(IntLiteral {
             value: 1.into(),
             representation: IntegerRepresentation {
                 signed: false,
                 size: IntegerSize::Bits(64),
             },
-            token: &value,
-            cast: Some(&target),
+            token: value,
+            cast: Some(target),
         });
 
-        let schema = literal_to_schema(&literal);
+        let schema = literal_to_schema(&literal, FIXTURE_SOURCE);
 
         assert_eq!(schema["type"], json!("integer"));
         assert_eq!(schema["const"], json!(1));
@@ -1358,13 +1378,10 @@ mod tests {
                 generic_params: None,
                 parents: None,
             };
-        let symbol = TokenData {
-            v: "symbol",
-            l: 0,
-            c: 0,
-        };
-        let ty = SimpleType::Identifier(&symbol, None);
+        let symbol = TokenData::new(85, 91);
+        let ty = SimpleType::Identifier(symbol, None);
         let mut generator = JsonSchemaGenerator::new();
+        generator.set_source(FIXTURE_SOURCE);
         generator.type_hierarchy.insert_semantic_type(&SYMBOL);
         let mut errors = Vec::new();
 
@@ -1386,30 +1403,18 @@ mod tests {
 
     #[test]
     fn test_match_annotation_becomes_pattern() {
-        let string_type = xenomorph_common::TokenData {
-            v: "string",
-            l: 0,
-            c: 0,
-        };
-        let match_name = xenomorph_common::TokenData {
-            v: "match",
-            l: 0,
-            c: 7,
-        };
-        let regex = xenomorph_common::TokenData {
-            v: "/^[A-Z]+$/",
-            l: 0,
-            c: 13,
-        };
+        let string_type = xenomorph_common::TokenData::new(12, 18);
+        let match_name = xenomorph_common::TokenData::new(92, 97);
+        let regex = xenomorph_common::TokenData::new(98, 108);
         let ty = (
-            Type::Simple(SimpleType::Identifier(&string_type, None)),
+            Type::Simple(SimpleType::Identifier(string_type, None)),
             vec![Annotation {
-                ident: &match_name,
-                params: vec![Expr::Regex(&regex)],
+                ident: match_name,
+                params: vec![Expr::Regex(regex)],
             }],
         );
 
-        let schema = JsonSchemaGenerator::new().anonym_type_to_schema(&ty, &mut empty_context());
+        let schema = fixture_generator().anonym_type_to_schema(&ty, &mut empty_context());
 
         assert_eq!(schema, json!({ "type": "string", "pattern": "^[A-Z]+$" }));
     }

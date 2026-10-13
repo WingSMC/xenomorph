@@ -49,17 +49,10 @@ impl TokenStyle {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct TokenPosition {
-    line: u32,
-    column: u32,
-}
-
-impl From<&TokenData<'_>> for TokenPosition {
-    fn from(data: &TokenData<'_>) -> Self {
-        Self {
-            line: data.l,
-            column: data.c,
-        }
+struct TokenPosition(u32);
+impl<T: std::borrow::Borrow<TokenData>> From<T> for TokenPosition {
+    fn from(data: T) -> Self {
+        Self(data.borrow().start)
     }
 }
 
@@ -94,9 +87,10 @@ pub fn legend() -> SemanticTokensLegend {
     }
 }
 
-pub fn encode(source: &str, tokens: &[Token<'_>], ast: &[Declaration<'_>]) -> Vec<SemanticToken> {
-    let roles = ast_roles(ast);
-    let source_lines: Vec<&str> = source.split('\n').collect();
+pub fn encode(source: &str, tokens: &[Token], ast: &[Declaration]) -> Vec<SemanticToken> {
+    let roles = ast_roles(ast, source);
+    let mut line_starts = vec![0];
+    line_starts.extend(source.match_indices('\n').map(|(offset, _)| offset + 1));
     let mut absolute = Vec::new();
 
     for (variant, data) in tokens {
@@ -108,7 +102,7 @@ pub fn encode(source: &str, tokens: &[Token<'_>], ast: &[Declaration<'_>]) -> Ve
             continue;
         };
 
-        append_token_segments(&mut absolute, &source_lines, data, style);
+        append_token_segments(&mut absolute, &line_starts, data, style, source);
     }
 
     absolute.sort_by_key(|token| (token.line, token.start));
@@ -161,7 +155,7 @@ fn lexical_style(variant: TokenVariant) -> Option<TokenStyle> {
     Some(TokenStyle::new(kind))
 }
 
-fn ast_roles(ast: &[Declaration<'_>]) -> HashMap<TokenPosition, TokenStyle> {
+fn ast_roles(ast: &[Declaration], source: &str) -> HashMap<TokenPosition, TokenStyle> {
     let mut roles = HashMap::new();
 
     for declaration in ast {
@@ -179,7 +173,7 @@ fn ast_roles(ast: &[Declaration<'_>]) -> HashMap<TokenPosition, TokenStyle> {
                     .as_deref()
                     .unwrap_or_default()
                     .iter()
-                    .map(|(parameter, _)| parameter.v)
+                    .map(|(parameter, _)| parameter.text(source))
                     .collect();
                 if let Some(generics) = generics {
                     for (parameter, constraint) in generics {
@@ -188,11 +182,11 @@ fn ast_roles(ast: &[Declaration<'_>]) -> HashMap<TokenPosition, TokenStyle> {
                             TokenStyle::declaration(TokenKind::TypeParameter),
                         );
                         if let Some(constraint) = constraint {
-                            mark_type_reference(&mut roles, constraint, &type_parameters);
+                            mark_type_reference(&mut roles, constraint, &type_parameters, source);
                         }
                     }
                 }
-                visit_xeno_type(&mut roles, ty, &type_parameters);
+                visit_xeno_type(&mut roles, ty, &type_parameters, source);
             }
             Declaration::Custom { name, .. } => {
                 if let Some(name) = name {
@@ -210,33 +204,35 @@ fn ast_roles(ast: &[Declaration<'_>]) -> HashMap<TokenPosition, TokenStyle> {
 
 fn visit_xeno_type(
     roles: &mut HashMap<TokenPosition, TokenStyle>,
-    (ty, annotations): &XenoType<'_>,
+    (ty, annotations): &XenoType,
     type_parameters: &HashSet<&str>,
+    source: &str,
 ) {
-    visit_type(roles, ty, type_parameters);
+    visit_type(roles, ty, type_parameters, source);
     for annotation in annotations {
-        visit_annotation(roles, annotation, type_parameters);
+        visit_annotation(roles, annotation, type_parameters, source);
     }
 }
 
 fn visit_type(
     roles: &mut HashMap<TokenPosition, TokenStyle>,
-    ty: &Type<'_>,
+    ty: &Type,
     type_parameters: &HashSet<&str>,
+    source: &str,
 ) {
     match ty {
-        Type::Simple(simple) => visit_simple_type(roles, simple, type_parameters),
+        Type::Simple(simple) => visit_simple_type(roles, simple, type_parameters, source),
         Type::Tuple(types) | Type::Sum(types) | Type::Intersection(types) => {
             for ty in types {
-                visit_simple_type(roles, ty, type_parameters);
+                visit_simple_type(roles, ty, type_parameters, source);
             }
         }
         Type::Set(set) => {
             if let Some(element_type) = &set.element_type {
-                visit_simple_type(roles, element_type, type_parameters);
+                visit_simple_type(roles, element_type, type_parameters, source);
             }
             for literal in set.values.as_deref().unwrap_or_default() {
-                visit_literal(roles, literal, type_parameters);
+                visit_literal(roles, literal, type_parameters, source);
             }
         }
         Type::Struct(fields) => {
@@ -245,7 +241,7 @@ fn visit_type(
                     TokenPosition::from(name),
                     TokenStyle::declaration(TokenKind::Property),
                 );
-                visit_simple_type(roles, ty, type_parameters);
+                visit_simple_type(roles, ty, type_parameters, source);
             }
         }
         Type::Enum(fields) => {
@@ -254,7 +250,7 @@ fn visit_type(
                     TokenPosition::from(name),
                     TokenStyle::declaration(TokenKind::EnumMember),
                 );
-                visit_simple_type(roles, ty, type_parameters);
+                visit_simple_type(roles, ty, type_parameters, source);
             }
         }
     }
@@ -262,18 +258,19 @@ fn visit_type(
 
 fn visit_simple_type(
     roles: &mut HashMap<TokenPosition, TokenStyle>,
-    ty: &SimpleType<'_>,
+    ty: &SimpleType,
     type_parameters: &HashSet<&str>,
+    source: &str,
 ) {
     match ty {
-        SimpleType::Optional(inner) => visit_simple_type(roles, inner, type_parameters),
+        SimpleType::Optional(inner) => visit_simple_type(roles, inner, type_parameters, source),
         SimpleType::Literal(literal) => {
-            visit_literal(roles, literal, type_parameters);
+            visit_literal(roles, literal, type_parameters, source);
         }
         SimpleType::Identifier(name, arguments) | SimpleType::Array(name, arguments) => {
-            mark_type_reference(roles, name, type_parameters);
+            mark_type_reference(roles, name, type_parameters, source);
             for argument in arguments.as_deref().unwrap_or_default() {
-                visit_simple_type(roles, argument, type_parameters);
+                visit_simple_type(roles, argument, type_parameters, source);
             }
         }
     }
@@ -281,46 +278,52 @@ fn visit_simple_type(
 
 fn visit_literal(
     roles: &mut HashMap<TokenPosition, TokenStyle>,
-    literal: &Literal<'_>,
+    literal: &Literal,
     type_parameters: &HashSet<&str>,
+    source: &str,
 ) {
     if let Some(cast_target) = literal.cast_target() {
-        mark_type_reference(roles, cast_target, type_parameters);
+        mark_type_reference(roles, &cast_target, type_parameters, source);
     }
 }
 
 fn visit_annotation(
     roles: &mut HashMap<TokenPosition, TokenStyle>,
-    annotation: &Annotation<'_>,
+    annotation: &Annotation,
     type_parameters: &HashSet<&str>,
+    source: &str,
 ) {
     roles.insert(
         TokenPosition::from(annotation.ident),
         TokenStyle::new(TokenKind::Function),
     );
     for parameter in &annotation.params {
-        visit_expr(roles, parameter, type_parameters);
+        visit_expr(roles, parameter, type_parameters, source);
     }
 }
 
 fn visit_expr(
     roles: &mut HashMap<TokenPosition, TokenStyle>,
-    expr: &Expr<'_>,
+    expr: &Expr,
     type_parameters: &HashSet<&str>,
+    source: &str,
 ) {
     match expr {
         Expr::Regex(_) => {}
-        Expr::Annotation(annotation) => visit_annotation(roles, annotation, type_parameters),
-        Expr::Type(ty) => visit_type(roles, ty, type_parameters),
+        Expr::Annotation(annotation) => {
+            visit_annotation(roles, annotation, type_parameters, source)
+        }
+        Expr::Type(ty) => visit_type(roles, ty, type_parameters, source),
     }
 }
 
 fn mark_type_reference(
     roles: &mut HashMap<TokenPosition, TokenStyle>,
-    data: &TokenData<'_>,
+    data: &TokenData,
     type_parameters: &HashSet<&str>,
+    source: &str,
 ) {
-    let kind = if type_parameters.contains(data.v) {
+    let kind = if type_parameters.contains(data.text(source)) {
         TokenKind::TypeParameter
     } else {
         TokenKind::Type
@@ -330,28 +333,26 @@ fn mark_type_reference(
 
 fn append_token_segments(
     result: &mut Vec<AbsoluteToken>,
-    source_lines: &[&str],
-    data: &TokenData<'_>,
+    line_starts: &[usize],
+    data: &TokenData,
     style: TokenStyle,
+    source: &str,
 ) {
-    for (line_offset, raw_segment) in data.v.split('\n').enumerate() {
+    let first_line = line_starts
+        .partition_point(|offset| *offset <= data.start as usize)
+        .saturating_sub(1);
+    let first_column = source[line_starts[first_line]..data.start as usize]
+        .encode_utf16()
+        .count() as u32;
+    for (line_offset, raw_segment) in data.text(source).split('\n').enumerate() {
         let segment = raw_segment.strip_suffix('\r').unwrap_or(raw_segment);
         let length = segment.encode_utf16().count() as u32;
         if length == 0 {
             continue;
         }
 
-        let line = data.l + line_offset as u32;
-        let scalar_column = if line_offset == 0 { data.c } else { 0 };
-        let start = source_lines
-            .get(line as usize)
-            .map_or(scalar_column, |source_line| {
-                source_line
-                    .chars()
-                    .take(scalar_column as usize)
-                    .map(char::len_utf16)
-                    .sum::<usize>() as u32
-            });
+        let line = (first_line + line_offset) as u32;
+        let start = if line_offset == 0 { first_column } else { 0 };
         result.push(AbsoluteToken {
             line,
             start,
@@ -395,8 +396,8 @@ mod tests {
 
     fn classified(source: &str) -> Vec<(String, TokenStyle)> {
         let tokens = Lexer::tokenize(source).expect("semantic-token fixture should lex");
-        let (ast, _) = Parser::parse(&tokens);
-        let roles = ast_roles(&ast);
+        let (ast, _) = Parser::parse(&tokens, source);
+        let roles = ast_roles(&ast, source);
 
         tokens
             .iter()
@@ -405,7 +406,7 @@ mod tests {
                     .get(&TokenPosition::from(data))
                     .copied()
                     .or_else(|| lexical_style(*variant))
-                    .map(|style| (data.v.to_string(), style))
+                    .map(|style| (data.text(source).to_string(), style))
             })
             .collect()
     }
@@ -457,7 +458,7 @@ type Cast = 1 as u64;
     fn encoded_positions_and_lengths_use_utf16_units() {
         let source = "type A = \"😀\" @check;";
         let tokens = Lexer::tokenize(source).expect("UTF-16 fixture should lex");
-        let (ast, _) = Parser::parse(&tokens);
+        let (ast, _) = Parser::parse(&tokens, source);
         let encoded = encode(source, &tokens, &ast);
 
         let mut line = 0;
@@ -493,7 +494,7 @@ type Cast = 1 as u64;
     fn multiline_tokens_are_split_into_legal_lsp_tokens() {
         let source = "type A = \"first\nsecond\";";
         let tokens = Lexer::tokenize(source).expect("multiline fixture should lex");
-        let (ast, _) = Parser::parse(&tokens);
+        let (ast, _) = Parser::parse(&tokens, source);
         let encoded = encode(source, &tokens, &ast);
 
         let string_tokens: Vec<_> = encoded

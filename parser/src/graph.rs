@@ -113,6 +113,7 @@ impl ModuleGraph {
         let mut modules = cache
             .iter()
             .map(|(module_path, module)| {
+                let module = module.read().unwrap();
                 let mut diagnostics = GraphDiagnosticCounts::default();
                 for diagnostic in module
                     .borrow_lexer_errors()
@@ -140,12 +141,15 @@ impl ModuleGraph {
             .iter()
             .flat_map(|(module_path, module)| {
                 module
+                    .read()
+                    .unwrap()
                     .borrow_imports()
                     .iter()
                     .map(|imported| ModuleGraphEdge {
                         importer: module_path.clone(),
                         imported: imported.clone(),
                     })
+                    .collect::<Vec<_>>()
             })
             .collect::<BTreeSet<_>>()
             .into_iter()

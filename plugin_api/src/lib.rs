@@ -1,5 +1,8 @@
 use std::ffi::c_void;
 
+pub mod codec;
+pub mod numbers;
+pub mod source;
 pub mod syntax;
 
 pub const ENTRY_POINT: &[u8] = b"xenomorph_plugin_v1\0";

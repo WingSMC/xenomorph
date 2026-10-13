@@ -1,443 +1,179 @@
-use crate::{parser as ast, TokenData};
-use xenomorph_plugin_api::syntax as wire;
-
-pub fn encode(declarations: &[ast::Declaration<'_>]) -> Result<wire::Syntax, String> {
-    encode_with_tokens(declarations).map(|(syntax, _)| syntax)
-}
-
-pub fn encode_with_tokens<'src>(
-    declarations: &[ast::Declaration<'src>],
-) -> Result<(wire::Syntax, Vec<TokenData<'src>>), String> {
-    let mut encoder = Encoder {
-        tokens: Vec::new(),
-        source_tokens: Vec::new(),
-    };
-    let declarations = declarations
-        .iter()
-        .map(|declaration| encoder.declaration(declaration))
-        .collect::<Result<_, _>>()?;
-    Ok((
-        wire::Syntax {
-            tokens: encoder.tokens,
-            declarations,
-        },
-        encoder.source_tokens,
-    ))
-}
-
-struct Encoder<'src> {
-    tokens: Vec<wire::Token>,
-    source_tokens: Vec<TokenData<'src>>,
-}
-
-impl<'src> Encoder<'src> {
-    fn token(&mut self, token: &TokenData<'src>) -> usize {
-        let index = self.tokens.len();
-        self.source_tokens.push(token.clone());
-        self.tokens.push(wire::Token {
-            value: token.v.to_string(),
-            line: token.l,
-            column: token.c,
-        });
-        index
-    }
-
-    fn declaration(
-        &mut self,
-        declaration: &ast::Declaration<'src>,
-    ) -> Result<wire::Declaration, String> {
-        Ok(match declaration {
-            ast::Declaration::Import { path, location } => wire::Declaration::Import {
-                path: path.iter().map(|part| part.to_string()).collect(),
-                location: self.token(location),
-            },
-            ast::Declaration::Type { docs, name, generics, ty, from, to } => wire::Declaration::Type {
-                docs: docs.map(str::to_string),
-                name: self.token(name),
-                generics: generics.as_ref().map(|parameters| parameters.iter().map(|(name, constraint)| {
-                    (self.token(name), constraint.map(|token| self.token(token)))
-                }).collect()),
-                ty: self.ty(&ty.0),
-                annotations: ty.1.iter().map(|annotation| self.annotation(annotation)).collect(),
-                from: self.token(from),
-                to: self.token(to),
-            },
-            ast::Declaration::Custom { .. } => return Err(
-                "Custom declarations require a versioned plugin payload; opaque Rust values cannot cross the plugin ABI.".into()
-            ),
-        })
-    }
-
-    fn annotation(&mut self, annotation: &ast::Annotation<'src>) -> wire::Annotation {
-        wire::Annotation {
-            ident: self.token(annotation.ident),
-            params: annotation
-                .params
-                .iter()
-                .map(|expr| match expr {
-                    ast::Expr::Regex(token) => wire::Expr::Regex(self.token(token)),
-                    ast::Expr::Annotation(annotation) => {
-                        wire::Expr::Annotation(self.annotation(annotation))
-                    }
-                    ast::Expr::Type(ty) => wire::Expr::Type(self.ty(ty)),
-                })
-                .collect(),
+use crate::{parser::*, TokenData};
+/// Validates source references before plugin listeners can resolve text.
+pub fn validate(source: &str, ast: &[Declaration]) -> Result<(), String> {
+    for token in source_tokens(ast) {
+        if token.start > token.end
+            || source
+                .get(token.start as usize..token.end as usize)
+                .is_none()
+        {
+            return Err("Invalid plugin source range".into());
         }
     }
-
-    fn fields(&mut self, fields: &[ast::KeyValExpr<'src>]) -> Vec<wire::Field> {
-        fields
-            .iter()
-            .map(|(key, value, docs)| {
-                (
-                    self.token(key),
-                    self.simple(value),
-                    docs.map(|token| self.token(token)),
-                )
-            })
-            .collect()
+    fn simple(s: &SimpleType) -> Result<(), String> {
+        match s {
+            SimpleType::Literal(l) => literal(l),
+            SimpleType::Optional(s) => simple(s),
+            SimpleType::Identifier(_, args) | SimpleType::Array(_, args) => {
+                for s in args.as_deref().unwrap_or_default() {
+                    simple(s)?;
+                }
+                Ok(())
+            }
+        }
     }
-
-    fn ty(&mut self, ty: &ast::Type<'src>) -> wire::Type {
+    fn literal(l: &Literal) -> Result<(), String> {
+        match l {
+            Literal::Int(i)
+                if (matches!(i.representation.size, IntegerSize::Bits(0))
+                    || !integer_fits(&i.value, i.representation)) =>
+            {
+                return Err("Invalid integer representation".into());
+            }
+            Literal::Float(f)
+                if (!f.representation.signed
+                    || !decimal_roundtrips_as(&f.value, f.representation.size)) =>
+            {
+                return Err("Invalid float representation".into());
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    fn ty(t: &Type) -> Result<(), String> {
+        match t {
+            Type::Simple(s) => simple(s)?,
+            Type::Tuple(v) | Type::Sum(v) | Type::Intersection(v) => {
+                for s in v {
+                    simple(s)?
+                }
+            }
+            Type::Struct(v) | Type::Enum(v) => {
+                for (_, s, _) in v {
+                    simple(s)?
+                }
+            }
+            Type::Set(s) => {
+                if let Some(e) = &s.element_type {
+                    simple(e)?
+                }
+                for l in s.values.as_deref().unwrap_or_default() {
+                    literal(l)?
+                }
+            }
+        }
+        Ok(())
+    }
+    fn annotation(a: &Annotation) -> Result<(), String> {
+        for e in &a.params {
+            match e {
+                Expr::Type(t) => ty(t)?,
+                Expr::Annotation(a) => annotation(a)?,
+                Expr::Regex(_) => {}
+            }
+        }
+        Ok(())
+    }
+    for d in ast {
+        if let Declaration::Type { ty: t, .. } = d {
+            ty(&t.0)?;
+            for a in &t.1 {
+                annotation(a)?
+            }
+        }
+    }
+    Ok(())
+}
+pub fn source_tokens(ast: &[Declaration]) -> Vec<TokenData> {
+    fn simple(ty: &SimpleType, out: &mut Vec<TokenData>) {
         match ty {
-            ast::Type::Simple(simple) => wire::Type::Simple(self.simple(simple)),
-            ast::Type::Tuple(items) => {
-                wire::Type::Tuple(items.iter().map(|item| self.simple(item)).collect())
+            SimpleType::Optional(inner) => simple(inner, out),
+            SimpleType::Identifier(token, args) | SimpleType::Array(token, args) => {
+                out.push(*token);
+                for arg in args.as_deref().unwrap_or_default() {
+                    simple(arg, out);
+                }
             }
-            ast::Type::Sum(items) => {
-                wire::Type::Sum(items.iter().map(|item| self.simple(item)).collect())
-            }
-            ast::Type::Intersection(items) => {
-                wire::Type::Intersection(items.iter().map(|item| self.simple(item)).collect())
-            }
-            ast::Type::Struct(fields) => wire::Type::Struct(self.fields(fields)),
-            ast::Type::Enum(fields) => wire::Type::Enum(self.fields(fields)),
-            ast::Type::Set(set) => wire::Type::Set {
-                keyword: self.token(set.keyword),
-                element_type: set.element_type.as_ref().map(|item| self.simple(item)),
-                values: set
-                    .values
-                    .as_ref()
-                    .map(|items| items.iter().map(|item| self.literal(item)).collect()),
-                last_token: self.token(set.last_token),
-            },
-        }
-    }
-
-    fn simple(&mut self, simple: &ast::SimpleType<'src>) -> wire::Simple {
-        match simple {
-            ast::SimpleType::Literal(literal) => wire::Simple::Literal(self.literal(literal)),
-            ast::SimpleType::Identifier(token, arguments) => wire::Simple::Identifier(
-                self.token(token),
-                arguments
-                    .as_ref()
-                    .map(|items| items.iter().map(|item| self.simple(item)).collect()),
-            ),
-            ast::SimpleType::Array(token, arguments) => wire::Simple::Array(
-                self.token(token),
-                arguments
-                    .as_ref()
-                    .map(|items| items.iter().map(|item| self.simple(item)).collect()),
-            ),
-            ast::SimpleType::Optional(inner) => {
-                wire::Simple::Optional(Box::new(self.simple(inner)))
+            SimpleType::Literal(lit) => {
+                out.push(lit.token());
+                if let Some(cast) = lit.cast_target() {
+                    out.push(cast);
+                }
             }
         }
     }
-
-    fn literal(&mut self, literal: &ast::Literal<'src>) -> wire::Literal {
-        match literal {
-            ast::Literal::Int(integer) => wire::Literal::Integer {
-                value: integer.value.to_string(),
-                signed: integer.representation.signed,
-                bits: match integer.representation.size {
-                    ast::IntegerSize::Bits(bits) => Some(bits),
-                    ast::IntegerSize::Arbitrary => None,
-                },
-                token: self.token(integer.token),
-                cast: integer.cast.map(|token| self.token(token)),
-            },
-            ast::Literal::Float(float) => wire::Literal::Float {
-                value: float.value.to_string(),
-                signed: float.representation.signed,
-                precision: float.representation.precision,
-                scale: float.representation.scale,
-                size: match float.representation.size {
-                    ast::FloatSize::F32 => wire::FloatSize::F32,
-                    ast::FloatSize::F64 => wire::FloatSize::F64,
-                    ast::FloatSize::Decimal => wire::FloatSize::Decimal,
-                },
-                token: self.token(float.token),
-                cast: float.cast.map(|token| self.token(token)),
-            },
-            ast::Literal::String(value, token) => {
-                wire::Literal::String(value.clone(), self.token(token))
+    fn ty(t: &Type, out: &mut Vec<TokenData>) {
+        match t {
+            Type::Simple(s) => simple(s, out),
+            Type::Tuple(items) | Type::Sum(items) | Type::Intersection(items) => {
+                for item in items {
+                    simple(item, out)
+                }
             }
-            ast::Literal::Boolean(value, token) => {
-                wire::Literal::Boolean(*value, self.token(token))
+            Type::Struct(fields) | Type::Enum(fields) => {
+                for (key, value, docs) in fields {
+                    out.push(*key);
+                    simple(value, out);
+                    if let Some(d) = docs {
+                        out.push(*d)
+                    }
+                }
+            }
+            Type::Set(set) => {
+                out.push(set.keyword);
+                out.push(set.last_token);
+                if let Some(e) = &set.element_type {
+                    simple(e, out)
+                }
+                for l in set.values.as_deref().unwrap_or_default() {
+                    out.push(l.token());
+                    if let Some(c) = l.cast_target() {
+                        out.push(c)
+                    }
+                }
             }
         }
     }
-}
-
-pub fn tokens(syntax: &wire::Syntax) -> Vec<TokenData<'_>> {
-    syntax
-        .tokens
-        .iter()
-        .map(|token| TokenData {
-            v: &token.value,
-            l: token.line,
-            c: token.column,
-        })
-        .collect()
-}
-
-pub fn decode<'a>(
-    syntax: &'a wire::Syntax,
-    tokens: &'a [TokenData<'a>],
-) -> Result<Vec<ast::Declaration<'a>>, String> {
-    let decoder = Decoder { tokens };
-    syntax
-        .declarations
-        .iter()
-        .map(|declaration| decoder.declaration(declaration))
-        .collect()
-}
-
-struct Decoder<'a> {
-    tokens: &'a [TokenData<'a>],
-}
-
-impl<'a> Decoder<'a> {
-    fn token(&self, index: usize) -> Result<&'a TokenData<'a>, String> {
-        self.tokens
-            .get(index)
-            .ok_or_else(|| format!("Invalid plugin syntax token index: {index}"))
+    fn annotation(a: &Annotation, out: &mut Vec<TokenData>) {
+        out.push(a.ident);
+        for e in &a.params {
+            match e {
+                Expr::Regex(t) => out.push(*t),
+                Expr::Type(t) => ty(t, out),
+                Expr::Annotation(a) => annotation(a, out),
+            }
+        }
     }
-
-    fn declaration(
-        &self,
-        declaration: &'a wire::Declaration,
-    ) -> Result<ast::Declaration<'a>, String> {
-        Ok(match declaration {
-            wire::Declaration::Import { path, location } => ast::Declaration::Import {
-                path: path.iter().map(String::as_str).collect(),
-                location: self.token(*location)?,
-            },
-            wire::Declaration::Type {
-                docs,
+    let mut out = vec![];
+    for d in ast {
+        match d {
+            Declaration::Import { location, .. } => out.push(*location),
+            Declaration::Type {
                 name,
                 generics,
-                ty,
-                annotations,
+                ty: t,
                 from,
                 to,
-            } => ast::Declaration::Type {
-                docs: docs.as_deref(),
-                name: self.token(*name)?,
-                generics: generics
-                    .as_ref()
-                    .map(|items| {
-                        items
-                            .iter()
-                            .map(|(name, constraint)| {
-                                Ok((
-                                    self.token(*name)?,
-                                    constraint.map(|index| self.token(index)).transpose()?,
-                                ))
-                            })
-                            .collect::<Result<_, String>>()
-                    })
-                    .transpose()?,
-                ty: (
-                    self.ty(ty)?,
-                    annotations
-                        .iter()
-                        .map(|annotation| self.annotation(annotation))
-                        .collect::<Result<_, _>>()?,
-                ),
-                from: self.token(*from)?,
-                to: self.token(*to)?,
-            },
-        })
-    }
-
-    fn annotation(&self, annotation: &'a wire::Annotation) -> Result<ast::Annotation<'a>, String> {
-        Ok(ast::Annotation {
-            ident: self.token(annotation.ident)?,
-            params: annotation
-                .params
-                .iter()
-                .map(|expr| {
-                    Ok(match expr {
-                        wire::Expr::Regex(index) => ast::Expr::Regex(self.token(*index)?),
-                        wire::Expr::Annotation(annotation) => {
-                            ast::Expr::Annotation(self.annotation(annotation)?)
-                        }
-                        wire::Expr::Type(ty) => ast::Expr::Type(self.ty(ty)?),
-                    })
-                })
-                .collect::<Result<_, String>>()?,
-        })
-    }
-
-    fn fields(&self, fields: &'a [wire::Field]) -> Result<Vec<ast::KeyValExpr<'a>>, String> {
-        fields
-            .iter()
-            .map(|(key, value, docs)| {
-                Ok((
-                    self.token(*key)?.clone(),
-                    self.simple(value)?,
-                    docs.map(|index| self.token(index)).transpose()?,
-                ))
-            })
-            .collect()
-    }
-
-    fn ty(&self, ty: &'a wire::Type) -> Result<ast::Type<'a>, String> {
-        Ok(match ty {
-            wire::Type::Simple(simple) => ast::Type::Simple(self.simple(simple)?),
-            wire::Type::Tuple(items) => ast::Type::Tuple(self.simples(items)?),
-            wire::Type::Sum(items) => ast::Type::Sum(self.simples(items)?),
-            wire::Type::Intersection(items) => ast::Type::Intersection(self.simples(items)?),
-            wire::Type::Struct(fields) => ast::Type::Struct(self.fields(fields)?),
-            wire::Type::Enum(fields) => ast::Type::Enum(self.fields(fields)?),
-            wire::Type::Set {
-                keyword,
-                element_type,
-                values,
-                last_token,
-            } => ast::Type::Set(ast::SetType {
-                keyword: self.token(*keyword)?,
-                element_type: element_type
-                    .as_ref()
-                    .map(|item| self.simple(item))
-                    .transpose()?,
-                values: values
-                    .as_ref()
-                    .map(|items| {
-                        items
-                            .iter()
-                            .map(|item| self.literal(item))
-                            .collect::<Result<_, _>>()
-                    })
-                    .transpose()?,
-                last_token: self.token(*last_token)?,
-            }),
-        })
-    }
-
-    fn simples(&self, items: &'a [wire::Simple]) -> Result<Vec<ast::SimpleType<'a>>, String> {
-        items.iter().map(|item| self.simple(item)).collect()
-    }
-
-    fn simple(&self, simple: &'a wire::Simple) -> Result<ast::SimpleType<'a>, String> {
-        Ok(match simple {
-            wire::Simple::Literal(literal) => ast::SimpleType::Literal(self.literal(literal)?),
-            wire::Simple::Identifier(token, arguments) => ast::SimpleType::Identifier(
-                self.token(*token)?,
-                arguments
-                    .as_ref()
-                    .map(|items| self.simples(items))
-                    .transpose()?,
-            ),
-            wire::Simple::Array(token, arguments) => ast::SimpleType::Array(
-                self.token(*token)?,
-                arguments
-                    .as_ref()
-                    .map(|items| self.simples(items))
-                    .transpose()?,
-            ),
-            wire::Simple::Optional(inner) => {
-                ast::SimpleType::Optional(Box::new(self.simple(inner)?))
+                ..
+            } => {
+                out.extend([*name, *from, *to]);
+                for (n, c) in generics.as_deref().unwrap_or_default() {
+                    out.push(*n);
+                    if let Some(c) = c {
+                        out.push(*c)
+                    }
+                }
+                ty(&t.0, &mut out);
+                for a in &t.1 {
+                    annotation(a, &mut out)
+                }
             }
-        })
-    }
-
-    fn literal(&self, literal: &'a wire::Literal) -> Result<ast::Literal<'a>, String> {
-        Ok(match literal {
-            wire::Literal::Integer {
-                value,
-                signed,
-                bits,
-                token,
-                cast,
-            } => ast::Literal::Int(ast::IntLiteral {
-                value: value
-                    .parse()
-                    .map_err(|error| format!("Invalid integer payload: {error}"))?,
-                representation: ast::IntegerRepresentation {
-                    signed: *signed,
-                    size: bits
-                        .map(ast::IntegerSize::Bits)
-                        .unwrap_or(ast::IntegerSize::Arbitrary),
-                },
-                token: self.token(*token)?,
-                cast: cast.map(|index| self.token(index)).transpose()?,
-            }),
-            wire::Literal::Float {
-                value,
-                signed,
-                precision,
-                scale,
-                size,
-                token,
-                cast,
-            } => ast::Literal::Float(ast::FloatLiteral {
-                value: value
-                    .parse()
-                    .map_err(|error| format!("Invalid decimal payload: {error}"))?,
-                representation: ast::FloatRepresentation {
-                    signed: *signed,
-                    precision: *precision,
-                    scale: *scale,
-                    size: match size {
-                        wire::FloatSize::F32 => ast::FloatSize::F32,
-                        wire::FloatSize::F64 => ast::FloatSize::F64,
-                        wire::FloatSize::Decimal => ast::FloatSize::Decimal,
-                    },
-                },
-                token: self.token(*token)?,
-                cast: cast.map(|index| self.token(index)).transpose()?,
-            }),
-            wire::Literal::String(value, token) => {
-                ast::Literal::String(value.clone(), self.token(*token)?)
+            Declaration::Custom { name, .. } => {
+                if let Some(name) = name {
+                    out.push(*name)
+                }
             }
-            wire::Literal::Boolean(value, token) => {
-                ast::Literal::Boolean(*value, self.token(*token)?)
-            }
-        })
+        }
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{lexer::Lexer, parser::Parser};
-
-    #[test]
-    fn lossless_syntax_roundtrip() {
-        let source = "import other;\n/// Docs\ntype Example<T: string> = { \"quoted key\": ?T, huge: 123456789012345678901234567890, decimal: 1.234567890123456789 } @Lombok(Data);";
-        let tokens = Lexer::tokenize(source).unwrap();
-        let (ast, errors) = Parser::parse(&tokens);
-        assert!(errors.is_empty(), "{errors:?}");
-        let encoded = encode(&ast).unwrap();
-        let json = serde_json::to_vec(&encoded).unwrap();
-        let wire = serde_json::from_slice(&json).unwrap();
-        let decoded_tokens = super::tokens(&wire);
-        let decoded = decode(&wire, &decoded_tokens).unwrap();
-        assert_eq!(format!("{ast:?}"), format!("{decoded:?}"));
-    }
-
-    #[test]
-    fn rejects_invalid_token_reference() {
-        let wire = wire::Syntax {
-            tokens: Vec::new(),
-            declarations: vec![wire::Declaration::Import {
-                path: vec![],
-                location: 1,
-            }],
-        };
-        assert!(decode(&wire, &[]).is_err());
-    }
+    out
 }

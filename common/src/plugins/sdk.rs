@@ -18,6 +18,7 @@ pub struct Description {
     pub name: String,
     pub version: String,
     pub metadata: MetadataGraph,
+    #[serde(with = "super::protocol::json_schema")]
     pub config_schema: Option<serde_json::Value>,
 }
 
@@ -83,7 +84,7 @@ pub fn describe(plugin: &'static XenoPlugin<'static>) -> Buffer {
                 })
                 .transpose()?,
         };
-        serde_json::to_vec(&description).map_err(|error| error.to_string())
+        xenomorph_plugin_api::codec::encode(&description)
     })
 }
 
@@ -101,9 +102,10 @@ pub unsafe fn initialize(
         unsafe {
             *output = std::ptr::null_mut();
         }
-        let config = serde_json::from_slice::<Initialization>(unsafe { input(bytes)? })
-            .map_err(|error| format!("Invalid plugin initialization: {error}"))?
-            .into_config();
+        let config =
+            xenomorph_plugin_api::codec::decode::<Initialization>(unsafe { input(bytes)? })
+                .map_err(|error| format!("Invalid plugin initialization: {error}"))?
+                .into_config()?;
         if let Some(initialize) = plugin.initialize {
             initialize(&config)?;
         }
@@ -133,7 +135,7 @@ pub unsafe fn run(
         if instance.failed {
             return Err("Plugin instance is failed; reload it before calling again".into());
         }
-        let request: ModuleRequest = serde_json::from_slice(unsafe { input(bytes)? })
+        let request: ModuleRequest = xenomorph_plugin_api::codec::decode(unsafe { input(bytes)? })
             .map_err(|error| format!("Invalid plugin module request: {error}"))?;
         request.scope.validate()?;
         let factory = if request.generation {
@@ -142,13 +144,18 @@ pub unsafe fn run(
             plugin.register_analyzer
         }
         .ok_or_else(|| "Plugin does not provide the requested capability".to_string())?;
-        let tokens = syntax::tokens(&request.syntax);
-        let ast = syntax::decode(&request.syntax, &tokens)?;
-        let diagnostics = run_plugin_listener(factory(&instance.config), &ast, &request.scope)
-            .iter()
-            .map(Diagnostic::from)
-            .collect::<Vec<_>>();
-        serde_json::to_vec(&diagnostics).map_err(|error| error.to_string())
+        syntax::validate(&request.syntax.source, &request.syntax.declarations)?;
+        let ast = &request.syntax.declarations;
+        let diagnostics = run_plugin_listener(
+            factory(&instance.config),
+            ast,
+            &request.scope,
+            &request.syntax.source,
+        )
+        .iter()
+        .map(Diagnostic::from)
+        .collect::<Vec<_>>();
+        xenomorph_plugin_api::codec::encode(&diagnostics)
     });
     if result.status != 0 {
         instance.failed = true;

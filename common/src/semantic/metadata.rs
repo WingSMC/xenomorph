@@ -11,27 +11,6 @@ use super::{
 };
 use crate::parser::{FloatRepresentation, FloatSize, IntegerRepresentation, IntegerSize};
 
-pub(crate) mod string_number {
-    use serde::{Deserialize, Deserializer, Serializer};
-    pub fn serialize<T: std::fmt::Display, S: Serializer>(
-        value: &T,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&value.to_string())
-    }
-
-    pub fn deserialize<'de, T: std::str::FromStr, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<T, D::Error>
-    where
-        T::Err: std::fmt::Display,
-    {
-        String::deserialize(deserializer)?
-            .parse()
-            .map_err(serde::de::Error::custom)
-    }
-}
-
 #[derive(Serialize, Deserialize)]
 #[serde(remote = "IntegerSize")]
 enum IntegerSizeDef {

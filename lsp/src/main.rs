@@ -44,11 +44,11 @@ struct SourceTokenSpan {
 }
 
 impl SourceTokenSpan {
-    fn from_token(token: &TokenData<'_>) -> Self {
+    fn from_token(token: &TokenData, source: &str) -> Self {
         Self {
-            line: token.l,
-            scalar_column: token.c,
-            utf16_length: token.v.encode_utf16().count() as u32,
+            line: token.line(source),
+            scalar_column: token.column(source),
+            utf16_length: token.text(source).encode_utf16().count() as u32,
         }
     }
 
@@ -83,14 +83,14 @@ fn source_position_to_editor(source: &str, line: u32, scalar_column: u32) -> Pos
     Position::new(line, character)
 }
 
-fn token_to_editor_range(source: &str, token: &TokenData<'_>) -> Range {
-    let start = source_position_to_editor(source, token.l, token.c);
-    let mut segments = token.v.split('\n');
+fn token_to_editor_range(source: &str, token: &TokenData) -> Range {
+    let start = source_position_to_editor(source, token.line(source), token.column(source));
+    let mut segments = token.text(source).split('\n');
     let first = segments.next().unwrap_or_default();
     let remaining: Vec<_> = segments.collect();
     let end = if let Some(last) = remaining.last() {
         Position::new(
-            token.l + remaining.len() as u32,
+            token.line(source) + remaining.len() as u32,
             last.strip_suffix('\r')
                 .unwrap_or(last)
                 .encode_utf16()
@@ -105,13 +105,15 @@ fn token_to_editor_range(source: &str, token: &TokenData<'_>) -> Range {
     Range { start, end }
 }
 
-fn same_token(left: &TokenData<'_>, right: &TokenData<'_>) -> bool {
-    left.l == right.l && left.c == right.c && left.v == right.v
+#[inline]
+fn same_token(left: &TokenData, right: &TokenData) -> bool {
+    left == right
 }
 
 fn generic_parameter_target_at(
-    ast: &[Declaration<'_>],
-    selected: &TokenData<'_>,
+    ast: &[Declaration],
+    selected: &TokenData,
+    source: &str,
 ) -> Option<GenericParameterTarget> {
     for declaration in ast {
         let Declaration::Type { generics, ty, .. } = declaration else {
@@ -119,7 +121,7 @@ fn generic_parameter_target_at(
         };
         for (parameter, _) in generics.as_deref().unwrap_or_default() {
             let mut references = Vec::new();
-            collect_generic_references(ty, parameter.v, &mut references);
+            collect_generic_references(ty, parameter.text(source), &mut references, source);
             if !same_token(parameter, selected)
                 && !references
                     .iter()
@@ -128,12 +130,16 @@ fn generic_parameter_target_at(
                 continue;
             }
 
-            let declaration = SourceTokenSpan::from_token(parameter);
+            let declaration = SourceTokenSpan::from_token(parameter, source);
             let mut occurrences = Vec::with_capacity(references.len() + 1);
             occurrences.push(declaration);
-            occurrences.extend(references.into_iter().map(SourceTokenSpan::from_token));
+            occurrences.extend(
+                references
+                    .into_iter()
+                    .map(|token| SourceTokenSpan::from_token(&token, source)),
+            );
             return Some(GenericParameterTarget {
-                name: parameter.v.to_string(),
+                name: parameter.text(source).to_string(),
                 declaration,
                 occurrences,
             });
@@ -142,90 +148,100 @@ fn generic_parameter_target_at(
     None
 }
 
-fn collect_generic_references<'src>(
-    (ty, annotations): &ParsedXenoType<'src>,
+fn collect_generic_references(
+    (ty, annotations): &ParsedXenoType,
     name: &str,
-    references: &mut Vec<&'src TokenData<'src>>,
+    references: &mut Vec<TokenData>,
+    source: &str,
 ) {
-    collect_generic_references_from_type(ty, name, references);
+    collect_generic_references_from_type(ty, name, references, source);
     for annotation in annotations {
-        collect_generic_references_from_annotation(annotation, name, references);
+        collect_generic_references_from_annotation(annotation, name, references, source);
     }
 }
 
-fn collect_generic_references_from_type<'src>(
-    ty: &Type<'src>,
+fn collect_generic_references_from_type(
+    ty: &Type,
     name: &str,
-    references: &mut Vec<&'src TokenData<'src>>,
+    references: &mut Vec<TokenData>,
+    source: &str,
 ) {
     match ty {
-        Type::Simple(ty) => collect_generic_references_from_simple_type(ty, name, references),
+        Type::Simple(ty) => {
+            collect_generic_references_from_simple_type(ty, name, references, source)
+        }
         Type::Tuple(types) | Type::Sum(types) | Type::Intersection(types) => {
             for ty in types {
-                collect_generic_references_from_simple_type(ty, name, references);
+                collect_generic_references_from_simple_type(ty, name, references, source);
             }
         }
         Type::Set(set) => {
             if let Some(element_type) = &set.element_type {
-                collect_generic_references_from_simple_type(element_type, name, references);
+                collect_generic_references_from_simple_type(element_type, name, references, source);
             }
             for literal in set.values.as_deref().unwrap_or_default() {
-                collect_generic_references_from_literal(literal, name, references);
+                collect_generic_references_from_literal(literal, name, references, source);
             }
         }
         Type::Struct(fields) | Type::Enum(fields) => {
             for (_, ty, _) in fields {
-                collect_generic_references_from_simple_type(ty, name, references);
+                collect_generic_references_from_simple_type(ty, name, references, source);
             }
         }
     }
 }
 
-fn collect_generic_references_from_simple_type<'src>(
-    ty: &SimpleType<'src>,
+fn collect_generic_references_from_simple_type(
+    ty: &SimpleType,
     name: &str,
-    references: &mut Vec<&'src TokenData<'src>>,
+    references: &mut Vec<TokenData>,
+    source: &str,
 ) {
     match ty {
         SimpleType::Optional(inner) => {
-            collect_generic_references_from_simple_type(inner, name, references)
+            collect_generic_references_from_simple_type(inner, name, references, source)
         }
         SimpleType::Literal(literal) => {
-            collect_generic_references_from_literal(literal, name, references);
+            collect_generic_references_from_literal(literal, name, references, source);
         }
         SimpleType::Identifier(token, arguments) | SimpleType::Array(token, arguments) => {
-            if token.v == name {
-                references.push(token);
+            if token.text(source) == name {
+                references.push(*token);
             }
             for argument in arguments.as_deref().unwrap_or_default() {
-                collect_generic_references_from_simple_type(argument, name, references);
+                collect_generic_references_from_simple_type(argument, name, references, source);
             }
         }
     }
 }
 
-fn collect_generic_references_from_literal<'src>(
-    literal: &Literal<'src>,
+fn collect_generic_references_from_literal(
+    literal: &Literal,
     name: &str,
-    references: &mut Vec<&'src TokenData<'src>>,
+    references: &mut Vec<TokenData>,
+    source: &str,
 ) {
-    if let Some(target) = literal.cast_target().filter(|target| target.v == name) {
+    if let Some(target) = literal
+        .cast_target()
+        .filter(|target| target.text(source) == name)
+    {
         references.push(target);
     }
 }
 
-fn collect_generic_references_from_annotation<'src>(
-    annotation: &Annotation<'src>,
+fn collect_generic_references_from_annotation(
+    annotation: &Annotation,
     name: &str,
-    references: &mut Vec<&'src TokenData<'src>>,
+    references: &mut Vec<TokenData>,
+    source: &str,
 ) {
     for parameter in &annotation.params {
         match parameter {
             Expr::Regex(_) => {}
             Expr::Annotation(annotation) => {
-                collect_generic_references_from_annotation(annotation, name, references)
+                collect_generic_references_from_annotation(annotation, name, references, source)
             }
-            Expr::Type(ty) => collect_generic_references_from_type(ty, name, references),
+            Expr::Type(ty) => collect_generic_references_from_type(ty, name, references, source),
         }
     }
 }
@@ -242,13 +258,13 @@ enum CompletionFrame<'src> {
     Angle,
 }
 
-fn token_starts_before(source: &str, token: &Token<'_>, position: Position) -> bool {
+fn token_starts_before(source: &str, token: &Token, position: Position) -> bool {
     token_to_editor_range(source, &token.1).start < position
 }
 
 fn annotation_argument_context<'src>(
-    tokens: &'src [Token<'src>],
-    source: &str,
+    tokens: &'src [Token],
+    source: &'src str,
     position: Position,
 ) -> Option<(&'src str, usize)> {
     let mut frames = Vec::new();
@@ -268,7 +284,7 @@ fn annotation_argument_context<'src>(
                             .checked_sub(2)
                             .and_then(|index| tokens.get(index))
                             .filter(|token| token.0 == TokenVariant::At)
-                            .map(|_| name.1.v)
+                            .map(|_| name.1.text(source))
                     });
                 frames.push(match annotation_name {
                     Some(name) => CompletionFrame::Annotation {
@@ -317,7 +333,7 @@ fn annotation_argument_context<'src>(
     })
 }
 
-fn generic_constraint_context(tokens: &[Token<'_>], source: &str, position: Position) -> bool {
+fn generic_constraint_context(tokens: &[Token], source: &str, position: Position) -> bool {
     let mut angle_depth = 0usize;
     let mut constraint_at_depth = None;
     for token in tokens {
@@ -550,6 +566,7 @@ async fn reload_runtime(
         runtime.documents.lock().unwrap().keys().cloned().collect();
     for registry in [&previous, &candidate] {
         for module in registry.module_cache.read().unwrap().values() {
+            let module = module.read().unwrap();
             if let Ok(uri) = Url::from_file_path(module.borrow_abs_path()) {
                 uris.insert(uri);
             }
@@ -560,7 +577,14 @@ async fn reload_runtime(
             .to_file_path()
             .ok()
             .and_then(|path| candidate.abs_path_to_module_path(&path))
-            .map(|module| diagnostics_for_module(&candidate.get_all_errors_for(&module), &module))
+            .map(|module| {
+                let errors = candidate.get_all_errors_for(&module);
+                candidate
+                    .with_module(&module, |_, _, data| {
+                        diagnostics_for_source(&errors, &module, &data.source)
+                    })
+                    .unwrap_or_default()
+            })
             .unwrap_or_default();
         client.publish_diagnostics(uri, diagnostics, None).await;
     }
@@ -571,6 +595,30 @@ async fn reload_runtime(
         )
         .await;
     Ok(())
+}
+
+fn diagnostics_for_source(
+    errors: &[ModuleDiagnostic],
+    path: &str,
+    source: &xenomorph_common::SourceDocument,
+) -> Vec<Diagnostic> {
+    let mut diagnostics = diagnostics_for_module(errors, path);
+    for (diagnostic, error) in diagnostics.iter_mut().zip(
+        errors
+            .iter()
+            .filter(|e| e.module_path == path && e.location.is_some()),
+    ) {
+        let (line, column, len) = error.location.unwrap();
+        if let Some(start) = source.offset(line, column, false) {
+            let end = start.saturating_add(len);
+            if source.text().is_char_boundary(end as usize) && end as usize <= source.text().len() {
+                let (a, b) = source.position(start, true);
+                let (c, d) = source.position(end, true);
+                diagnostic.range = Range::new(Position::new(a, b), Position::new(c, d));
+            }
+        }
+    }
+    diagnostics
 }
 
 fn diagnostics_for_module(errors: &[ModuleDiagnostic], module_path: &str) -> Vec<Diagnostic> {
@@ -839,9 +887,9 @@ impl Backend {
 
     fn find_token_at_position<'a>(
         source: &str,
-        tokens: &'a [Token<'a>],
+        tokens: &'a [Token],
         position: Position,
-    ) -> Option<&'a Token<'a>> {
+    ) -> Option<&'a Token> {
         tokens.iter().find(|(_, data)| {
             let token_range = token_to_editor_range(source, data);
             token_range.start <= position && position < token_range.end
@@ -850,9 +898,9 @@ impl Backend {
 
     fn find_token_before_or_at_position<'a>(
         source: &str,
-        tokens: &'a [Token<'a>],
+        tokens: &'a [Token],
         position: Position,
-    ) -> Option<&'a Token<'a>> {
+    ) -> Option<&'a Token> {
         tokens
             .iter()
             .find(|(_, data)| {
@@ -889,8 +937,13 @@ impl Backend {
                 return;
             };
             let load_errors = registry.load_module_from_source(&file_path, source);
-            registry.revalidate_importers(&module_path);
-            let affected_modules = registry.refresh_name_collision_diagnostics();
+            let affected_modules: Vec<_> = registry
+                .module_cache
+                .read()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect();
             let current_module_was_revalidated = affected_modules.contains(&module_path);
             let mut publications = Vec::new();
             for affected_module in affected_modules {
@@ -921,7 +974,12 @@ impl Backend {
         module_path: &str,
         errors: &[ModuleDiagnostic],
     ) {
-        let diagnostics = diagnostics_for_module(errors, module_path);
+        let diagnostics = self
+            .registry
+            .with_module(module_path, |_, _, module| {
+                diagnostics_for_source(errors, module_path, &module.source)
+            })
+            .unwrap_or_else(|| diagnostics_for_module(errors, module_path));
         self.client
             .publish_diagnostics(uri, diagnostics, None)
             .await;
@@ -929,10 +987,10 @@ impl Backend {
 
     // ── Completions ─────────────────────────────────────────────────
 
-    fn get_context_completions<'a>(
+    fn get_context_completions(
         &self,
-        tokens: &[Token<'a>],
-        _ast: &[Declaration<'a>],
+        tokens: &[Token],
+        _ast: &[Declaration],
         source: &str,
         position: Position,
         module_path: Option<&str>,
@@ -996,7 +1054,10 @@ impl Backend {
             let client = self.client.clone();
             let msg = format!(
                 "Current token: {:?} at line {}, col {}, value '{}'",
-                current_token.0, current_token.1.l, current_token.1.c, current_token.1.v
+                current_token.0,
+                current_token.1.line(source),
+                current_token.1.column(source),
+                current_token.1.text(source)
             );
             tokio::spawn(async move {
                 let _ = client.log_message(MessageType::INFO, msg).await;
@@ -1037,13 +1098,13 @@ impl Backend {
                     items.extend(self.get_import_completions(""));
                 }
                 TokenVariant::Path => {
-                    items.extend(self.get_import_completions(current_token.1.v));
+                    items.extend(self.get_import_completions(current_token.1.text(source)));
                 }
                 TokenVariant::Identifier => {
                     let token_idx = tokens.iter().position(|t| {
-                        t.1.l == current_token.1.l
-                            && t.1.c == current_token.1.c
-                            && t.1.v == current_token.1.v
+                        t.1.line(source) == current_token.1.line(source)
+                            && t.1.column(source) == current_token.1.column(source)
+                            && t.1.text(source) == current_token.1.text(source)
                             && t.0 == current_token.0
                     });
 
@@ -1102,8 +1163,9 @@ impl Backend {
         }
 
         Some(HoverTarget {
-            name: token.1.v.to_string(),
-            type_arguments: hover::type_arguments_at_token(ast, &token.1).unwrap_or_default(),
+            name: token.1.text(source).to_string(),
+            type_arguments: hover::type_arguments_at_token(ast, &token.1, source)
+                .unwrap_or_default(),
             range: token_to_editor_range(source, &token.1),
         })
     }
@@ -1114,10 +1176,11 @@ impl Backend {
         type_arguments: &[String],
     ) -> Option<String> {
         self.registry
-            .with_module(&info.module_path, |_, ast, _| {
+            .with_module(&info.module_path, |_, ast, module| {
+                let source = module.borrow_source();
                 ast.iter().find_map(|declaration| match declaration {
-                    Declaration::Type { name, .. } if name.v == info.name => {
-                        hover::format_type_declaration(declaration, type_arguments)
+                    Declaration::Type { name, .. } if name.text(source) == info.name => {
+                        hover::format_type_declaration(declaration, type_arguments, source)
                     }
                     _ => None,
                 })
@@ -1185,9 +1248,12 @@ impl Backend {
         let range = self
             .registry
             .with_module(&info.module_path, |_, ast, module| {
+                let source = module.borrow_source();
                 ast.iter().find_map(|declaration| match declaration {
                     Declaration::Type { name, .. }
-                        if name.l == info.line && name.c == info.column && name.v == info.name =>
+                        if name.line(source) == info.line
+                            && name.column(source) == info.column
+                            && name.text(source) == info.name =>
                     {
                         Some(token_to_editor_range(module.borrow_source(), name))
                     }
@@ -1310,6 +1376,9 @@ impl LanguageServer for Backend {
                 .store(true, std::sync::atomic::Ordering::Release);
             let empty = XenoRegistry {
                 module_cache: RwLock::new(HashMap::new()),
+                index: RwLock::new(HashMap::new()),
+                hierarchy: RwLock::new(TypeHierarchy::default()),
+                coordinator: Mutex::new(()),
                 root: self.registry.root.clone(),
                 entry: self.registry.entry.clone(),
                 config: Arc::clone(&self.registry.config),
@@ -1482,10 +1551,12 @@ impl LanguageServer for Backend {
             if token.0 == TokenVariant::Path {
                 for decl in ast.iter() {
                     if let Declaration::Import { path, .. } = decl {
-                        if path.join("/") == token.1.v {
+                        if path.join("/") == token.1.text(source) {
                             let segments = path.to_vec();
-                            if let Ok((_, abs_path)) = self.registry.resolve_import(&segments, None)
-                            {
+                            if let Ok((_, abs_path)) = self.registry.resolve_import(
+                                &segments.iter().map(String::as_str).collect::<Vec<_>>(),
+                                None,
+                            ) {
                                 if abs_path.exists() {
                                     if let Ok(target_uri) = Url::from_file_path(&abs_path) {
                                         return Some(GotoDefinitionResponse::Scalar(Location {
@@ -1503,7 +1574,7 @@ impl LanguageServer for Backend {
 
             // Try local declaration
             if token.0 == TokenVariant::Identifier {
-                if let Some(generic) = generic_parameter_target_at(ast, &token.1) {
+                if let Some(generic) = generic_parameter_target_at(ast, &token.1, source) {
                     return Some(GotoDefinitionResponse::Scalar(Location {
                         uri: uri.clone(),
                         range: generic.declaration.to_editor_range(source),
@@ -1511,7 +1582,7 @@ impl LanguageServer for Backend {
                 }
                 for decl in ast {
                     if let Declaration::Type { name, .. } = decl {
-                        if name.v == token.1.v {
+                        if name.text(source) == token.1.text(source) {
                             return Some(GotoDefinitionResponse::Scalar(Location {
                                 uri: uri.clone(),
                                 range: token_to_editor_range(source, name),
@@ -1529,17 +1600,21 @@ impl LanguageServer for Backend {
         }
 
         // Second try: cross-module declaration via the registry
-        let cross_result = self.registry.with_module(mp, |tokens, _, module| {
-            let token = Self::find_token_at_position(module.borrow_source(), tokens, position)?;
-            if token.0 != TokenVariant::Identifier {
-                return None;
-            }
-            let info = self.registry.find_declaration(mp, token.1.v)?;
-            self.declaration_info_to_location(&info)
-                .map(GotoDefinitionResponse::Scalar)
-        });
-
-        Ok(cross_result.flatten())
+        let selected = self
+            .registry
+            .with_module(mp, |tokens, _, module| {
+                let token = Self::find_token_at_position(module.borrow_source(), tokens, position)?;
+                if token.0 != TokenVariant::Identifier {
+                    return None;
+                }
+                Some(token.1.text(module.borrow_source()).to_string())
+            })
+            .flatten();
+        let cross_result = selected
+            .and_then(|name| self.registry.find_declaration(mp, &name))
+            .and_then(|info| self.declaration_info_to_location(&info))
+            .map(GotoDefinitionResponse::Scalar);
+        Ok(cross_result)
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
@@ -1558,8 +1633,8 @@ impl LanguageServer for Backend {
                     return None;
                 }
                 Some((
-                    token.1.v.to_string(),
-                    generic_parameter_target_at(ast, &token.1).map(|generic| {
+                    token.1.text(source).to_string(),
+                    generic_parameter_target_at(ast, &token.1, source).map(|generic| {
                         generic
                             .occurrences
                             .into_iter()
@@ -1619,15 +1694,16 @@ impl LanguageServer for Backend {
                         tokens
                             .iter()
                             .filter_map(|token| {
-                                if token.0 != TokenVariant::Identifier || token.1.v != searched_name
+                                if token.0 != TokenVariant::Identifier
+                                    || token.1.text(source) != searched_name
                                 {
                                     return None;
                                 }
 
                                 if !include_declaration
                                     && module_path == target.module_path
-                                    && token.1.l == target.line
-                                    && token.1.c == target.column
+                                    && token.1.line(source) == target.line
+                                    && token.1.column(source) == target.column
                                 {
                                     return None;
                                 }
@@ -1667,12 +1743,13 @@ impl LanguageServer for Backend {
         let symbols =
             self.registry
                 .with_module(module_path.as_deref().unwrap_or(""), |_, ast, module| {
+                    let source = module.borrow_source();
                     #[allow(deprecated)]
                     ast.iter()
                         .filter_map(|decl| match decl {
                             Declaration::Import { .. } | Declaration::Custom { .. } => None,
                             Declaration::Type { name, .. } => Some(SymbolInformation {
-                                name: name.v.to_string(),
+                                name: name.text(source).to_string(),
                                 kind: SymbolKind::STRUCT,
                                 tags: None,
                                 deprecated: None,
@@ -1708,10 +1785,10 @@ impl LanguageServer for Backend {
 
                 // Only allow declaration-local generic parameters and
                 // user-defined type declarations to be renamed.
-                let is_user_defined = generic_parameter_target_at(ast, &token.1).is_some()
+                let is_user_defined = generic_parameter_target_at(ast, &token.1, source).is_some()
                     || ast.iter().any(|decl| match decl {
                         Declaration::Import { .. } | Declaration::Custom { .. } => false,
-                        Declaration::Type { name, .. } => name.v == token.1.v,
+                        Declaration::Type { name, .. } => name.text(source) == token.1.text(source),
                     });
 
                 if !is_user_defined {
@@ -1720,7 +1797,7 @@ impl LanguageServer for Backend {
 
                 Some(PrepareRenameResponse::RangeWithPlaceholder {
                     range: token_to_editor_range(source, &token.1),
-                    placeholder: token.1.v.to_string(),
+                    placeholder: token.1.text(source).to_string(),
                 })
             },
         );
@@ -1743,9 +1820,9 @@ impl LanguageServer for Backend {
                     return None;
                 }
 
-                let old_name = token.1.v;
+                let old_name = token.1.text(source);
 
-                if let Some(generic) = generic_parameter_target_at(ast, &token.1) {
+                if let Some(generic) = generic_parameter_target_at(ast, &token.1, source) {
                     let edits = generic
                         .occurrences
                         .into_iter()
@@ -1764,7 +1841,7 @@ impl LanguageServer for Backend {
 
                 let is_user_defined = ast.iter().any(|decl| match decl {
                     Declaration::Import { .. } | Declaration::Custom { .. } => false,
-                    Declaration::Type { name, .. } => name.v == old_name,
+                    Declaration::Type { name, .. } => name.text(source) == old_name,
                 });
 
                 if !is_user_defined {
@@ -1773,7 +1850,7 @@ impl LanguageServer for Backend {
 
                 let edits: Vec<TextEdit> = tokens
                     .iter()
-                    .filter(|t| t.0 == TokenVariant::Identifier && t.1.v == old_name)
+                    .filter(|t| t.0 == TokenVariant::Identifier && t.1.text(source) == old_name)
                     .map(|t| TextEdit {
                         range: token_to_editor_range(source, &t.1),
                         new_text: new_name.clone(),
@@ -1833,6 +1910,23 @@ mod tests {
     use xenomorph_common::lexer::Lexer;
     use xenomorph_common::module::types::ErrorPhase;
     use xenomorph_common::XenoDiagSeverity;
+
+    #[test]
+    fn diagnostic_ending_inside_crlf_stops_at_the_content_column() {
+        let source = xenomorph_common::SourceDocument::new("a\u{e9}\u{1f600}\r\nnext".into());
+        let errors = [ModuleDiagnostic {
+            module_path: "test".into(),
+            message: "boundary diagnostic".into(),
+            location: Some((0, 1, 7)),
+            phase: ErrorPhase::Parser,
+            severity: XenoDiagSeverity::Err,
+        }];
+        let diagnostics = diagnostics_for_source(&errors, "test", &source);
+        assert_eq!(
+            diagnostics[0].range,
+            Range::new(Position::new(0, 1), Position::new(0, 4))
+        );
+    }
 
     fn context_at_end(source: &str) -> Option<(String, usize)> {
         let tokens = Lexer::tokenize(source).expect("completion fixture should lex");
@@ -1920,15 +2014,15 @@ mod tests {
     fn generic_parameter_target_is_scoped_to_its_declaration() {
         let source = "type First<T> = T; type Second<T> = Box<T>;";
         let tokens = Lexer::tokenize(source).expect("generic fixture should lex");
-        let (ast, diagnostics) = xenomorph_common::parser::Parser::parse(&tokens);
+        let (ast, diagnostics) = xenomorph_common::parser::Parser::parse(&tokens, source);
         assert!(diagnostics.is_empty());
         let selected = tokens
             .iter()
-            .filter(|token| token.0 == TokenVariant::Identifier && token.1.v == "T")
+            .filter(|token| token.0 == TokenVariant::Identifier && token.1.text(source) == "T")
             .nth(3)
             .expect("second generic reference should exist");
 
-        let target = generic_parameter_target_at(&ast, &selected.1)
+        let target = generic_parameter_target_at(&ast, &selected.1, source)
             .expect("generic reference should resolve");
 
         let second_start = source.find("Second").unwrap() as u32;
@@ -1945,14 +2039,14 @@ mod tests {
     fn generic_parameter_target_collects_nested_and_annotation_references() {
         let source = "type Result<T> = { value: Box<T>, items: T[] } @example(T);";
         let tokens = Lexer::tokenize(source).expect("generic fixture should lex");
-        let (ast, diagnostics) = xenomorph_common::parser::Parser::parse(&tokens);
+        let (ast, diagnostics) = xenomorph_common::parser::Parser::parse(&tokens, source);
         assert!(diagnostics.is_empty());
         let declaration = tokens
             .iter()
-            .find(|token| token.0 == TokenVariant::Identifier && token.1.v == "T")
+            .find(|token| token.0 == TokenVariant::Identifier && token.1.text(source) == "T")
             .expect("generic declaration should exist");
 
-        let target = generic_parameter_target_at(&ast, &declaration.1)
+        let target = generic_parameter_target_at(&ast, &declaration.1, source)
             .expect("generic declaration should resolve");
 
         assert_eq!(target.occurrences.len(), 4);
@@ -1962,14 +2056,14 @@ mod tests {
     fn generic_parameter_target_does_not_treat_constraints_as_parameter_uses() {
         let source = "type Result<T: T> = T;";
         let tokens = Lexer::tokenize(source).expect("generic fixture should lex");
-        let (ast, diagnostics) = xenomorph_common::parser::Parser::parse(&tokens);
+        let (ast, diagnostics) = xenomorph_common::parser::Parser::parse(&tokens, source);
         assert!(diagnostics.is_empty());
         let declaration = tokens
             .iter()
-            .find(|token| token.0 == TokenVariant::Identifier && token.1.v == "T")
+            .find(|token| token.0 == TokenVariant::Identifier && token.1.text(source) == "T")
             .expect("generic declaration should exist");
 
-        let target = generic_parameter_target_at(&ast, &declaration.1)
+        let target = generic_parameter_target_at(&ast, &declaration.1, source)
             .expect("generic declaration should resolve");
 
         assert_eq!(target.occurrences.len(), 2);
@@ -1981,7 +2075,7 @@ mod tests {
         let tokens = Lexer::tokenize(source).expect("UTF-16 fixture should lex");
         let string = tokens
             .iter()
-            .find(|token| token.0 == TokenVariant::Identifier && token.1.v == "string")
+            .find(|token| token.0 == TokenVariant::Identifier && token.1.text(source) == "string")
             .expect("type reference should exist");
 
         let range = token_to_editor_range(source, &string.1);

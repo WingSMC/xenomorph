@@ -60,18 +60,21 @@ configuration underneath existing calls.
 payload. The function table provides describe, initialize, run, destroy, and
 buffer-release operations.
 
-Payloads use JSON with an explicit protocol version in the ABI header. Module
-requests contain lossless owned syntax, a token pool with source locations,
-and the host's semantic scope. The protocol encodes arbitrary-precision
-integer and decimal values as strings. Native paths use Windows UTF-16 units
-or Unix bytes. They do not need a lossy UTF-8 conversion.
+Payloads use Postcard binary serialization. The ABI header uses protocol 1.
+Module requests contain the current source, the shared owned AST, and the host's semantic scope.
+AST tokens contain half-open UTF-8 byte ranges into that source. The host
+serializes borrowed syntax directly, without constructing another AST.
+Integers use a sign and little-endian magnitude; decimals use an integer
+coefficient and signed scale. Configuration uses typed binary values. JSON
+Schema remains JSON text inside the description payload.
+Native paths use Windows UTF-16 units or Unix bytes. They do not need a lossy UTF-8 conversion.
 
-The SDK reconstructs plugin-local AST values and runs local listener callbacks
+The SDK deserializes the shared AST and runs local listener callbacks
 in their normal order. It does not reparse source or rerun workspace resolution.
 Protocol 1 does not support custom opaque Rust declaration values.
 
 Diagnostic severity values are `0` for errors, `1` for warnings, and `2` for
-information. Diagnostics must refer to a token in the submitted AST. The host
+information. Diagnostic byte ranges must fit within a token in the submitted AST. The host
 rejects malformed payloads instead of accepting incomplete results.
 
 ## Ownership and threading

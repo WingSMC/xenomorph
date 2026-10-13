@@ -1,23 +1,24 @@
 use crate::{
     lexer::{Token, TokenVariant, XenoTokens},
-    parser::Declaration,
+    parser::{Declaration, DeclarationMethods},
     TokenData, XenoDiagSeverity, XenoDiagnostic,
 };
 
 #[derive(Clone, Debug)]
 pub struct Parser<'src> {
-    pub tokens: &'src XenoTokens<'src>,
+    pub tokens: &'src XenoTokens,
+    pub source: &'src str,
     pub current: usize,
-    pub diagnostics: Vec<XenoDiagnostic<'src>>,
+    pub diagnostics: Vec<XenoDiagnostic>,
 }
 
-pub type XenoAst<'src> = Vec<Declaration<'src>>;
-pub type XenoParseResult<'src> = (XenoAst<'src>, Vec<XenoDiagnostic<'src>>);
+pub type XenoAst = Vec<Declaration>;
+pub type XenoParseResult = (XenoAst, Vec<XenoDiagnostic>);
 
 impl<'src> std::iter::Iterator for Parser<'src> {
-    type Item = &'src Token<'src>;
+    type Item = &'src Token;
 
-    fn next(&mut self) -> Option<&'src Token<'src>> {
+    fn next(&mut self) -> Option<&'src Token> {
         let ind = self.current;
         self.current += 1;
         self.tokens.get(ind)
@@ -26,17 +27,18 @@ impl<'src> std::iter::Iterator for Parser<'src> {
 
 // --- Basic parser utilities / entry ---
 impl<'src> Parser<'src> {
-    pub fn new(tokens: &'src XenoTokens<'src>) -> Self {
+    pub fn new(tokens: &'src XenoTokens, source: &'src str) -> Self {
         Self {
             tokens,
+            source,
             current: 0,
             diagnostics: Vec::new(),
         }
     }
-    pub fn parse(tokens: &'src XenoTokens<'src>) -> XenoParseResult<'src> {
-        Self::new(tokens)._parse()
+    pub fn parse(tokens: &'src XenoTokens, source: &'src str) -> XenoParseResult {
+        Self::new(tokens, source)._parse()
     }
-    fn _parse(mut self) -> XenoParseResult<'src> {
+    fn _parse(mut self) -> XenoParseResult {
         let mut ast = Vec::new();
 
         while self.is_not_eof() {
@@ -54,7 +56,7 @@ impl<'src> Parser<'src> {
             location: self
                 .tokens
                 .get(self.current)
-                .map(|t| t.1.clone())
+                .map(|t| t.1)
                 .unwrap_or_default(),
         });
 
@@ -76,7 +78,7 @@ impl<'src> Parser<'src> {
         self.current < self.tokens.len()
     }
 
-    pub fn need_next(&mut self) -> Option<&'src Token<'src>> {
+    pub fn need_next(&mut self) -> Option<&'src Token> {
         let ind = self.current;
         self.current += 1;
         let tok_opt = self.tokens.get(ind);
@@ -86,7 +88,7 @@ impl<'src> Parser<'src> {
                 location: self
                     .tokens
                     .get(ind.saturating_sub(1))
-                    .map(|t| t.1.clone())
+                    .map(|t| t.1)
                     .unwrap_or_default(),
                 message: "Unexpected end of file.".to_string(),
             })
@@ -94,7 +96,7 @@ impl<'src> Parser<'src> {
         tok_opt
     }
 
-    pub fn peek(&self) -> Option<&'src Token<'src>> {
+    pub fn peek(&self) -> Option<&'src Token> {
         self.tokens.get(self.current)
     }
 
@@ -102,11 +104,11 @@ impl<'src> Parser<'src> {
         matches!(self.peek(), Some((variant, _)) if *variant == expected)
     }
 
-    pub fn previous(&self) -> Option<&'src TokenData<'src>> {
+    pub fn previous(&self) -> Option<TokenData> {
         self.current
             .checked_sub(1)
             .and_then(|index| self.tokens.get(index))
-            .map(|(_, data)| data)
+            .map(|(_, data)| *data)
     }
 
     pub fn step_forward(&mut self) {
@@ -122,25 +124,25 @@ impl<'src> Parser<'src> {
     }
 
     #[must_use]
-    pub fn expect(&mut self, expected: TokenVariant) -> Option<&'src TokenData<'src>> {
+    pub fn expect(&mut self, expected: TokenVariant) -> Option<TokenData> {
         let (var, d) = self.need_next()?;
         if *var != expected {
             self.diagnostics.push(XenoDiagnostic {
-                location: d.clone(),
+                location: *d,
                 message: format!("Expected {:?} at {} instead got {:?}.", expected, d, var),
                 severity: XenoDiagSeverity::Err,
             });
             return None;
         }
 
-        Some(d)
+        Some(*d)
     }
 
     /// Expects the current token without consuming it on a mismatch. This is
     /// useful for local recovery because a delimiter may be the unexpected
     /// token and must remain available as a synchronization point.
     #[must_use]
-    pub fn expect_at_current(&mut self, expected: TokenVariant) -> Option<&'src TokenData<'src>> {
+    pub fn expect_at_current(&mut self, expected: TokenVariant) -> Option<TokenData> {
         let Some((actual, data)) = self.peek() else {
             self.need_next();
             return None;
@@ -148,7 +150,7 @@ impl<'src> Parser<'src> {
 
         if *actual != expected {
             self.diagnostics.push(XenoDiagnostic {
-                location: data.clone(),
+                location: *data,
                 message: format!(
                     "Expected {:?} at {} instead got {:?}.",
                     expected, data, actual
@@ -159,7 +161,7 @@ impl<'src> Parser<'src> {
         }
 
         self.step_forward();
-        Some(data)
+        Some(*data)
     }
 
     /// Advances to the first synchronization token without consuming it.
@@ -202,5 +204,89 @@ impl<'src> Parser<'src> {
         }
 
         Some(types)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Parsed {
+    pub ast: XenoAst,
+    pub diagnostics: Vec<XenoDiagnostic>,
+    pub spans: Vec<(usize, usize)>,
+    pub reused_declarations: usize,
+    pub reused_indices: Vec<usize>,
+}
+impl<'src> Parser<'src> {
+    pub fn parse_incremental(
+        tokens: &'src XenoTokens,
+        source: &'src str,
+        old: Option<(&XenoTokens, &str, &Parsed)>,
+    ) -> Parsed {
+        let old = old.filter(|(_, _, p)| p.diagnostics.is_empty());
+        let signature = |tokens: &[Token], source: &str| {
+            crate::utils::calculate_hash(
+                &tokens
+                    .iter()
+                    .take(3)
+                    .map(|(kind, r)| (*kind as u8, r.text(source)))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let mut candidates: std::collections::HashMap<u64, Vec<usize>> =
+            std::collections::HashMap::new();
+        if let Some((tokens, source, parsed)) = old {
+            for (index, (a, b)) in parsed.spans.iter().enumerate() {
+                candidates
+                    .entry(signature(&tokens[*a..*b], source))
+                    .or_default()
+                    .push(index);
+            }
+        }
+        let mut parser = Self::new(tokens, source);
+        let mut parsed = Parsed::default();
+        while parser.current < tokens.len() {
+            let start = parser.current;
+            let reusable = old.and_then(|(old_tokens, old_source, old_parsed)| {
+                candidates
+                    .get(&signature(&tokens[start..], source))?
+                    .iter()
+                    .find_map(|&index| {
+                        let (a, b) = &old_parsed.spans[index];
+                        let count = b - a;
+                        let new = tokens.get(start..start + count)?;
+                        let previous = &old_tokens[*a..*b];
+                        let delta = new.first()?.1.start as i64 - previous.first()?.1.start as i64;
+                        if !new.iter().zip(previous).all(|((k, r), (ok, or))| {
+                            k == ok
+                                && r.start as i64 == or.start as i64 + delta
+                                && r.end as i64 == or.end as i64 + delta
+                        }) {
+                            return None;
+                        }
+                        let from = new.first()?.1.start as usize;
+                        let to = new.last()?.1.end as usize;
+                        let old_from = previous.first()?.1.start as usize;
+                        let old_to = previous.last()?.1.end as usize;
+                        if source[from..to] != old_source[old_from..old_to] {
+                            return None;
+                        }
+                        Some((old_parsed.ast[index].clone(), delta, count))
+                    })
+            });
+            if let Some((mut declaration, delta, count)) = reusable {
+                declaration.relocate(delta);
+                parsed.ast.push(declaration);
+                parser.current += count;
+                parsed.reused_indices.push(parsed.ast.len() - 1);
+                parsed.reused_declarations += 1;
+                parsed.spans.push((start, parser.current));
+            } else if let Some(declaration) = Declaration::parse(&mut parser) {
+                parsed.ast.push(declaration);
+                parsed.spans.push((start, parser.current));
+            } else {
+                parser.recover_to(TokenVariant::Semicolon);
+            }
+        }
+        parsed.diagnostics = parser.diagnostics;
+        parsed
     }
 }

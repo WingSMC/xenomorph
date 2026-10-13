@@ -1,113 +1,19 @@
 use bigdecimal::BigDecimal;
 use num_bigint::BigInt;
-use std::{fmt, str::FromStr};
+use std::str::FromStr;
 
 use crate::{
-    lexer::{Token, TokenVariant},
-    parser::Parser,
-    utils::extract_documentation,
-    TokenData, XenoDiagSeverity, XenoDiagnostic,
+    parser::Parser, utils::extract_documentation, TokenData, XenoDiagSeverity, XenoDiagnostic,
 };
 
-pub enum Declaration<'src> {
-    Import {
-        path: Vec<&'src str>,
-        location: &'src TokenData<'src>,
-    },
-    Type {
-        docs: Option<&'src str>,
-        name: &'src TokenData<'src>,
-        generics: Option<Vec<(&'src TokenData<'src>, Option<&'src TokenData<'src>>)>>,
-        ty: XenoType<'src>,
-        from: &'src TokenData<'src>,
-        to: &'src TokenData<'src>,
-    },
-    Custom {
-        plugin_id: &'static str,
-        decl_id: &'static str,
-        docs: Option<&'src str>,
-        name: Option<&'src TokenData<'src>>,
-        value: Box<dyn std::any::Any + Send + Sync>,
-    },
+pub use xenomorph_plugin_api::syntax::*;
+
+pub trait AnnotationMethods<'src>: Sized {
+    fn parse_annotations(parser: &mut Parser<'src>) -> Vec<Annotation>;
+    fn parse_annotation(parser: &mut Parser<'src>) -> Option<Annotation>;
 }
-
-impl fmt::Debug for Declaration<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Declaration::Import { path, location } => f
-                .debug_struct("Import")
-                .field("path", path)
-                .field("location", location)
-                .finish(),
-            Declaration::Type {
-                docs,
-                name,
-                generics,
-                ty,
-                from,
-                to,
-            } => f
-                .debug_struct("Type")
-                .field("docs", docs)
-                .field("name", name)
-                .field("generics", generics)
-                .field("ty", ty)
-                .field("from", from)
-                .field("to", to)
-                .finish(),
-            Declaration::Custom {
-                plugin_id,
-                decl_id,
-                docs,
-                name,
-                ..
-            } => f
-                .debug_struct("Custom")
-                .field("plugin_id", plugin_id)
-                .field("decl_id", decl_id)
-                .field("docs", docs)
-                .field("name", name)
-                .field("value", &"<opaque>")
-                .finish(),
-        }
-    }
-}
-
-// pub type BinaryExpr<'src> = Box<(Expr<'src>, Expr<'src>)>;
-// #[derive(Debug, Clone, Copy, PartialEq)]
-// pub enum BinaryExprType {
-//     Union,
-//     Intersection,
-//     Difference,
-//     SymmetricDifference,
-//     // Xor,
-//     // Range,
-//     // Add,
-//     // Remove,
-// }
-
-/**
- * Something on the right side of a type declaration
- * Type is either the parent type or a new type,
- * and the annotations are the constraints/meta-info on the type.
- */
-pub type XenoType<'src> = (Type<'src>, Vec<Annotation<'src>>);
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Annotation<'src> {
-    pub ident: &'src TokenData<'src>,
-    pub params: Vec<Expr<'src>>,
-}
-
-impl<'src> Annotation<'src> {
-    pub fn get_last_token(&self) -> &'src TokenData<'src> {
-        self.params
-            .last()
-            .and_then(|e| e.get_last_token())
-            .unwrap_or(self.ident)
-    }
-
-    pub fn parse_annotations(parser: &mut Parser<'src>) -> Vec<Annotation<'src>> {
+impl<'src> AnnotationMethods<'src> for Annotation {
+    fn parse_annotations(parser: &mut Parser<'src>) -> Vec<Annotation> {
         let mut annotations = Vec::new();
         while let Some((TokenVariant::At, _)) = parser.peek() {
             if let Some(a) = Self::parse_annotation(parser) {
@@ -116,8 +22,7 @@ impl<'src> Annotation<'src> {
         }
         annotations
     }
-
-    pub fn parse_annotation(parser: &mut Parser<'src>) -> Option<Annotation<'src>> {
+    fn parse_annotation(parser: &mut Parser<'src>) -> Option<Annotation> {
         parser.expect(TokenVariant::At)?;
         let ident = parser.expect(TokenVariant::Identifier)?;
 
@@ -135,152 +40,26 @@ impl<'src> Annotation<'src> {
         Some(Annotation { ident, params })
     }
 }
-
-/**
- * A type expression (or literal expression)
- */
-#[derive(Debug, Clone, PartialEq)]
-pub enum Type<'src> {
-    /** Read `SimpleType` docs */
-    Simple(SimpleType<'src>),
-
-    /** e.g. [Type1, Type2, Type3] */
-    Tuple(Vec<SimpleType<'src>>),
-    /**
-    A unique collection with an optional element type and optional constant prefill.
-
-    e.g. `set<string>`, `set ["Blue", "Red"]`, or
-    `set<string> ["Blue", "Red"]`.
-    */
-    Set(SetType<'src>),
-
-    /** e.g. { field1: Type1, field2: Type2 } */
-    Struct(Vec<KeyValExpr<'src>>),
-    /**
-    List of mutually exclusive variants, each with a name and type.
-
-    enum { variant1: Type1, variant2: Type2 }
-    */
-    Enum(Vec<KeyValExpr<'src>>),
-    /** e.g. | Type1 | Type2 | Type3 */
-    Sum(Vec<SimpleType<'src>>),
-    /** e.g. & Type1 & Type2 & Type3 */
-    Intersection(Vec<SimpleType<'src>>),
+pub trait DeclarationMethods<'src>: Sized {
+    fn parse(parser: &mut Parser<'src>) -> Option<Declaration>;
+    fn parse_type_declaration(
+        parser: &mut Parser<'src>,
+        from: TokenData,
+        docs: Option<String>,
+    ) -> Option<Declaration>;
+    fn parse_import_declaration(
+        parser: &mut Parser<'src>,
+        location: TokenData,
+        docs: Option<String>,
+    ) -> Option<Declaration>;
 }
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct SetType<'src> {
-    /// The `set` keyword, retained for diagnostics and source navigation.
-    pub keyword: &'src TokenData<'src>,
-    /// An explicit element type from `set<T>`.
-    pub element_type: Option<SimpleType<'src>>,
-    /// A literal-only prefill. `None` means no prefill; `Some([])` is an
-    /// explicitly empty prefill.
-    pub values: Option<Vec<Literal<'src>>>,
-    /// The closing `>` or `]`, or the keyword when parsing cannot advance.
-    pub last_token: &'src TokenData<'src>,
-}
-
-/** Used for struct fields, sets, tuples */
-#[derive(Debug, Clone, PartialEq)]
-pub enum SimpleType<'src> {
-    /** e.g. 42, 3.141592653, true, "hello" */
-    Literal(Literal<'src>),
-
-    /** name of a type */
-    Identifier(&'src TokenData<'src>, Option<Vec<SimpleType<'src>>>),
-
-    /** Postfix array syntax, e.g. u32[] */
-    Array(&'src TokenData<'src>, Option<Vec<SimpleType<'src>>>),
-
-    /** Prefix optional syntax, e.g. ?u32 */
-    Optional(Box<SimpleType<'src>>),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Literal<'src> {
-    Int(IntLiteral<'src>),
-    Float(FloatLiteral<'src>),
-    String(String, &'src TokenData<'src>),
-    Boolean(bool, &'src TokenData<'src>),
-}
-
-/// Storage required by an integer literal. `Bits` is either the exact minimum
-/// bit count inferred from the value or the fixed width requested by a cast.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IntegerSize {
-    Bits(u64),
-    Arbitrary,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct IntegerRepresentation {
-    pub signed: bool,
-    pub size: IntegerSize,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct IntLiteral<'src> {
-    pub value: BigInt,
-    pub representation: IntegerRepresentation,
-    pub token: &'src TokenData<'src>,
-    pub cast: Option<&'src TokenData<'src>>,
-}
-
-/// The smallest supported floating-point storage that can round-trip the
-/// source decimal, or an explicitly requested storage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FloatSize {
-    F32,
-    F64,
-    Decimal,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FloatRepresentation {
-    /// IEEE floats and arbitrary-precision decimals support negative values.
-    pub signed: bool,
-    /// Significant decimal digits in the source literal.
-    pub precision: u64,
-    /// Decimal digits following the decimal point in the source literal.
-    pub scale: u64,
-    pub size: FloatSize,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct FloatLiteral<'src> {
-    pub value: BigDecimal,
-    pub representation: FloatRepresentation,
-    pub token: &'src TokenData<'src>,
-    pub cast: Option<&'src TokenData<'src>>,
-}
-
-pub type KeyValExpr<'src> = (
-    // Field identifier. Quoted source keys are normalized to their unquoted
-    // contents by the parser, so this token is owned rather than borrowed.
-    TokenData<'src>,
-    // field type
-    SimpleType<'src>,
-    // documentation comment for the field
-    Option<&'src TokenData<'src>>,
-);
-
-/** Used in annotation params */
-#[derive(Debug, Clone, PartialEq)]
-pub enum Expr<'src> {
-    /// e.g. /regex/
-    Regex(&'src TokenData<'src>),
-    /// Identifier with params, e.g. @annotation(param1, param2)
-    Annotation(Annotation<'src>),
-    /// e.g. u32, "asd", [Type1, Type2], { field1: Type1, field2: Type2 }
-    Type(Type<'src>),
-}
-
-impl<'src> Declaration<'src> {
-    pub fn parse(parser: &mut Parser<'src>) -> Option<Declaration<'src>> {
+impl<'src> DeclarationMethods<'src> for Declaration {
+    fn parse(parser: &mut Parser<'src>) -> Option<Declaration> {
         let token = parser.need_next()?;
         let docs = match token {
-            (TokenVariant::Documentation, data) => Some(extract_documentation(data)),
+            (TokenVariant::Documentation, data) => {
+                Some(extract_documentation(data, parser.source).to_string())
+            }
             _ => None,
         };
 
@@ -291,11 +70,11 @@ impl<'src> Declaration<'src> {
         };
 
         let dec = match var {
-            TokenVariant::Type => Declaration::parse_type_declaration(parser, d, docs),
-            TokenVariant::Import => Declaration::parse_import_declaration(parser, d, docs),
+            TokenVariant::Type => Declaration::parse_type_declaration(parser, *d, docs),
+            TokenVariant::Import => Declaration::parse_import_declaration(parser, *d, docs),
             _ => {
                 parser.diagnostics.push(XenoDiagnostic {
-                    location: d.clone(),
+                    location: *d,
                     message: format!("Unknown declaration at {}, ({:?}).", d, var),
                     severity: XenoDiagSeverity::Err,
                 });
@@ -307,12 +86,11 @@ impl<'src> Declaration<'src> {
 
         Some(dec)
     }
-
-    pub fn parse_type_declaration(
+    fn parse_type_declaration(
         parser: &mut Parser<'src>,
-        from: &'src TokenData<'src>,
-        docs: Option<&'src str>,
-    ) -> Option<Declaration<'src>> {
+        from: TokenData,
+        docs: Option<String>,
+    ) -> Option<Declaration> {
         let name = parser.expect(TokenVariant::Identifier)?;
 
         let generics = if let Some((TokenVariant::Lt, _)) = parser.peek() {
@@ -331,7 +109,7 @@ impl<'src> Declaration<'src> {
                 };
                 parser.skip_if(TokenVariant::Comma);
 
-                generics.push((d, constraint));
+                generics.push((*d, constraint));
             }
             parser.expect(TokenVariant::Gt)?;
             Some(generics)
@@ -359,14 +137,14 @@ impl<'src> Declaration<'src> {
             to,
         })
     }
-    pub fn parse_import_declaration(
+    fn parse_import_declaration(
         parser: &mut Parser<'src>,
-        location: &'src TokenData<'src>,
-        docs: Option<&'src str>,
-    ) -> Option<Declaration<'src>> {
+        location: TokenData,
+        docs: Option<String>,
+    ) -> Option<Declaration> {
         if docs.is_some() {
             parser.diagnostics.push(XenoDiagnostic {
-                location: location.clone(),
+                location,
                 message: "Import declarations cannot have documentation comments.".to_string(),
                 severity: XenoDiagSeverity::Info,
             });
@@ -374,25 +152,25 @@ impl<'src> Declaration<'src> {
 
         // TODO can this be used with LSP for path recommendations?
         let path_tok = parser.expect(TokenVariant::Path)?;
-        let path = path_tok.v.split('/').collect::<Vec<&str>>();
+        let path = path_tok
+            .text(parser.source)
+            .split('/')
+            .map(str::to_string)
+            .collect::<Vec<_>>();
 
         Some(Declaration::Import { path, location })
     }
 }
-
-impl<'src> Type<'src> {
-    pub fn get_last_token(&self) -> Option<&'src TokenData<'src>> {
-        match self {
-            Type::Simple(ty) => Some(ty.get_last_token()),
-            Type::Struct(fs) | Type::Enum(fs) => fs.last().map(|f| f.1.get_last_token()),
-            Type::Tuple(ts) | Type::Intersection(ts) | Type::Sum(ts) => {
-                ts.last().map(|t| t.get_last_token())
-            }
-            Type::Set(set) => Some(set.last_token),
-        }
-    }
-
-    pub fn parse(parser: &mut Parser<'src>) -> Option<Type<'src>> {
+pub trait TypeMethods<'src>: Sized {
+    fn parse(parser: &mut Parser<'src>) -> Option<Type>;
+    fn parse_set(parser: &mut Parser<'src>) -> Option<Type>;
+    fn parse_set_value(parser: &mut Parser<'src>) -> Option<Literal>;
+    fn parse_tuple(parser: &mut Parser<'src>) -> Option<Vec<SimpleType>>;
+    fn parse_enum(parser: &mut Parser<'src>) -> Option<Type>;
+    fn parse_struct(parser: &mut Parser<'src>) -> Option<Vec<KeyValExpr>>;
+}
+impl<'src> TypeMethods<'src> for Type {
+    fn parse(parser: &mut Parser<'src>) -> Option<Type> {
         let (variant, _) = parser.peek()?;
         match variant {
             TokenVariant::Set => Self::parse_set(parser),
@@ -416,8 +194,7 @@ impl<'src> Type<'src> {
             _ => SimpleType::parse(parser).map(Type::Simple),
         }
     }
-
-    fn parse_set(parser: &mut Parser<'src>) -> Option<Type<'src>> {
+    fn parse_set(parser: &mut Parser<'src>) -> Option<Type> {
         let keyword = parser.expect(TokenVariant::Set)?;
         let mut last_token = keyword;
 
@@ -444,7 +221,7 @@ impl<'src> Type<'src> {
 
         if element_type.is_none() && values.is_none() {
             parser.diagnostics.push(XenoDiagnostic {
-                location: keyword.clone(),
+                location: keyword,
                 message: "A set requires an element type, a literal prefill, or both.".to_string(),
                 severity: XenoDiagSeverity::Err,
             });
@@ -458,8 +235,7 @@ impl<'src> Type<'src> {
             last_token,
         }))
     }
-
-    fn parse_set_value(parser: &mut Parser<'src>) -> Option<Literal<'src>> {
+    fn parse_set_value(parser: &mut Parser<'src>) -> Option<Literal> {
         let token = parser.peek()?;
         let literal = Literal::parse(parser, token);
         if literal.is_none()
@@ -472,15 +248,14 @@ impl<'src> Type<'src> {
             )
         {
             parser.diagnostics.push(XenoDiagnostic {
-                location: token.1.clone(),
+                location: token.1,
                 message: "Set prefills can contain only literals.".to_string(),
                 severity: XenoDiagSeverity::Err,
             });
         }
         literal
     }
-
-    fn parse_tuple(parser: &mut Parser<'src>) -> Option<Vec<SimpleType<'src>>> {
+    fn parse_tuple(parser: &mut Parser<'src>) -> Option<Vec<SimpleType>> {
         parser.parse_list(
             TokenVariant::LBracket,
             TokenVariant::Comma,
@@ -488,22 +263,20 @@ impl<'src> Type<'src> {
             SimpleType::parse,
         )
     }
-
-    fn parse_enum(parser: &mut Parser<'src>) -> Option<Type<'src>> {
+    fn parse_enum(parser: &mut Parser<'src>) -> Option<Type> {
         parser.expect(TokenVariant::Enum)?;
 
         let fs = Self::parse_struct(parser)?;
         Some(Type::Enum(fs))
     }
-
-    fn parse_struct(parser: &mut Parser<'src>) -> Option<Vec<KeyValExpr<'src>>> {
+    fn parse_struct(parser: &mut Parser<'src>) -> Option<Vec<KeyValExpr>> {
         parser.expect(TokenVariant::LCurly)?;
 
         let mut fields = Vec::new();
         while !parser.peek_is(TokenVariant::RCurly) && parser.peek().is_some() {
             let docs = if let Some((TokenVariant::Documentation, d)) = parser.peek() {
                 parser.step_forward();
-                Some(d)
+                Some(*d)
             } else {
                 None
             };
@@ -511,7 +284,7 @@ impl<'src> Type<'src> {
             if parser.peek_is(TokenVariant::RCurly) {
                 if let Some(docs) = docs {
                     parser.diagnostics.push(XenoDiagnostic {
-                        location: docs.clone(),
+                        location: docs,
                         message: "Documentation comment without a field.".to_string(),
                         severity: XenoDiagSeverity::Warn,
                     });
@@ -521,11 +294,10 @@ impl<'src> Type<'src> {
 
             let field = 'field: {
                 let key = match parser.peek() {
-                    Some((TokenVariant::Identifier, key)) => key.clone(),
+                    Some((TokenVariant::Identifier, key)) => *key,
                     Some((TokenVariant::String, key)) => TokenData {
-                        v: &key.v[1..key.v.len() - 1],
-                        l: key.l,
-                        c: key.c + 1,
+                        start: key.start + 1,
+                        end: key.end - 1,
                     },
                     _ => {
                         let _ = parser.expect_at_current(TokenVariant::Identifier);
@@ -566,34 +338,12 @@ impl<'src> Type<'src> {
         Some(fields)
     }
 }
-
-impl<'src> SimpleType<'src> {
-    /// Whether the type carries the `?` prefix.
-    pub fn is_optional(&self) -> bool {
-        matches!(self, SimpleType::Optional(_))
-    }
-
-    /// The type without its optional wrapper.
-    pub fn inner(&self) -> &SimpleType<'src> {
-        match self {
-            SimpleType::Optional(inner) => inner.inner(),
-            ty => ty,
-        }
-    }
-
-    pub fn get_last_token(&self) -> &'src TokenData<'src> {
-        match self {
-            SimpleType::Optional(inner) => inner.get_last_token(),
-            SimpleType::Literal(l) => l.get_last_token(),
-            SimpleType::Identifier(d, arguments) | SimpleType::Array(d, arguments) => arguments
-                .as_deref()
-                .and_then(|arguments| arguments.last())
-                .map(SimpleType::get_last_token)
-                .unwrap_or(d),
-        }
-    }
-
-    pub fn parse(parser: &mut Parser<'src>) -> Option<SimpleType<'src>> {
+pub trait SimpleTypeMethods<'src>: Sized {
+    fn parse(parser: &mut Parser<'src>) -> Option<SimpleType>;
+    fn parse_base(parser: &mut Parser<'src>) -> Option<SimpleType>;
+}
+impl<'src> SimpleTypeMethods<'src> for SimpleType {
+    fn parse(parser: &mut Parser<'src>) -> Option<SimpleType> {
         let is_optional = parser.skip_if(TokenVariant::Question);
         let base = Self::parse_base(parser)?;
         Some(match is_optional {
@@ -601,8 +351,7 @@ impl<'src> SimpleType<'src> {
             false => base,
         })
     }
-
-    fn parse_base(parser: &mut Parser<'src>) -> Option<SimpleType<'src>> {
+    fn parse_base(parser: &mut Parser<'src>) -> Option<SimpleType> {
         let t = parser.peek()?;
         match t.0 {
             TokenVariant::Identifier => {
@@ -627,9 +376,9 @@ impl<'src> SimpleType<'src> {
                 };
 
                 if is_array {
-                    Some(SimpleType::Array(&t.1, arguments))
+                    Some(SimpleType::Array(t.1, arguments))
                 } else {
-                    Some(SimpleType::Identifier(&t.1, arguments))
+                    Some(SimpleType::Identifier(t.1, arguments))
                 }
             }
 
@@ -637,7 +386,7 @@ impl<'src> SimpleType<'src> {
                 .map(SimpleType::Literal)
                 .or_else(|| {
                     parser.diagnostics.push(XenoDiagnostic {
-                        location: t.1.clone(),
+                        location: t.1,
                         message: format!("Unexpected token {:?} in simple type expression.", t.0),
                         severity: XenoDiagSeverity::Err,
                     });
@@ -646,51 +395,16 @@ impl<'src> SimpleType<'src> {
         }
     }
 }
-
-impl<'src> Literal<'src> {
-    pub fn get_last_token(&self) -> &'src TokenData<'src> {
-        match self {
-            Literal::Int(literal) => literal.cast.unwrap_or(literal.token),
-            Literal::Float(literal) => literal.cast.unwrap_or(literal.token),
-            Literal::String(_, token) | Literal::Boolean(_, token) => token,
-        }
-    }
-
-    pub fn token(&self) -> &'src TokenData<'src> {
-        match self {
-            Literal::Int(literal) => literal.token,
-            Literal::Float(literal) => literal.token,
-            Literal::String(_, token) | Literal::Boolean(_, token) => token,
-        }
-    }
-
-    pub fn cast_target(&self) -> Option<&'src TokenData<'src>> {
-        match self {
-            Literal::Int(literal) => literal.cast,
-            Literal::Float(literal) => literal.cast,
-            Literal::String(_, _) | Literal::Boolean(_, _) => None,
-        }
-    }
-
-    /// Returns the semantic type selected by an explicit cast. Uncast
-    /// literals retain their broad `integer` or `number` literal type.
-    pub fn semantic_type_name(&self) -> &'src str {
-        match self {
-            Literal::Int(literal) => literal.cast.map_or("integer", |target| target.v),
-            Literal::Float(literal) => literal.cast.map_or("number", |target| target.v),
-            Literal::String(_, _) => "string",
-            Literal::Boolean(_, _) => "bool",
-        }
-    }
-
-    pub fn source_text(&self) -> String {
-        match self.cast_target() {
-            Some(target) => format!("{} as {}", self.token().v, target.v),
-            None => self.token().v.to_string(),
-        }
-    }
-
-    pub fn parse(parser: &mut Parser<'src>, t: &'src Token<'src>) -> Option<Literal<'src>> {
+pub trait LiteralMethods<'src>: Sized {
+    fn parse(parser: &mut Parser<'src>, t: &'src Token) -> Option<Literal>;
+    fn parse_number(
+        d: TokenData,
+        cast: Option<TokenData>,
+        source: &str,
+    ) -> Result<Literal, XenoDiagnostic>;
+}
+impl<'src> LiteralMethods<'src> for Literal {
+    fn parse(parser: &mut Parser<'src>, t: &'src Token) -> Option<Literal> {
         if t.0 == TokenVariant::Number {
             parser.step_forward();
             let cast = if parser.peek_is(TokenVariant::As) {
@@ -699,33 +413,36 @@ impl<'src> Literal<'src> {
             } else {
                 None
             };
-            return Self::parse_number(&t.1, cast)
+            return Self::parse_number(t.1, cast, parser.source)
                 .map_err(|e| parser.diagnostics.push(e))
                 .ok();
         }
 
         let literal = match t.0 {
-            TokenVariant::True => Literal::Boolean(true, &t.1),
-            TokenVariant::False => Literal::Boolean(false, &t.1),
-            TokenVariant::String => Literal::String(t.1.v[1..t.1.v.len() - 1].to_string(), &t.1),
+            TokenVariant::True => Literal::Boolean(true, t.1),
+            TokenVariant::False => Literal::Boolean(false, t.1),
+            TokenVariant::String => Literal::String(
+                t.1.text(parser.source)[1..t.1.text(parser.source).len() - 1].to_string(),
+                t.1,
+            ),
             _ => return None,
         };
         parser.step_forward();
         Some(literal)
     }
-
     fn parse_number(
-        d: &'src TokenData<'src>,
-        cast: Option<&'src TokenData<'src>>,
-    ) -> Result<Literal<'src>, XenoDiagnostic<'src>> {
-        let has_dot = d.v.contains('.');
+        d: TokenData,
+        cast: Option<TokenData>,
+        source: &str,
+    ) -> Result<Literal, XenoDiagnostic> {
+        let has_dot = d.text(source).contains('.');
         if has_dot {
-            d.v.parse::<BigDecimal>()
+            d.text(source).parse::<BigDecimal>()
                 .map_err(|error| error.to_string())
                 .and_then(|value| {
-                    let (precision, scale) = decimal_shape(d.v);
+                    let (precision, scale) = decimal_shape(d.text(source));
                     let inferred_size = infer_float_size(&value);
-                    let size = match cast.map(|target| target.v) {
+                    let size = match cast.map(|target| target.text(source)) {
                         None | Some("number") => inferred_size,
                         Some("f32") => FloatSize::F32,
                         Some("f64") => FloatSize::F64,
@@ -742,7 +459,7 @@ impl<'src> Literal<'src> {
                     {
                         return Err(format!(
                             "Floating-point literal '{}' cannot be represented by {} without losing decimal precision.",
-                            d.v,
+                            d.text(source),
                             float_size_name(size)
                         ));
                     }
@@ -760,11 +477,11 @@ impl<'src> Literal<'src> {
                     }))
                 })
         } else {
-            d.v.parse::<BigInt>()
+            d.text(source).parse::<BigInt>()
                 .map_err(|error| error.to_string())
                 .and_then(|value| {
                     let inferred = infer_integer_representation(&value);
-                    let representation = match cast.map(|target| target.v) {
+                    let representation = match cast.map(|target| target.text(source)) {
                         None | Some("integer") => inferred,
                         Some("bigint") => IntegerRepresentation {
                             signed: true,
@@ -781,8 +498,8 @@ impl<'src> Literal<'src> {
                     if !integer_fits(&value, representation) {
                         return Err(format!(
                             "Integer literal '{}' is outside the range of {}.",
-                            d.v,
-                            cast.map_or("the selected representation", |target| target.v)
+                            d.text(source),
+                            cast.map_or("the selected representation", |target| target.text(source))
                         ));
                     }
 
@@ -795,13 +512,28 @@ impl<'src> Literal<'src> {
                 })
         }
         .map_err(|e| XenoDiagnostic {
-            location: cast.unwrap_or(d).clone(),
+            location: cast.unwrap_or(d),
             message: format!("Error parsing number: {}", e),
             severity: XenoDiagSeverity::Err,
         })
     }
 }
-
+pub trait ExprMethods<'src>: Sized {
+    fn parse(parser: &mut Parser<'src>) -> Option<Expr>;
+}
+impl<'src> ExprMethods<'src> for Expr {
+    fn parse(parser: &mut Parser<'src>) -> Option<Expr> {
+        let t = parser.peek()?;
+        match t.0 {
+            TokenVariant::Regex => {
+                parser.step_forward();
+                Some(Expr::Regex(t.1))
+            }
+            TokenVariant::At => Annotation::parse_annotation(parser).map(Expr::Annotation),
+            _ => Type::parse(parser).map(Expr::Type),
+        }
+    }
+}
 fn infer_integer_representation(value: &BigInt) -> IntegerRepresentation {
     let signed = value.sign() == num_bigint::Sign::Minus;
     let bits = if signed {
@@ -828,14 +560,24 @@ pub(crate) fn parse_fixed_integer_representation(target: &str) -> Option<Integer
 }
 
 pub fn integer_fits(value: &BigInt, representation: IntegerRepresentation) -> bool {
-    let IntegerSize::Bits(bits) = representation.size else {
-        return true;
-    };
-    if representation.signed {
-        let half_range = BigInt::from(1_u8) << (bits - 1);
-        value >= &-half_range.clone() && value < &half_range
-    } else {
-        value.sign() != num_bigint::Sign::Minus && value < &(BigInt::from(1_u8) << bits)
+    if !representation.signed && value.sign() == num_bigint::Sign::Minus {
+        return false;
+    }
+    match representation.size {
+        IntegerSize::Arbitrary => true,
+        IntegerSize::Bits(0) => false,
+        IntegerSize::Bits(bits) => {
+            let required = if representation.signed {
+                if value.sign() == num_bigint::Sign::Minus {
+                    ((-value) - BigInt::from(1u8)).bits() + 1
+                } else {
+                    value.bits() + 1
+                }
+            } else {
+                value.bits()
+            };
+            required <= bits
+        }
     }
 }
 
@@ -881,27 +623,5 @@ fn float_size_name(size: FloatSize) -> &'static str {
         FloatSize::F32 => "f32",
         FloatSize::F64 => "f64",
         FloatSize::Decimal => "decimal",
-    }
-}
-
-impl<'src> Expr<'src> {
-    pub fn get_last_token(&self) -> Option<&'src TokenData<'src>> {
-        match self {
-            Expr::Regex(d) => Some(*d),
-            Expr::Annotation(a) => Some(a.get_last_token()),
-            Expr::Type(t) => t.get_last_token(),
-        }
-    }
-
-    pub fn parse(parser: &mut Parser<'src>) -> Option<Expr<'src>> {
-        let t = parser.peek()?;
-        match t.0 {
-            TokenVariant::Regex => {
-                parser.step_forward();
-                Some(Expr::Regex(&t.1))
-            }
-            TokenVariant::At => Annotation::parse_annotation(parser).map(Expr::Annotation),
-            _ => Type::parse(parser).map(Expr::Type),
-        }
     }
 }

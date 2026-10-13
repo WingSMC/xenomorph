@@ -4,9 +4,9 @@ use crate::TokenData;
 
 /// Just slices the value of the token to remove the comment boundries '/**' and '*/',
 /// and trims the result to remove any leading or trailing whitespace.
-pub fn extract_documentation<'src>(token: &TokenData<'src>) -> &'src str {
-    let len = token.v.len();
-    token.v[3..len - 2].trim()
+pub fn extract_documentation<'src>(token: &TokenData, source: &'src str) -> &'src str {
+    let len = token.text(source).len();
+    token.text(source)[3..len - 2].trim()
 }
 
 pub fn calculate_hash<T: Hash>(t: &T) -> u64 {

@@ -75,12 +75,13 @@ impl LoadedPlugin {
         self.runtime.is_some()
     }
 
-    pub fn run<'src>(
+    pub fn run(
         &self,
         generation: bool,
-        ast: &[crate::parser::Declaration<'src>],
+        ast: &[crate::parser::Declaration],
         scope: &crate::semantic::ScopeInfo,
-    ) -> Result<Vec<crate::XenoDiagnostic<'src>>, String> {
+        source: &str,
+    ) -> Result<Vec<crate::XenoDiagnostic>, String> {
         let capability = if generation {
             abi::GENERATOR
         } else {
@@ -89,19 +90,28 @@ impl LoadedPlugin {
         if self.capabilities & capability == 0 {
             return Ok(Vec::new());
         }
-        let runtime = self.runtime.as_ref().ok_or_else(|| {
+        self.runtime.as_ref().ok_or_else(|| {
             format!(
                 "Plugin '{}' is not loaded for the requested capability",
                 self.description.name
             )
         })?;
-        let (syntax, tokens) = syntax::encode_with_tokens(ast)?;
-        let request = protocol::ModuleRequest {
-            generation,
-            syntax,
-            scope: scope.clone(),
-        };
-        let input = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
+        let tokens = syntax::source_tokens(ast);
+        syntax::validate(source, ast)?;
+        let input = encode_request(generation, source, ast, scope)?;
+        self.run_encoded(&input, &tokens, source)
+    }
+
+    pub fn run_encoded(
+        &self,
+        input: &[u8],
+        tokens: &[crate::TokenData],
+        source: &str,
+    ) -> Result<Vec<crate::XenoDiagnostic>, String> {
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| format!("Plugin '{}' is not loaded", self.description.name))?;
         let mut runtime = runtime
             .lock()
             .map_err(|_| "Plugin instance lock is poisoned".to_string())?;
@@ -111,21 +121,30 @@ impl LoadedPlugin {
                 self.description.name
             ));
         }
-        let output = unsafe { (runtime.api().run)(runtime.instance, abi::Bytes::borrowed(&input)) };
+        let output = unsafe { (runtime.api().run)(runtime.instance, abi::Bytes::borrowed(input)) };
         let bytes = runtime.read_output(output);
         let result = bytes.and_then(|bytes| {
-            let diagnostics: Vec<protocol::Diagnostic> = serde_json::from_slice(&bytes)
+            let diagnostics: Vec<protocol::Diagnostic> = abi::codec::decode(&bytes)
                 .map_err(|error| format!("Invalid plugin diagnostics: {error}"))?;
             diagnostics
                 .into_iter()
                 .map(|diagnostic| {
                     let severity = diagnostic.get_as_xeno_severity()?;
-                    let location = tokens
+                    if diagnostic.location.start > diagnostic.location.end
+                        || source
+                            .get(
+                                diagnostic.location.start as usize
+                                    ..diagnostic.location.end as usize,
+                            )
+                            .is_none()
+                    {
+                        return Err("Invalid plugin diagnostic source range".into());
+                    }
+                    let _location = tokens
                         .iter()
                         .find(|token| {
-                            token.l == diagnostic.line
-                                && token.c == diagnostic.column
-                                && token.v == diagnostic.value
+                            token.start <= diagnostic.location.start
+                                && token.end >= diagnostic.location.end
                         })
                         .cloned()
                         .ok_or_else(|| {
@@ -133,7 +152,7 @@ impl LoadedPlugin {
                                 .to_string()
                         })?;
                     Ok(crate::XenoDiagnostic {
-                        location,
+                        location: diagnostic.location,
                         message: diagnostic.message,
                         severity,
                     })
@@ -145,6 +164,35 @@ impl LoadedPlugin {
         }
         result
     }
+}
+
+pub fn encode_request(
+    generation: bool,
+    source: &str,
+    ast: &[crate::parser::Declaration],
+    scope: &crate::semantic::ScopeInfo,
+) -> Result<Vec<u8>, String> {
+    #[derive(serde::Serialize)]
+    struct Syntax<'a> {
+        source: &'a str,
+        tokens: &'a [crate::lexer::Token],
+        declarations: &'a [crate::parser::Declaration],
+    }
+    #[derive(serde::Serialize)]
+    struct Request<'a> {
+        generation: bool,
+        syntax: Syntax<'a>,
+        scope: &'a crate::semantic::ScopeInfo,
+    }
+    abi::codec::encode(&Request {
+        generation,
+        syntax: Syntax {
+            source,
+            tokens: &[],
+            declarations: ast,
+        },
+        scope,
+    })
 }
 
 pub fn load_plugins(config: &Config, mode: PluginMode) -> Result<Vec<LoadedPlugin>, String> {
@@ -159,10 +207,10 @@ pub fn load_plugins(config: &Config, mode: PluginMode) -> Result<Vec<LoadedPlugi
             .map_err(|error| format!("Plugin '{library_name}' ({}): {error}", path.display()))?;
         let capabilities = runtime.api().header.capabilities;
         let output = unsafe { (runtime.api().describe)() };
-        let description: sdk::Description = serde_json::from_slice(&runtime.read_output(output)?)
+        let description: sdk::Description = abi::codec::decode(&runtime.read_output(output)?)
             .map_err(|error| {
-            format!("Plugin '{library_name}' provided invalid metadata: {error}")
-        })?;
+                format!("Plugin '{library_name}' provided invalid metadata: {error}")
+            })?;
         description.metadata.validate().map_err(|error| {
             format!("Plugin '{library_name}' provided invalid metadata: {error}")
         })?;
@@ -178,7 +226,7 @@ pub fn load_plugins(config: &Config, mode: PluginMode) -> Result<Vec<LoadedPlugi
             PluginMode::Schema => 0,
         };
         let runtime = if capabilities & required != 0 {
-            let input = serde_json::to_vec(&protocol::Initialization::new(config))
+            let input = abi::codec::encode(&protocol::Initialization::new(config))
                 .map_err(|error| error.to_string())?;
             let mut instance = std::ptr::null_mut();
             let output =

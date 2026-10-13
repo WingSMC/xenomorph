@@ -145,6 +145,7 @@ xenomorph_common::export_plugin!(PLUGIN);
 // ── Generator listener ──────────────────────────────────────────────
 
 struct JavaGenerator {
+    source: String,
     workdir: PathBuf,
     abs_path: PathBuf,
     module_path: String,
@@ -175,6 +176,7 @@ struct JavaGenerator {
 impl JavaGenerator {
     fn new() -> Self {
         Self {
+            source: String::new(),
             workdir: PathBuf::new(),
             abs_path: PathBuf::new(),
             module_path: String::new(),
@@ -219,6 +221,10 @@ fn create_generator(config: &Config) -> Box<dyn for<'a> AnalyzerListener<'a>> {
 }
 
 impl<'src> AnalyzerListener<'src> for JavaGenerator {
+    fn set_source(&mut self, source: &str) {
+        self.source.clear();
+        self.source.push_str(source);
+    }
     fn on_before_module(&mut self, scope: &ScopeInfo) {
         self.abs_path = scope.abs_path.clone();
         self.module_path = scope.module_path.clone();
@@ -231,8 +237,8 @@ impl<'src> AnalyzerListener<'src> for JavaGenerator {
 
     fn on_before_ast(
         &mut self,
-        ast: &[Declaration<'src>],
-        _errors: &mut Vec<xenomorph_common::XenoDiagnostic<'src>>,
+        ast: &[Declaration],
+        _errors: &mut Vec<xenomorph_common::XenoDiagnostic>,
     ) {
         for decl in ast {
             if let Declaration::Type {
@@ -244,52 +250,50 @@ impl<'src> AnalyzerListener<'src> for JavaGenerator {
             } = decl
             {
                 if let Some((java_type, initializer)) = self.constant_collection(&t.0) {
-                    self.constants
-                        .push((name.v.to_string(), java_type, initializer));
+                    self.constants.push((
+                        name.text(&self.source).to_string(),
+                        java_type,
+                        initializer,
+                    ));
                     continue;
                 }
                 if matches!(&t.0, Type::Tuple(_)) {
                     self.has_tuples = true;
                 }
-                if let Some(content) = self.generate_type_decl(docs, name.v, generics.as_deref(), t)
+                if let Some(content) =
+                    self.generate_type_decl(docs, name.text(&self.source), generics.as_deref(), t)
                 {
-                    self.files.push((name.v.to_string(), content));
+                    self.files
+                        .push((name.text(&self.source).to_string(), content));
                 }
             }
         }
     }
 
-    fn on_before_decl(&mut self, decl: &Declaration<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {
+    fn on_before_decl(&mut self, decl: &Declaration, errors: &mut Vec<XenoDiagnostic>) {
         if let Declaration::Type { name, generics, .. } = decl {
-            report_java_keyword(name, "type", errors);
+            report_java_keyword(name, "type", errors, &self.source);
             for (generic, _) in generics.as_deref().unwrap_or_default() {
-                report_java_keyword(generic, "generic parameter", errors);
+                report_java_keyword(generic, "generic parameter", errors, &self.source);
             }
         }
     }
 
-    fn on_before_struct(
-        &mut self,
-        fields: &[KeyValExpr<'src>],
-        errors: &mut Vec<XenoDiagnostic<'src>>,
-    ) {
-        validate_java_member_names(fields, "field", errors);
+    fn on_before_struct(&mut self, fields: &[KeyValExpr], errors: &mut Vec<XenoDiagnostic>) {
+        validate_java_member_names(fields, "field", errors, &self.source);
     }
 
-    fn on_before_enum(
-        &mut self,
-        variants: &[KeyValExpr<'src>],
-        errors: &mut Vec<XenoDiagnostic<'src>>,
-    ) {
-        validate_java_member_names(variants, "enum variant", errors);
+    fn on_before_enum(&mut self, variants: &[KeyValExpr], errors: &mut Vec<XenoDiagnostic>) {
+        validate_java_member_names(variants, "enum variant", errors, &self.source);
     }
 
-    fn on_simple_type(&mut self, ty: &SimpleType<'src>, errors: &mut Vec<XenoDiagnostic<'src>>) {
+    fn on_simple_type(&mut self, ty: &SimpleType, errors: &mut Vec<XenoDiagnostic>) {
         if self.annotation_depth == 0 {
             if let Some(diagnostic) = unsupported_target_type_diagnostic(
                 "Java",
                 ty,
                 &self.type_hierarchy,
+                &self.source,
                 has_native_java_mapping,
             ) {
                 errors.push(diagnostic);
@@ -310,10 +314,10 @@ impl<'src> AnalyzerListener<'src> for JavaGenerator {
         };
         if unrepresentable {
             errors.push(XenoDiagnostic {
-                location: literal.get_last_token().clone(),
+                location: literal.get_last_token(),
                 message: format!(
                     "Java cannot represent numeric literal '{}' using its requested representation.",
-                    literal.token().v
+                    literal.token().text(&self.source)
                 ),
                 severity: XenoDiagSeverity::Err,
             });
@@ -322,18 +326,18 @@ impl<'src> AnalyzerListener<'src> for JavaGenerator {
 
     fn on_before_annotation(
         &mut self,
-        _name: &TokenData<'src>,
-        _args: &[Expr<'src>],
-        _errors: &mut Vec<XenoDiagnostic<'src>>,
+        _name: &TokenData,
+        _args: &[Expr],
+        _errors: &mut Vec<XenoDiagnostic>,
     ) {
         self.annotation_depth += 1;
     }
 
     fn on_after_annotation(
         &mut self,
-        _name: &TokenData<'src>,
-        _args: &[Expr<'src>],
-        _errors: &mut Vec<XenoDiagnostic<'src>>,
+        _name: &TokenData,
+        _args: &[Expr],
+        _errors: &mut Vec<XenoDiagnostic>,
     ) {
         self.annotation_depth = self.annotation_depth.saturating_sub(1);
     }
@@ -483,18 +487,18 @@ impl JavaGenerator {
 
     fn generate_type_decl(
         &self,
-        docs: &Option<&str>,
+        docs: &Option<String>,
         name: &str,
-        generics: Option<&[(&TokenData, Option<&TokenData>)]>,
+        generics: Option<&[(TokenData, Option<TokenData>)]>,
         t: &XenoType,
     ) -> Option<String> {
-        let lombok_decorators = collect_lombok_decorators(&t.1);
+        let lombok_decorators = collect_lombok_decorators(&t.1, &self.source);
 
         if let Some(fields) = self.evaluated_utility_fields(&t.0) {
             return Some(self.generate_owned_class(
                 docs,
                 name,
-                &format_generic_params(generics),
+                &format_generic_params(generics, &self.source),
                 &fields,
                 &lombok_decorators,
             ));
@@ -504,14 +508,14 @@ impl JavaGenerator {
             Type::Struct(fields) => Some(self.generate_class(
                 docs,
                 name,
-                &format_generic_params(generics),
+                &format_generic_params(generics, &self.source),
                 fields,
                 &lombok_decorators,
             )),
             Type::Tuple(items) => Some(self.generate_tuple_class(
                 docs,
                 name,
-                &format_generic_params(generics),
+                &format_generic_params(generics, &self.source),
                 items,
                 &lombok_decorators,
             )),
@@ -528,12 +532,15 @@ impl JavaGenerator {
         let Type::Simple(SimpleType::Identifier(identifier, Some(arguments))) = ty else {
             return None;
         };
-        if !is_type_utility(identifier.v) {
+        if !is_type_utility(identifier.text(&self.source)) {
             return None;
         }
         let candidate = OwnedType::Named {
-            name: identifier.v.to_string(),
-            arguments: arguments.iter().map(simple_to_owned_type).collect(),
+            name: identifier.text(&self.source).to_string(),
+            arguments: arguments
+                .iter()
+                .map(|ty| simple_to_owned_type(ty, &self.source))
+                .collect(),
         };
         match self.type_hierarchy.evaluate_type(&candidate).ok()? {
             OwnedType::Struct(fields) => Some(fields),
@@ -543,7 +550,7 @@ impl JavaGenerator {
 
     fn generate_owned_class(
         &self,
-        docs: &Option<&str>,
+        docs: &Option<String>,
         name: &str,
         generic_params: &str,
         fields: &[OwnedField],
@@ -594,7 +601,7 @@ impl JavaGenerator {
     #[allow(clippy::too_many_arguments)]
     fn render_class(
         &self,
-        docs: &Option<&str>,
+        docs: &Option<String>,
         name: &str,
         generic_params: &str,
         mut imports: BTreeSet<String>,
@@ -635,7 +642,7 @@ impl JavaGenerator {
 
     fn generate_class(
         &self,
-        docs: &Option<&str>,
+        docs: &Option<String>,
         name: &str,
         generic_params: &str,
         fields: &[KeyValExpr],
@@ -648,14 +655,23 @@ impl JavaGenerator {
         let mut field_block = String::new();
         for (key, value, docs) in fields {
             let java_type = self.type_to_java(value, &mut imports);
-            let java_name = java_member_name(key.v);
+            let java_name = java_member_name(key.text(&self.source));
             let nullable = self.is_nullable(value);
             let literal = required_literal(value);
 
             if let Some(docs) = docs {
-                push_indented_javadoc(&mut field_block, extract_documentation(docs), "    ");
+                push_indented_javadoc(
+                    &mut field_block,
+                    extract_documentation(docs, &self.source),
+                    "    ",
+                );
             }
-            push_serialized_name(&mut field_block, &mut imports, key.v, &java_name);
+            push_serialized_name(
+                &mut field_block,
+                &mut imports,
+                key.text(&self.source),
+                &java_name,
+            );
             if !nullable && literal.is_none() {
                 field_block.push_str("    @NonNull\n");
                 register_lombok_import(&mut imports, "NonNull");
@@ -684,7 +700,7 @@ impl JavaGenerator {
 
     fn generate_tuple_class(
         &self,
-        docs: &Option<&str>,
+        docs: &Option<String>,
         name: &str,
         generic_params: &str,
         items: &[SimpleType],
@@ -758,7 +774,7 @@ impl JavaGenerator {
 
     // ── Enum generation ─────────────────────────────────────────────
 
-    fn generate_enum(&self, docs: &Option<&str>, name: &str, variants: &[KeyValExpr]) -> String {
+    fn generate_enum(&self, docs: &Option<String>, name: &str, variants: &[KeyValExpr]) -> String {
         let all_int = !variants.is_empty()
             && variants
                 .iter()
@@ -767,7 +783,7 @@ impl JavaGenerator {
         let mut imports = BTreeSet::new();
         if variants
             .iter()
-            .any(|(key, _, _)| java_member_name(key.v) != key.v)
+            .any(|(key, _, _)| java_member_name(key.text(&self.source)) != key.text(&self.source))
         {
             imports.insert("com.google.gson.annotations.SerializedName".to_string());
         }
@@ -808,10 +824,14 @@ impl JavaGenerator {
                     _ => "0".to_string(),
                 };
                 if let Some(docs) = docs {
-                    push_indented_javadoc(&mut out, extract_documentation(docs), "    ");
+                    push_indented_javadoc(
+                        &mut out,
+                        extract_documentation(docs, &self.source),
+                        "    ",
+                    );
                 }
-                let java_name = java_member_name(key.v);
-                push_serialized_name_line(&mut out, key.v, &java_name, "    ");
+                let java_name = java_member_name(key.text(&self.source));
+                push_serialized_name_line(&mut out, key.text(&self.source), &java_name, "    ");
                 out.push_str(&format!("    {java_name}({value}){sep}\n"));
             }
             out.push('\n');
@@ -826,10 +846,14 @@ impl JavaGenerator {
             for (i, (key, _, docs)) in variants.iter().enumerate() {
                 let sep = if i + 1 == variants.len() { "" } else { "," };
                 if let Some(docs) = docs {
-                    push_indented_javadoc(&mut out, extract_documentation(docs), "    ");
+                    push_indented_javadoc(
+                        &mut out,
+                        extract_documentation(docs, &self.source),
+                        "    ",
+                    );
                 }
-                let java_name = java_member_name(key.v);
-                push_serialized_name_line(&mut out, key.v, &java_name, "    ");
+                let java_name = java_member_name(key.text(&self.source));
+                push_serialized_name_line(&mut out, key.text(&self.source), &java_name, "    ");
                 out.push_str(&format!("    {java_name}{sep}\n"));
             }
         }
@@ -848,7 +872,7 @@ impl JavaGenerator {
     /// resolved, e.g. `Required<D>` becomes `D` without its optionality.
     fn resolved_type(&self, ty: &SimpleType) -> OwnedType {
         self.type_hierarchy
-            .resolve_for_target(&simple_to_owned_type(ty))
+            .resolve_for_target(&simple_to_owned_type(ty, &self.source))
     }
 
     /// Optionality can come from the `?` prefix or from a resolved alias or
@@ -1024,14 +1048,14 @@ fn has_native_java_mapping(name: &str) -> bool {
 /// Collects the decorator names from all `@Lombok(...)` annotations attached to
 /// a type or field, e.g. `@Lombok(ToString, EqualsAndHashCode)` → `["ToString",
 /// "EqualsAndHashCode"]`.
-fn collect_lombok_decorators(annotations: &[Annotation]) -> Vec<String> {
+fn collect_lombok_decorators(annotations: &[Annotation], source: &str) -> Vec<String> {
     let mut decorators = Vec::new();
     for annotation in annotations {
-        if annotation.ident.v != "Lombok" {
+        if annotation.ident.text(source) != "Lombok" {
             continue;
         }
         for arg in &annotation.params {
-            if let Some(decorator) = decorator_name(arg) {
+            if let Some(decorator) = decorator_name(arg, source) {
                 push_unique(&mut decorators, &decorator);
             }
         }
@@ -1040,10 +1064,10 @@ fn collect_lombok_decorators(annotations: &[Annotation]) -> Vec<String> {
 }
 
 /// Renders a single `@Lombok(...)` argument as a Java decorator name.
-fn decorator_name(arg: &Expr) -> Option<String> {
+fn decorator_name(arg: &Expr, source: &str) -> Option<String> {
     match arg {
         Expr::Type(Type::Simple(SimpleType::Identifier(identifier, _))) => {
-            Some(identifier.v.to_string())
+            Some(identifier.text(source).to_string())
         }
         _ => None,
     }
@@ -1058,7 +1082,7 @@ fn register_lombok_import(imports: &mut BTreeSet<String>, decorator: &str) {
     }
 }
 
-fn required_literal<'src>(ty: &'src SimpleType<'src>) -> Option<&'src Literal<'src>> {
+fn required_literal(ty: &SimpleType) -> Option<&Literal> {
     match ty {
         SimpleType::Literal(literal) => Some(literal),
         _ => None,
@@ -1200,7 +1224,7 @@ fn widen_java_type(left: &str, right: &str) -> Option<String> {
 }
 
 fn common_java_integer_type<'a>(
-    literals: impl Iterator<Item = &'a IntLiteral<'a>>,
+    literals: impl Iterator<Item = &'a IntLiteral>,
     imports: &mut BTreeSet<String>,
 ) -> &'static str {
     let widest = literals
@@ -1337,17 +1361,18 @@ fn is_java_keyword(candidate: &str) -> bool {
     )
 }
 
-fn report_java_keyword<'src>(
-    identifier: &TokenData<'src>,
+fn report_java_keyword(
+    identifier: &TokenData,
     kind: &str,
-    errors: &mut Vec<XenoDiagnostic<'src>>,
+    errors: &mut Vec<XenoDiagnostic>,
+    source: &str,
 ) {
-    if is_java_keyword(identifier.v) {
+    if is_java_keyword(identifier.text(source)) {
         errors.push(XenoDiagnostic {
-            location: identifier.clone(),
+            location: *identifier,
             message: format!(
                 "Java {kind} identifier '{}' conflicts with a reserved keyword.",
-                identifier.v
+                identifier.text(source)
             ),
             severity: XenoDiagSeverity::Err,
         });
@@ -1375,31 +1400,33 @@ fn push_serialized_name_line(output: &mut String, wire_name: &str, java_name: &s
     }
 }
 
-fn validate_java_member_names<'src>(
-    members: &[KeyValExpr<'src>],
+fn validate_java_member_names(
+    members: &[KeyValExpr],
     member_kind: &str,
-    errors: &mut Vec<XenoDiagnostic<'src>>,
+    errors: &mut Vec<XenoDiagnostic>,
+    source: &str,
 ) {
     let mut seen = std::collections::BTreeMap::<String, &str>::new();
     for (key, _, _) in members {
-        if is_java_keyword(key.v) {
+        if is_java_keyword(key.text(source)) {
             errors.push(XenoDiagnostic {
-                location: key.clone(),
+                location: *key,
                 message: format!(
                     "Java {member_kind} identifier '{}' conflicts with a reserved keyword.",
-                    key.v
+                    key.text(source)
                 ),
                 severity: XenoDiagSeverity::Err,
             });
         }
-        let java_name = java_member_name(key.v);
-        if let Some(previous) = seen.insert(java_name.clone(), key.v) {
-            if previous != key.v {
+        let java_name = java_member_name(key.text(source));
+        if let Some(previous) = seen.insert(java_name.clone(), key.text(source)) {
+            if previous != key.text(source) {
                 errors.push(XenoDiagnostic {
-                    location: key.clone(),
+                    location: *key,
                     message: format!(
                         "Java {member_kind} names '{}' and '{}' both normalize to '{java_name}'.",
-                        previous, key.v
+                        previous,
+                        key.text(source)
                     ),
                     severity: XenoDiagSeverity::Err,
                 });
@@ -1408,7 +1435,10 @@ fn validate_java_member_names<'src>(
     }
 }
 
-fn format_generic_params(generics: Option<&[(&TokenData, Option<&TokenData>)]>) -> String {
+fn format_generic_params(
+    generics: Option<&[(TokenData, Option<TokenData>)]>,
+    source: &str,
+) -> String {
     let Some(generics) = generics.filter(|generics| !generics.is_empty()) else {
         return String::new();
     };
@@ -1417,13 +1447,13 @@ fn format_generic_params(generics: Option<&[(&TokenData, Option<&TokenData>)]>) 
         "<{}>",
         generics
             .iter()
-            .map(|(name, _constraint)| name.v)
+            .map(|(name, _constraint)| name.text(source))
             .collect::<Vec<_>>()
             .join(", ")
     )
 }
 
-fn push_javadoc(out: &mut String, docs: &Option<&str>) {
+fn push_javadoc(out: &mut String, docs: &Option<String>) {
     if let Some(doc) = docs {
         out.push_str("/**\n");
         for line in doc.lines() {
@@ -1727,22 +1757,28 @@ public final class TupleTypeAdapterFactory implements TypeAdapterFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const FIXTURE_SOURCE: &str = "displayName string /** Name shown to users. */ 256 T HasLength name UserName values NonEmpty u8 box Box UserAge email bool Ty \"#nv\\\"Store\" symbol Alias";
     use xenomorph_common::semantic::{GenericParameterInfo, TypeDeclarationInfo, BUILTIN_TYPES};
     use xenomorph_common::{
         lexer::Lexer,
         parser::{IntegerRepresentation, IntegerSize, Parser},
     };
 
+    fn fixture_generator() -> JavaGenerator {
+        let mut g = JavaGenerator::new();
+        g.set_source(FIXTURE_SOURCE);
+        g
+    }
     fn imports() -> BTreeSet<String> {
         BTreeSet::new()
     }
 
-    fn parse(source: &str) -> Vec<Declaration<'_>> {
+    fn parse(source: &str) -> Vec<Declaration> {
         let tokens = Box::leak(Box::new(
             Lexer::tokenize(Box::leak(source.to_string().into_boxed_str()))
                 .expect("Java generator fixture should lex"),
         ));
-        let (ast, diagnostics) = Parser::parse(tokens);
+        let (ast, diagnostics) = Parser::parse(tokens, source);
         assert!(
             diagnostics.is_empty(),
             "unexpected diagnostics: {diagnostics:#?}"
@@ -1752,10 +1788,9 @@ mod tests {
 
     #[test]
     fn struct_utilities_generate_a_resolved_class() {
-        let ast = parse(
-            "type A = { field1: string, field2: i32, field3: ?bool }; type Keys = |\"field1\"|\"field3\"; type B = Pick<A, Keys>;",
-        );
-        let mut generator = generator_with_declarations(&ast);
+        let source = "type A = { field1: string, field2: i32, field3: ?bool }; type Keys = |\"field1\"|\"field3\"; type B = Pick<A, Keys>;";
+        let ast = parse(source);
+        let mut generator = generator_with_declarations(&ast, source);
 
         generator.on_before_ast(&ast, &mut Vec::new());
 
@@ -1773,10 +1808,9 @@ mod tests {
 
     #[test]
     fn homogeneous_literal_collections_become_xenomorph_array_constants() {
-        let ast = parse(
-            "type Colors = set [\"red\", \"green\"]; type Sizes = [1, 300]; type Holder = { colors: Colors };",
-        );
-        let mut generator = generator_with_declarations(&ast);
+        let source = "type Colors = set [\"red\", \"green\"]; type Sizes = [1, 300]; type Holder = { colors: Colors };";
+        let ast = parse(source);
+        let mut generator = generator_with_declarations(&ast, source);
 
         generator.on_before_ast(&ast, &mut Vec::new());
 
@@ -1799,8 +1833,10 @@ mod tests {
 
     #[test]
     fn heterogeneous_literal_tuples_keep_their_tuple_class() {
-        let ast = parse("type Mixed = [\"a\", 1];");
+        let source = "type Mixed = [\"a\", 1];";
+        let ast = parse(source);
         let mut generator = generator_with_builtins();
+        generator.set_source(source);
 
         generator.on_before_ast(&ast, &mut Vec::new());
 
@@ -1814,8 +1850,9 @@ mod tests {
 
     #[test]
     fn sets_without_a_prefill_map_to_java_sets() {
-        let ast = parse("type Tags = set<string>; type Holder = { tags: Tags };");
-        let mut generator = generator_with_declarations(&ast);
+        let source = "type Tags = set<string>; type Holder = { tags: Tags };";
+        let ast = parse(source);
+        let mut generator = generator_with_declarations(&ast, source);
 
         generator.on_before_ast(&ast, &mut Vec::new());
 
@@ -1829,32 +1866,25 @@ mod tests {
 
     #[test]
     fn test_type_and_field_docs_are_preserved() {
-        let key = xenomorph_common::TokenData {
-            v: "displayName",
-            l: 0,
-            c: 0,
-        };
-        let field_type = xenomorph_common::TokenData {
-            v: "string",
-            l: 0,
-            c: 0,
-        };
-        let field_docs = xenomorph_common::TokenData {
-            v: "/** Name shown to users. */",
-            l: 0,
-            c: 0,
-        };
+        let key = xenomorph_common::TokenData::new(0, 11);
+        let field_type = xenomorph_common::TokenData::new(12, 18);
+        let field_docs = xenomorph_common::TokenData::new(19, 46);
         let ty = (
             Type::Struct(vec![(
                 key,
-                SimpleType::Identifier(&field_type, None),
-                Some(&field_docs),
+                SimpleType::Identifier(field_type, None),
+                Some(field_docs),
             )]),
             vec![],
         );
 
-        let output = JavaGenerator::new()
-            .generate_type_decl(&Some("A user-facing profile."), "Profile", None, &ty)
+        let output = fixture_generator()
+            .generate_type_decl(
+                &Some("A user-facing profile.".to_string()),
+                "Profile",
+                None,
+                &ty,
+            )
             .expect("structs generate Java classes");
 
         assert!(output.contains(" * A user-facing profile."));
@@ -1864,8 +1894,9 @@ mod tests {
 
     #[test]
     fn quoted_wire_names_use_safe_java_fields_and_gson_names() {
-        let ast = parse(r#"type Payload = { "ecu.test": string };"#);
-        let mut generator = generator_with_declarations(&ast);
+        let source = r#"type Payload = { "ecu.test": string };"#;
+        let ast = parse(source);
+        let mut generator = generator_with_declarations(&ast, source);
 
         generator.on_before_ast(&ast, &mut Vec::new());
 
@@ -1881,8 +1912,9 @@ mod tests {
 
     #[test]
     fn quoted_enum_names_use_safe_java_constants_and_gson_names() {
-        let ast = parse(r#"type Mode = enum { "ecu.test": 1, normal: 2 };"#);
-        let mut generator = generator_with_declarations(&ast);
+        let source = r#"type Mode = enum { "ecu.test": 1, normal: 2 };"#;
+        let ast = parse(source);
+        let mut generator = generator_with_declarations(&ast, source);
 
         generator.on_before_ast(&ast, &mut Vec::new());
 
@@ -1897,7 +1929,8 @@ mod tests {
 
     #[test]
     fn java_name_normalization_collisions_are_rejected() {
-        let ast = parse(r#"type Payload = { "ecu.test": string, ecu_test: string };"#);
+        let source = r#"type Payload = { "ecu.test": string, ecu_test: string };"#;
+        let ast = parse(source);
         let Declaration::Type {
             ty: (Type::Struct(fields), _),
             ..
@@ -1907,7 +1940,11 @@ mod tests {
         };
         let mut errors = Vec::new();
 
-        JavaGenerator::new().on_before_struct(fields, &mut errors);
+        {
+            let mut generator = fixture_generator();
+            generator.set_source(source);
+            generator.on_before_struct(fields, &mut errors);
+        }
 
         assert_eq!(errors.len(), 1);
         assert!(errors[0].message.contains("both normalize to 'ecu_test'"));
@@ -1915,7 +1952,8 @@ mod tests {
 
     #[test]
     fn java_keywords_are_rejected_for_field_identifiers() {
-        let ast = parse(r#"type Payload = { "class": string };"#);
+        let source = r#"type Payload = { "class": string };"#;
+        let ast = parse(source);
         let Declaration::Type {
             ty: (Type::Struct(fields), _),
             ..
@@ -1925,7 +1963,11 @@ mod tests {
         };
         let mut errors = Vec::new();
 
-        JavaGenerator::new().on_before_struct(fields, &mut errors);
+        {
+            let mut generator = fixture_generator();
+            generator.set_source(source);
+            generator.on_before_struct(fields, &mut errors);
+        }
 
         assert_eq!(errors.len(), 1);
         assert_eq!(
@@ -1936,10 +1978,15 @@ mod tests {
 
     #[test]
     fn java_keywords_are_rejected_for_native_declaration_names() {
-        let ast = parse("type class = string;");
+        let source = "type class = string;";
+        let ast = parse(source);
         let mut errors = Vec::new();
 
-        JavaGenerator::new().on_before_decl(&ast[0], &mut errors);
+        {
+            let mut generator = fixture_generator();
+            generator.set_source(source);
+            generator.on_before_decl(&ast[0], &mut errors);
+        }
 
         assert_eq!(errors.len(), 1);
         assert_eq!(
@@ -2046,10 +2093,11 @@ mod tests {
                 signed: false,
                 size: IntegerSize::Bits(8),
             },
-            token: &token,
+            token,
             cast: None,
         }));
         let mut generator = JavaGenerator::new();
+        generator.set_source(FIXTURE_SOURCE);
         let mut errors = Vec::new();
 
         generator.on_simple_type(&ty, &mut errors);
@@ -2077,13 +2125,13 @@ mod tests {
         let field_name = token("name");
         let alias_name = token("UserName");
         let argument = token("T");
-        let generics = [(&type_parameter, Some(&constraint))];
+        let generics = [(type_parameter, Some(constraint))];
         let ty = (
             Type::Struct(vec![(
                 field_name,
                 SimpleType::Identifier(
-                    &alias_name,
-                    Some(vec![SimpleType::Identifier(&argument, None)]),
+                    alias_name,
+                    Some(vec![SimpleType::Identifier(argument, None)]),
                 ),
                 None,
             )]),
@@ -2136,8 +2184,8 @@ mod tests {
             Type::Struct(vec![(
                 field_name,
                 SimpleType::Identifier(
-                    &alias_name,
-                    Some(vec![SimpleType::Identifier(&argument, None)]),
+                    alias_name,
+                    Some(vec![SimpleType::Identifier(argument, None)]),
                 ),
                 None,
             )]),
@@ -2173,8 +2221,8 @@ mod tests {
             Type::Struct(vec![(
                 field_name,
                 SimpleType::Identifier(
-                    &box_name,
-                    Some(vec![SimpleType::Identifier(&argument, None)]),
+                    box_name,
+                    Some(vec![SimpleType::Identifier(argument, None)]),
                 ),
                 None,
             )]),
@@ -2219,13 +2267,10 @@ mod tests {
         let bool_type = token("bool");
         let ty = (
             Type::Tuple(vec![
-                SimpleType::Identifier(
-                    &user_name,
-                    Some(vec![SimpleType::Identifier(&string, None)]),
-                ),
-                SimpleType::Identifier(&user_age, None),
-                SimpleType::Identifier(&email, None),
-                SimpleType::Identifier(&bool_type, None),
+                SimpleType::Identifier(user_name, Some(vec![SimpleType::Identifier(string, None)])),
+                SimpleType::Identifier(user_age, None),
+                SimpleType::Identifier(email, None),
+                SimpleType::Identifier(bool_type, None),
             ]),
             vec![],
         );
@@ -2246,10 +2291,11 @@ mod tests {
 
     #[test]
     fn tuple_references_have_a_generated_java_file() {
-        let ast = parse(
-            "type TestTuple = [string, u8, email, bool]; type UserType = { meta: TestTuple };",
-        );
+        let source =
+            "type TestTuple = [string, u8, email, bool]; type UserType = { meta: TestTuple };";
+        let ast = parse(source);
         let mut generator = generator_with_builtins();
+        generator.set_source(source);
 
         generator.on_before_ast(&ast, &mut Vec::new());
 
@@ -2271,8 +2317,10 @@ mod tests {
 
     #[test]
     fn tuple_support_is_not_emitted_for_tuple_free_modules() {
-        let ast = parse("type UserType = { name: string };");
+        let source = "type UserType = { name: string };";
+        let ast = parse(source);
         let mut generator = generator_with_builtins();
+        generator.set_source(source);
 
         generator.on_before_ast(&ast, &mut Vec::new());
 
@@ -2301,13 +2349,13 @@ mod tests {
         let ty = (
             Type::Struct(vec![(
                 field_name,
-                SimpleType::Literal(Literal::String("#nv\"Store".to_string(), &literal_token)),
+                SimpleType::Literal(Literal::String("#nv\"Store".to_string(), literal_token)),
                 None,
             )]),
             vec![],
         );
 
-        let output = JavaGenerator::new()
+        let output = fixture_generator()
             .generate_type_decl(&None, "Store", None, &ty)
             .expect("structs generate Java classes");
 
@@ -2340,8 +2388,9 @@ mod tests {
             parents: None,
         };
         let symbol = token("symbol");
-        let ty = SimpleType::Identifier(&symbol, None);
+        let ty = SimpleType::Identifier(symbol, None);
         let mut generator = JavaGenerator::new();
+        generator.set_source(FIXTURE_SOURCE);
         generator.type_hierarchy.insert_semantic_type(&SYMBOL);
         let mut errors = Vec::new();
 
@@ -2364,7 +2413,7 @@ mod tests {
             parents: None,
         };
         let alias = token("Alias");
-        let ty = SimpleType::Identifier(&alias, None);
+        let ty = SimpleType::Identifier(alias, None);
         let mut generator = generator_with_builtins();
         generator.type_hierarchy.insert_semantic_type(&SYMBOL);
         generator.type_hierarchy.insert_declaration(
@@ -2409,6 +2458,7 @@ mod tests {
     #[test]
     fn test_blanket_data_skips_explicit_accessors() {
         let mut generator = JavaGenerator::new();
+        generator.set_source(FIXTURE_SOURCE);
         generator.blanket_data = true;
         generator.blanket_builder = true;
         assert_eq!(
@@ -2448,12 +2498,9 @@ mod tests {
         assert!(xenomorph_common::semantic::NEVER.implements(&LOMBOK_TRAIT));
     }
 
-    fn token(value: &'static str) -> TokenData<'static> {
-        TokenData {
-            v: value,
-            l: 0,
-            c: 0,
-        }
+    fn token(value: &str) -> TokenData {
+        let start = FIXTURE_SOURCE.find(value).unwrap();
+        TokenData::new(start, start + value.len())
     }
 
     fn generic(name: &str) -> GenericParameterInfo {
@@ -2466,6 +2513,7 @@ mod tests {
 
     fn generator_with_builtins() -> JavaGenerator {
         let mut generator = JavaGenerator::new();
+        generator.set_source(FIXTURE_SOURCE);
         generator.type_hierarchy.set_current_module("test");
         generator.type_hierarchy.register_module("test", Vec::new());
         for semantic_type in BUILTIN_TYPES {
@@ -2474,8 +2522,9 @@ mod tests {
         generator
     }
 
-    fn generator_with_declarations(ast: &[Declaration<'_>]) -> JavaGenerator {
+    fn generator_with_declarations(ast: &[Declaration], source: &str) -> JavaGenerator {
         let mut generator = generator_with_builtins();
+        generator.set_source(source);
         for declaration in ast {
             if let Declaration::Type {
                 name, generics, ty, ..
@@ -2483,8 +2532,8 @@ mod tests {
             {
                 generator.type_hierarchy.insert_declaration(
                     "test",
-                    name.v,
-                    TypeDeclarationInfo::from_ast(generics.as_deref(), &ty.0),
+                    name.text(source),
+                    TypeDeclarationInfo::from_ast(generics.as_deref(), &ty.0, source),
                 );
             }
         }

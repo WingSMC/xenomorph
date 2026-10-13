@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::sync::Arc;
 
 use bigdecimal::BigDecimal;
 use num_bigint::BigInt;
@@ -36,21 +37,22 @@ pub struct TypeDeclarationInfo {
 
 impl TypeDeclarationInfo {
     pub fn from_ast(
-        generics: Option<&[(&crate::TokenData<'_>, Option<&crate::TokenData<'_>>)]>,
-        ty: &Type<'_>,
+        generics: Option<&[(crate::TokenData, Option<crate::TokenData>)]>,
+        ty: &Type,
+        source: &str,
     ) -> Self {
         Self {
             generic_params: generics
                 .unwrap_or(&[])
                 .iter()
                 .map(|(name, constraint)| GenericParameterInfo {
-                    name: name.v.to_string(),
-                    constraint: constraint.map(|constraint| constraint.v.to_string()),
+                    name: name.text(source).to_string(),
+                    constraint: constraint.map(|constraint| constraint.text(source).to_string()),
                     constraint_scope: None,
                 })
                 .collect(),
-            parents: type_parents(ty),
-            body: type_to_owned_type(ty),
+            parents: type_parents(ty, source),
+            body: type_to_owned_type(ty, source),
             transparent_alias: matches!(ty, Type::Simple(_)),
         }
     }
@@ -66,14 +68,14 @@ pub struct OwnedField {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OwnedLiteral {
     Integer {
-        #[serde(with = "super::metadata::string_number")]
+        #[serde(with = "xenomorph_plugin_api::numbers::integer")]
         value: BigInt,
         #[serde(with = "super::metadata::IntegerRepresentationDef")]
         representation: IntegerRepresentation,
         cast: Option<String>,
     },
     Float {
-        #[serde(with = "super::metadata::string_number")]
+        #[serde(with = "xenomorph_plugin_api::numbers::decimal")]
         value: BigDecimal,
         #[serde(with = "super::metadata::FloatRepresentationDef")]
         representation: FloatRepresentation,
@@ -388,18 +390,32 @@ impl SemanticDomain {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TypeHierarchy {
     #[serde(with = "type_definition_map")]
-    types: HashMap<TypeKey, TypeDefinition>,
-    #[serde(with = "super::metadata::unique_named_map")]
-    traits: HashMap<String, OwnedTrait>,
-    module_imports: HashMap<String, Vec<String>>,
+    types: Arc<HashMap<TypeKey, Arc<TypeDefinition>>>,
+    #[serde(with = "arc_named_map")]
+    traits: Arc<HashMap<String, OwnedTrait>>,
+    module_imports: Arc<HashMap<String, Vec<String>>>,
     current_module: Option<String>,
 }
 
+mod arc_named_map {
+    use super::*;
+    pub fn serialize<S: serde::Serializer>(
+        map: &Arc<HashMap<String, OwnedTrait>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        super::super::metadata::unique_named_map::serialize(map, serializer)
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Arc<HashMap<String, OwnedTrait>>, D::Error> {
+        super::super::metadata::unique_named_map::deserialize(deserializer).map(Arc::new)
+    }
+}
 mod type_definition_map {
     use super::*;
 
     pub fn serialize<S: serde::Serializer>(
-        types: &HashMap<TypeKey, TypeDefinition>,
+        types: &Arc<HashMap<TypeKey, Arc<TypeDefinition>>>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         types.values().collect::<Vec<_>>().serialize(serializer)
@@ -407,7 +423,7 @@ mod type_definition_map {
 
     pub fn deserialize<'de, D: serde::Deserializer<'de>>(
         deserializer: D,
-    ) -> Result<HashMap<TypeKey, TypeDefinition>, D::Error> {
+    ) -> Result<Arc<HashMap<TypeKey, Arc<TypeDefinition>>>, D::Error> {
         let definitions = Vec::<TypeDefinition>::deserialize(deserializer)?;
         let mut types = HashMap::new();
         for definition in definitions {
@@ -415,13 +431,13 @@ mod type_definition_map {
                 module_path: definition.module_path.clone(),
                 name: definition.name.clone(),
             };
-            if types.insert(key, definition).is_some() {
+            if types.insert(key, Arc::new(definition)).is_some() {
                 return Err(serde::de::Error::custom(
                     "Duplicate type identity in hierarchy",
                 ));
             }
         }
-        Ok(types)
+        Ok(Arc::new(types))
     }
 }
 
@@ -432,11 +448,11 @@ impl TypeHierarchy {
 
     pub fn validate_metadata(&self) -> Result<(), String> {
         MetadataGraph {
-            traits: self.traits.clone(),
+            traits: (*self.traits).clone(),
             ..MetadataGraph::default()
         }
         .validate()?;
-        for (key, definition) in &self.types {
+        for (key, definition) in self.types.iter() {
             super::metadata::validate_identity(&key.name, &definition.name)?;
             if key.module_path != definition.module_path {
                 return Err(format!(
@@ -514,7 +530,7 @@ impl TypeHierarchy {
     }
 
     pub fn register_module(&mut self, module_path: impl Into<String>, imports: Vec<String>) {
-        self.module_imports.insert(module_path.into(), imports);
+        Arc::make_mut(&mut self.module_imports).insert(module_path.into(), imports);
     }
 
     pub fn insert_trait(&mut self, xeno_trait: &XenoTrait) {
@@ -531,7 +547,7 @@ impl TypeHierarchy {
 
     /// Copies a complete, name-linked graph. No descriptor or DLL memory is retained.
     pub fn insert_metadata(&mut self, metadata: &MetadataGraph) {
-        self.traits.extend(metadata.traits.clone());
+        Arc::make_mut(&mut self.traits).extend(metadata.traits.clone());
         for semantic_type in metadata.types.values() {
             let parents = semantic_type
                 .parents
@@ -561,12 +577,12 @@ impl TypeHierarchy {
                     constraint_scope: None,
                 })
                 .collect();
-            self.types.insert(
+            Arc::make_mut(&mut self.types).insert(
                 TypeKey {
                     module_path: None,
                     name: semantic_type.name.to_string(),
                 },
-                TypeDefinition {
+                Arc::new(TypeDefinition {
                     name: semantic_type.name.to_string(),
                     module_path: None,
                     generic_params,
@@ -575,7 +591,7 @@ impl TypeHierarchy {
                     traits,
                     documentation: semantic_type.documentation.clone(),
                     transparent_alias: false,
-                },
+                }),
             );
         }
     }
@@ -597,12 +613,12 @@ impl TypeHierarchy {
                 parameter
             })
             .collect();
-        self.types.insert(
+        Arc::make_mut(&mut self.types).insert(
             TypeKey {
                 module_path: Some(module_path.clone()),
                 name: name.clone(),
             },
-            TypeDefinition {
+            Arc::new(TypeDefinition {
                 name,
                 module_path: Some(module_path),
                 generic_params,
@@ -611,8 +627,20 @@ impl TypeHierarchy {
                 traits: Vec::new(),
                 documentation: None,
                 transparent_alias: declaration.transparent_alias,
-            },
+            }),
         );
+    }
+
+    pub fn remove_module(&mut self, module: &str) {
+        Arc::make_mut(&mut self.types).retain(|key, _| key.module_path.as_deref() != Some(module));
+        Arc::make_mut(&mut self.module_imports).remove(module);
+    }
+
+    /// Retains canonical definitions for declarations that survived an edit.
+    pub fn retain_module_declarations(&mut self, module: &str, names: &HashSet<String>) {
+        Arc::make_mut(&mut self.types).retain(|key, _| {
+            key.module_path.as_deref() != Some(module) || names.contains(&key.name)
+        });
     }
 
     pub fn get_type(&self, name: &str) -> Option<&TypeDefinition> {
@@ -620,10 +648,12 @@ impl TypeHierarchy {
     }
 
     pub fn get_type_in(&self, module_path: Option<&str>, name: &str) -> Option<&TypeDefinition> {
-        self.types.get(&TypeKey {
-            module_path: module_path.map(str::to_string),
-            name: name.to_string(),
-        })
+        self.types
+            .get(&TypeKey {
+                module_path: module_path.map(str::to_string),
+                name: name.to_string(),
+            })
+            .map(Arc::as_ref)
     }
 
     pub fn get_trait(&self, name: &str) -> Option<&OwnedTrait> {
@@ -2013,7 +2043,7 @@ impl TypeHierarchy {
 
     fn resolve_type(&self, name: &str, context: Option<&str>) -> Option<&TypeDefinition> {
         let key = self.resolve_key(name, context)?;
-        self.types.get(&key)
+        self.types.get(&key).map(Arc::as_ref)
     }
 
     fn resolve_key(&self, name: &str, context: Option<&str>) -> Option<TypeKey> {
@@ -2125,10 +2155,13 @@ impl TypeHierarchy {
     }
 }
 
-pub fn type_parents(ty: &Type<'_>) -> Vec<OwnedType> {
+pub fn type_parents(ty: &Type, source: &str) -> Vec<OwnedType> {
     match ty {
-        Type::Simple(simple) => vec![simple_to_owned_type(simple)],
-        Type::Intersection(types) => types.iter().map(simple_to_owned_type).collect(),
+        Type::Simple(simple) => vec![simple_to_owned_type(simple, source)],
+        Type::Intersection(types) => types
+            .iter()
+            .map(|item| simple_to_owned_type(item, source))
+            .collect(),
         Type::Sum(_) => vec![OwnedType::named("any")],
         Type::Tuple(_) | Type::Set(_) => vec![OwnedType::named("array")],
         Type::Struct(_) => vec![OwnedType::named("Dict")],
@@ -2136,78 +2169,93 @@ pub fn type_parents(ty: &Type<'_>) -> Vec<OwnedType> {
     }
 }
 
-pub fn type_to_owned_type(ty: &Type<'_>) -> OwnedType {
+pub fn type_to_owned_type(ty: &Type, source: &str) -> OwnedType {
     match ty {
-        Type::Simple(simple) => simple_to_owned_type(simple),
-        Type::Tuple(items) => OwnedType::Tuple(items.iter().map(simple_to_owned_type).collect()),
+        Type::Simple(simple) => simple_to_owned_type(simple, source),
+        Type::Tuple(items) => OwnedType::Tuple(
+            items
+                .iter()
+                .map(|item| simple_to_owned_type(item, source))
+                .collect(),
+        ),
         Type::Set(set) => OwnedType::Set(OwnedSet {
             element_type: set
                 .element_type
                 .as_ref()
-                .map(simple_to_owned_type)
+                .map(|item| simple_to_owned_type(item, source))
                 .map(Box::new),
-            values: set
-                .values
-                .as_ref()
-                .map(|values| values.iter().map(literal_to_owned).collect()),
+            values: set.values.as_ref().map(|values| {
+                values
+                    .iter()
+                    .map(|item| literal_to_owned(item, source))
+                    .collect()
+            }),
         }),
-        Type::Struct(fields) => OwnedType::Struct(fields_to_owned(fields)),
-        Type::Enum(variants) => OwnedType::Enum(fields_to_owned(variants)),
-        Type::Sum(items) => OwnedType::Sum(items.iter().map(simple_to_owned_type).collect()),
-        Type::Intersection(items) => {
-            OwnedType::Intersection(items.iter().map(simple_to_owned_type).collect())
-        }
+        Type::Struct(fields) => OwnedType::Struct(fields_to_owned(fields, source)),
+        Type::Enum(variants) => OwnedType::Enum(fields_to_owned(variants, source)),
+        Type::Sum(items) => OwnedType::Sum(
+            items
+                .iter()
+                .map(|item| simple_to_owned_type(item, source))
+                .collect(),
+        ),
+        Type::Intersection(items) => OwnedType::Intersection(
+            items
+                .iter()
+                .map(|item| simple_to_owned_type(item, source))
+                .collect(),
+        ),
     }
 }
 
-fn fields_to_owned(fields: &[crate::parser::KeyValExpr<'_>]) -> Vec<OwnedField> {
+fn fields_to_owned(fields: &[crate::parser::KeyValExpr], source: &str) -> Vec<OwnedField> {
     fields
         .iter()
         .map(|(name, ty, documentation)| OwnedField {
-            name: name.v.to_string(),
-            ty: simple_to_owned_type(ty),
+            name: name.text(source).to_string(),
+            ty: simple_to_owned_type(ty, source),
             documentation: documentation
-                .map(|documentation| extract_documentation(documentation).to_string()),
+                .map(|documentation| extract_documentation(&documentation, source).to_string()),
         })
         .collect()
 }
 
-pub fn simple_to_owned_type(simple: &SimpleType<'_>) -> OwnedType {
+pub fn simple_to_owned_type(simple: &SimpleType, source: &str) -> OwnedType {
     match simple {
-        SimpleType::Optional(inner) => optional_type(simple_to_owned_type(inner)),
+        SimpleType::Optional(inner) => optional_type(simple_to_owned_type(inner, source)),
         SimpleType::Identifier(identifier, arguments) => OwnedType::Named {
-            name: identifier.v.to_string(),
+            name: identifier.text(source).to_string(),
             arguments: arguments
                 .as_deref()
                 .unwrap_or(&[])
                 .iter()
-                .map(simple_to_owned_type)
+                .map(|item| simple_to_owned_type(item, source))
                 .collect(),
         },
         SimpleType::Array(identifier, arguments) => OwnedType::Array(Box::new(OwnedType::Named {
-            name: identifier.v.to_string(),
+            name: identifier.text(source).to_string(),
             arguments: arguments
                 .as_deref()
                 .unwrap_or(&[])
                 .iter()
-                .map(simple_to_owned_type)
+                .map(|item| simple_to_owned_type(item, source))
                 .collect(),
         })),
-        SimpleType::Literal(literal) => OwnedType::Literal(literal_to_owned(literal)),
+        SimpleType::Literal(literal) => OwnedType::Literal(literal_to_owned(literal, source)),
     }
 }
 
-pub fn literal_to_owned(literal: &Literal<'_>) -> OwnedLiteral {
+pub fn literal_to_owned(literal: &Literal, source: &str) -> OwnedLiteral {
     match literal {
         Literal::Int(literal) => OwnedLiteral::Integer {
             value: literal.value.clone(),
             representation: literal.representation,
-            cast: literal.cast.map(|cast| cast.v.to_string()),
+            cast: literal.cast.map(|cast| cast.text(source).to_string()),
         },
         Literal::Float(literal) => OwnedLiteral::Float {
             value: literal.value.clone(),
             representation: literal.representation,
-            cast: literal.cast.map(|cast| cast.v.to_string()),
+            cast: literal.cast.map(|cast| cast.text(source).to_string()),
         },
         Literal::String(value, _) => OwnedLiteral::String(value.clone()),
         Literal::Boolean(value, _) => OwnedLiteral::Boolean(*value),
