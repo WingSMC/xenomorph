@@ -121,7 +121,7 @@ fn generic_parameter_target_at(
         };
         for (parameter, _) in generics.as_deref().unwrap_or_default() {
             let mut references = Vec::new();
-            collect_generic_references(ty, parameter.text(source), &mut references, source);
+            collect_type_references(ty, parameter.text(source), &mut references, source);
             if !same_token(parameter, selected)
                 && !references
                     .iter()
@@ -148,50 +148,48 @@ fn generic_parameter_target_at(
     None
 }
 
-fn collect_generic_references(
+fn collect_type_references(
     (ty, annotations): &ParsedXenoType,
     name: &str,
     references: &mut Vec<TokenData>,
     source: &str,
 ) {
-    collect_generic_references_from_type(ty, name, references, source);
+    collect_type_references_from_type(ty, name, references, source);
     for annotation in annotations {
-        collect_generic_references_from_annotation(annotation, name, references, source);
+        collect_type_references_from_annotation(annotation, name, references, source);
     }
 }
 
-fn collect_generic_references_from_type(
+fn collect_type_references_from_type(
     ty: &Type,
     name: &str,
     references: &mut Vec<TokenData>,
     source: &str,
 ) {
     match ty {
-        Type::Simple(ty) => {
-            collect_generic_references_from_simple_type(ty, name, references, source)
-        }
+        Type::Simple(ty) => collect_type_references_from_simple_type(ty, name, references, source),
         Type::Tuple(types) | Type::Sum(types) | Type::Intersection(types) => {
             for ty in types {
-                collect_generic_references_from_simple_type(ty, name, references, source);
+                collect_type_references_from_simple_type(ty, name, references, source);
             }
         }
         Type::Set(set) => {
             if let Some(element_type) = &set.element_type {
-                collect_generic_references_from_simple_type(element_type, name, references, source);
+                collect_type_references_from_simple_type(element_type, name, references, source);
             }
             for literal in set.values.as_deref().unwrap_or_default() {
-                collect_generic_references_from_literal(literal, name, references, source);
+                collect_type_references_from_literal(literal, name, references, source);
             }
         }
         Type::Struct(fields) | Type::Enum(fields) => {
             for (_, ty, _) in fields {
-                collect_generic_references_from_simple_type(ty, name, references, source);
+                collect_type_references_from_simple_type(ty, name, references, source);
             }
         }
     }
 }
 
-fn collect_generic_references_from_simple_type(
+fn collect_type_references_from_simple_type(
     ty: &SimpleType,
     name: &str,
     references: &mut Vec<TokenData>,
@@ -199,23 +197,23 @@ fn collect_generic_references_from_simple_type(
 ) {
     match ty {
         SimpleType::Optional(inner) => {
-            collect_generic_references_from_simple_type(inner, name, references, source)
+            collect_type_references_from_simple_type(inner, name, references, source)
         }
         SimpleType::Literal(literal) => {
-            collect_generic_references_from_literal(literal, name, references, source);
+            collect_type_references_from_literal(literal, name, references, source);
         }
         SimpleType::Identifier(token, arguments) | SimpleType::Array(token, arguments) => {
             if token.text(source) == name {
                 references.push(*token);
             }
             for argument in arguments.as_deref().unwrap_or_default() {
-                collect_generic_references_from_simple_type(argument, name, references, source);
+                collect_type_references_from_simple_type(argument, name, references, source);
             }
         }
     }
 }
 
-fn collect_generic_references_from_literal(
+fn collect_type_references_from_literal(
     literal: &Literal,
     name: &str,
     references: &mut Vec<TokenData>,
@@ -229,7 +227,7 @@ fn collect_generic_references_from_literal(
     }
 }
 
-fn collect_generic_references_from_annotation(
+fn collect_type_references_from_annotation(
     annotation: &Annotation,
     name: &str,
     references: &mut Vec<TokenData>,
@@ -239,11 +237,34 @@ fn collect_generic_references_from_annotation(
         match parameter {
             Expr::Regex(_) => {}
             Expr::Annotation(annotation) => {
-                collect_generic_references_from_annotation(annotation, name, references, source)
+                collect_type_references_from_annotation(annotation, name, references, source)
             }
-            Expr::Type(ty) => collect_generic_references_from_type(ty, name, references, source),
+            Expr::Type(ty) => collect_type_references_from_type(ty, name, references, source),
         }
     }
+}
+
+fn collect_static_type_references(ast: &[Declaration], name: &str, source: &str) -> Vec<TokenData> {
+    let mut references = Vec::new();
+    for declaration in ast {
+        let Declaration::Type { generics, ty, .. } = declaration else {
+            continue;
+        };
+        let generics = generics.as_deref().unwrap_or_default();
+        references.extend(
+            generics
+                .iter()
+                .filter_map(|(_, constraint)| *constraint)
+                .filter(|constraint| constraint.text(source) == name),
+        );
+        if !generics
+            .iter()
+            .any(|(parameter, _)| parameter.text(source) == name)
+        {
+            collect_type_references(ty, name, &mut references, source);
+        }
+    }
+    references
 }
 
 #[derive(Clone, Copy)]
@@ -1658,12 +1679,12 @@ impl LanguageServer for Backend {
             return Ok(Some(locations));
         }
 
-        let Some(target) = self
+        let target = self
             .registry
-            .find_declaration(current_module, &searched_name)
-        else {
+            .find_declaration(current_module, &searched_name);
+        if target.is_none() && !self.registry.metadata.types.contains_key(&searched_name) {
             return Ok(None);
-        };
+        }
 
         let module_paths: Vec<String> = self
             .registry
@@ -1676,20 +1697,36 @@ impl LanguageServer for Backend {
 
         let mut locations = Vec::new();
         for module_path in module_paths {
-            let Some(visible_decl) = self.registry.find_declaration(&module_path, &searched_name)
-            else {
-                continue;
-            };
-
-            if visible_decl.name != target.name || visible_decl.module_path != target.module_path {
+            let visible_decl = self.registry.find_declaration(&module_path, &searched_name);
+            if let Some(target) = &target {
+                let Some(visible_decl) = visible_decl else {
+                    continue;
+                };
+                if visible_decl.name != target.name
+                    || visible_decl.module_path != target.module_path
+                {
+                    continue;
+                }
+            } else if visible_decl.is_some() {
                 continue;
             }
 
             if let Some(mut module_locations) = self
                 .registry
-                .with_module(&module_path, |tokens, _, module| {
+                .with_module(&module_path, |tokens, ast, module| {
                     let uri = Url::from_file_path(module.borrow_abs_path()).ok()?;
                     let source = module.borrow_source();
+                    if target.is_none() {
+                        return Some(
+                            collect_static_type_references(ast, &searched_name, source)
+                                .iter()
+                                .map(|token| Location {
+                                    uri: uri.clone(),
+                                    range: token_to_editor_range(source, token),
+                                })
+                                .collect(),
+                        );
+                    }
                     Some(
                         tokens
                             .iter()
@@ -1700,11 +1737,12 @@ impl LanguageServer for Backend {
                                     return None;
                                 }
 
-                                if !include_declaration
-                                    && module_path == target.module_path
-                                    && token.1.line(source) == target.line
-                                    && token.1.column(source) == target.column
-                                {
+                                if target.as_ref().is_some_and(|target| {
+                                    !include_declaration
+                                        && module_path == target.module_path
+                                        && token.1.line(source) == target.line
+                                        && token.1.column(source) == target.column
+                                }) {
                                     return None;
                                 }
 
@@ -1910,6 +1948,259 @@ mod tests {
     use xenomorph_common::lexer::Lexer;
     use xenomorph_common::module::types::ErrorPhase;
     use xenomorph_common::XenoDiagSeverity;
+
+    struct ReferenceWorkspace {
+        directory: std::path::PathBuf,
+        registry: Arc<XenoRegistry>,
+    }
+
+    impl ReferenceWorkspace {
+        fn new(sources: &[(&str, &str)]) -> Self {
+            Self::with_types(sources, &[])
+        }
+
+        fn with_types(sources: &[(&str, &str)], types: &[OwnedSemanticType]) -> Self {
+            static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let directory = std::env::temp_dir().join(format!(
+                "xenomorph-lsp-references-{}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            ));
+            std::fs::create_dir(&directory).unwrap();
+            for (name, source) in sources {
+                std::fs::write(directory.join(format!("{name}.xen")), source).unwrap();
+            }
+            let mut config = xenomorph_common::config::Config::default();
+            config.workdir = directory.clone();
+            config.parser.entry = sources[0].0.into();
+            let mut registry = XenoRegistry::with_config(config, false).unwrap();
+            registry
+                .metadata
+                .types
+                .extend(types.iter().map(|ty| (ty.name.clone(), ty.clone())));
+            registry
+                .hierarchy
+                .write()
+                .unwrap()
+                .insert_metadata(&registry.metadata);
+            for (name, _) in sources {
+                registry.load_module(&[name], true, None);
+                registry.with_module(name, |_, _, module| {
+                    assert!(module.borrow_parser_errors().is_empty());
+                    assert!(module.borrow_lexer_errors().is_empty());
+                });
+            }
+            Self {
+                directory,
+                registry: Arc::new(registry),
+            }
+        }
+
+        fn location(&self, module: &str, line: u32, start: u32, end: u32) -> Location {
+            Location {
+                uri: Url::from_file_path(self.directory.join(format!("{module}.xen"))).unwrap(),
+                range: Range::new(Position::new(line, start), Position::new(line, end)),
+            }
+        }
+
+        async fn references(
+            &self,
+            module: &str,
+            position: Position,
+            include_declaration: bool,
+        ) -> Option<Vec<Location>> {
+            let registry = Arc::clone(&self.registry);
+            let (service, _socket) = LspService::new(|client| Backend {
+                client,
+                registry: Arc::clone(&registry),
+                runtime: Arc::new(RuntimeState {
+                    registry: RwLock::new(registry),
+                    documents: Mutex::new(HashMap::new()),
+                    coordinator: Mutex::new(()),
+                    config_watcher: Mutex::new(None),
+                    stopped: std::sync::atomic::AtomicBool::new(false),
+                }),
+            });
+            service
+                .inner()
+                .references(ReferenceParams {
+                    text_document_position: TextDocumentPositionParams {
+                        text_document: TextDocumentIdentifier {
+                            uri: self.location(module, 0, 0, 0).uri,
+                        },
+                        position,
+                    },
+                    context: ReferenceContext {
+                        include_declaration,
+                    },
+                    work_done_progress_params: Default::default(),
+                    partial_result_params: Default::default(),
+                })
+                .await
+                .unwrap()
+        }
+    }
+
+    impl Drop for ReferenceWorkspace {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.directory).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn references_find_builtin_types_across_indexed_modules() {
+        let workspace = ReferenceWorkspace::new(&[
+            ("index", "type Text = string;"),
+            ("other", "type Other = string[];"),
+        ]);
+        for include_declaration in [false, true] {
+            let references = workspace
+                .references("index", Position::new(0, 13), include_declaration)
+                .await;
+            assert_eq!(
+                references,
+                Some(vec![
+                    workspace.location("index", 0, 12, 18),
+                    workspace.location("other", 0, 13, 19),
+                ])
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn references_find_plugin_types_across_indexed_modules() {
+        let workspace = ReferenceWorkspace::with_types(
+            &[
+                ("index", "type Symbol = symbol;"),
+                ("other", "type Symbols = Dict<symbol, symbol[]>;"),
+            ],
+            &[OwnedSemanticType {
+                name: "symbol".into(),
+                documentation: None,
+                generic_params: Vec::new(),
+                parents: vec![OwnedConstraint::Trait("KeyTrait".into())],
+            }],
+        );
+        assert_eq!(
+            workspace
+                .references("other", Position::new(0, 21), true)
+                .await,
+            Some(vec![
+                workspace.location("index", 0, 14, 20),
+                workspace.location("other", 0, 20, 26),
+                workspace.location("other", 0, 28, 34),
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn references_find_static_types_in_all_type_expression_forms() {
+        let sources = [
+            "type Example = ?u64;",
+            "type Example = [u64, u64[]];",
+            "type Example = | u64 | string;",
+            "type Example = & u64 & number;",
+            "type Example = set<u64> [1 as u64];",
+            "type Example = { value: Dict<string, u64[]> };",
+            "type Example = enum { value: u64 };",
+            "type Example = u64 @min(1 as u64);",
+            "type Example = u64 @example(@example(u64));",
+            "type Example<T: u64> = T;",
+        ];
+        for source in sources {
+            let workspace = ReferenceWorkspace::new(&[("index", source)]);
+            let expected: Vec<_> = source
+                .match_indices("u64")
+                .map(|(start, _)| workspace.location("index", 0, start as u32, start as u32 + 3))
+                .collect();
+            assert_eq!(
+                workspace
+                    .references("index", expected[0].range.start, false)
+                    .await,
+                Some(expected),
+                "{source}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn references_exclude_non_type_identifiers_comments_and_literals() {
+        let source =
+            "// string\ntype Text = { string: string, literal: \"string\", value: ?string[] };";
+        let workspace = ReferenceWorkspace::new(&[("index", source)]);
+        assert_eq!(
+            workspace
+                .references("index", Position::new(1, 24), false)
+                .await,
+            Some(vec![
+                workspace.location("index", 1, 22, 28),
+                workspace.location("index", 1, 57, 63),
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn references_keep_source_declarations_scoped_and_honor_include_declaration() {
+        let workspace = ReferenceWorkspace::new(&[
+            ("index", "type Named = string; type Alias = Named;"),
+            ("other", "import index; type Other = Named;"),
+            ("unrelated", "type Named = u64; type Separate = Named;"),
+        ]);
+        let expected = vec![
+            workspace.location("index", 0, 34, 39),
+            workspace.location("other", 0, 27, 32),
+        ];
+        assert_eq!(
+            workspace
+                .references("other", Position::new(0, 28), false)
+                .await,
+            Some(expected.clone())
+        );
+        assert_eq!(
+            workspace
+                .references("index", Position::new(0, 6), true)
+                .await,
+            Some([vec![workspace.location("index", 0, 5, 10)], expected].concat())
+        );
+    }
+
+    #[tokio::test]
+    async fn references_keep_generic_parameters_scoped_to_their_declaration() {
+        let workspace = ReferenceWorkspace::new(&[
+            ("index", "type First<T> = T; type Second<T> = T;"),
+            ("other", "type Third<T> = T;"),
+        ]);
+        assert_eq!(
+            workspace
+                .references("index", Position::new(0, 16), false)
+                .await,
+            Some(vec![workspace.location("index", 0, 16, 17)])
+        );
+        assert_eq!(
+            workspace
+                .references("index", Position::new(0, 16), true)
+                .await,
+            Some(vec![
+                workspace.location("index", 0, 11, 12),
+                workspace.location("index", 0, 16, 17),
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn references_do_not_resolve_unknown_types() {
+        let workspace = ReferenceWorkspace::new(&[("index", "type Alias = Unknown;")]);
+        assert_eq!(
+            workspace
+                .references("index", Position::new(0, 14), false)
+                .await,
+            None
+        );
+    }
 
     #[test]
     fn diagnostic_ending_inside_crlf_stops_at_the_content_column() {
