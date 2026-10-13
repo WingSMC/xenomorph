@@ -519,6 +519,57 @@ fn missing_semicolon_reports_unexpected_eof() {
 }
 
 #[test]
+fn repeated_import_toggles_and_edits_match_fresh_parsing_and_formatting() {
+    let initial = "// \u{1f600} header\r\nimport other;\r\ntype Root = { value: string };\r\ntype Tail = number;";
+    let mut source = initial.to_string();
+    let mut lexed = Lexer::lex(&source);
+    let mut parsed = Parser::parse_incremental(&lexed.tokens, &source, None);
+    for edit in 0..100 {
+        let changed = if edit % 2 == 0 {
+            source.replace("\r\nimport other;", "\r\n// import other;")
+        } else {
+            source.replace("\r\n// import other;", "\r\nimport other;")
+        };
+        let changed = if edit % 3 == 0 {
+            changed.replace("value: string", "value: number")
+        } else {
+            changed.replace("value: number", "value: string")
+        };
+        let incremental_tokens = Lexer::relex(&source, &lexed, &changed);
+        let incremental = Parser::parse_incremental(
+            &incremental_tokens.tokens,
+            &changed,
+            Some((&lexed.tokens, &source, &parsed)),
+        );
+        let fresh_tokens = Lexer::lex(&changed);
+        let fresh = Parser::parse_incremental(&fresh_tokens.tokens, &changed, None);
+        assert_eq!(
+            incremental_tokens.tokens, fresh_tokens.tokens,
+            "tokens at edit {edit}"
+        );
+        assert_eq!(
+            serde_json::to_value(&incremental.ast).unwrap(),
+            serde_json::to_value(&fresh.ast).unwrap(),
+            "AST at edit {edit}"
+        );
+        let config = crate::config::FormatterConfig::default();
+        assert_eq!(
+            crate::formatter::format_xenomorph_with_syntax(
+                &changed,
+                &incremental_tokens.tokens,
+                &incremental.ast,
+                &config
+            ),
+            crate::formatter::format_xenomorph(&changed, &config),
+            "formatting at edit {edit}",
+        );
+        source = changed;
+        lexed = incremental_tokens;
+        parsed = incremental;
+    }
+}
+
+#[test]
 fn incremental_declarations_match_full_parse_after_edits() {
     let source="/** docs */ type A = { key: string }; type TreeNode = { children: Tree[] }; type Tree = |TreeNode|number;";
     let lexed = Lexer::lex(source);

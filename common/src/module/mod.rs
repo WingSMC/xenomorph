@@ -976,6 +976,32 @@ impl XenoRegistry {
 
     // ── Cached data access ──────────────────────────────────────────
 
+    /// Removes modules outside the caller's active graph from all indexes.
+    pub fn retain_modules(&self, paths: &HashSet<ModulePath>) {
+        let removed = {
+            let _update = self.coordinator.lock().unwrap();
+            let mut modules = self.module_cache.write().unwrap();
+            let removed: Vec<_> = modules
+                .keys()
+                .filter(|path| !paths.contains(*path))
+                .cloned()
+                .collect();
+            modules.retain(|path, _| paths.contains(path));
+            self.index
+                .write()
+                .unwrap()
+                .retain(|path, _| paths.contains(path));
+            let mut hierarchy = self.hierarchy.write().unwrap();
+            for path in &removed {
+                hierarchy.remove_module(path);
+            }
+            !removed.is_empty()
+        };
+        if removed {
+            self.refresh_name_collision_diagnostics();
+        }
+    }
+
     /// Purges every loaded module and returns the number removed.
     pub fn purge_module_cache(&self) -> usize {
         let _update = self.coordinator.lock().unwrap();

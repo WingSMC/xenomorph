@@ -5,7 +5,7 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 use xenomorph_common::{
     config::WorkspaceConfigWatcher,
-    formatter::format_xenomorph_with_syntax,
+    formatter::{format_xenomorph, format_xenomorph_with_syntax},
     lexer::{Token, TokenVariant},
     module::{
         types::{DeclarationInfo, ModuleDiagnostic},
@@ -399,10 +399,16 @@ struct Backend {
 
 struct RuntimeState {
     registry: RwLock<Arc<XenoRegistry>>,
-    documents: Mutex<HashMap<Url, String>>,
+    documents: Mutex<HashMap<Url, OpenDocument>>,
+    updates: tokio::sync::Mutex<()>,
     coordinator: Mutex<()>,
     config_watcher: Mutex<Option<WorkspaceConfigWatcher>>,
     stopped: std::sync::atomic::AtomicBool,
+}
+
+struct OpenDocument {
+    text: String,
+    version: i32,
 }
 
 impl RuntimeState {
@@ -571,31 +577,40 @@ async fn reload_runtime(
     runtime: Arc<RuntimeState>,
     client: Client,
 ) -> std::result::Result<(), String> {
+    let _update = runtime.updates.lock().await;
     let previous = runtime.snapshot();
     let state = Arc::clone(&runtime);
     let reload_client = client.clone();
     let candidate = tokio::task::spawn_blocking(move || state.reconcile(reload_client))
         .await
         .map_err(|error| format!("Runtime reload task failed: {error}"))??;
-    let documents = runtime.documents.lock().unwrap().clone();
-    let graph = current_module_graph(&candidate);
-    let mut uris: HashSet<Url> = documents.keys().cloned().collect();
-    for registry in [&previous, &candidate] {
-        for module in registry.module_cache.read().unwrap().values() {
-            let module = module.read().unwrap();
-            if let Ok(uri) = Url::from_file_path(module.borrow_abs_path()) {
-                uris.insert(uri);
+    let publications = {
+        let documents = runtime.documents.lock().unwrap();
+        let graph = current_module_graph(&candidate);
+        let mut uris: HashSet<Url> = documents.keys().cloned().collect();
+        for registry in [&previous, &candidate] {
+            for module in registry.module_cache.read().unwrap().values() {
+                let module = module.read().unwrap();
+                if let Ok(uri) = Url::from_file_path(module.borrow_abs_path()) {
+                    uris.insert(uri);
+                }
             }
         }
-    }
-    for uri in uris {
-        let diagnostics = diagnostics_for_document(
-            &candidate,
-            &graph,
-            &uri,
-            documents.get(&uri).map(String::as_str),
-        );
-        client.publish_diagnostics(uri, diagnostics, None).await;
+        uris.into_iter()
+            .map(|uri| {
+                let document = documents.get(&uri);
+                let diagnostics = diagnostics_for_document(
+                    &candidate,
+                    &graph,
+                    &uri,
+                    document.map(|document| document.text.as_str()),
+                );
+                (uri, diagnostics, document.map(|document| document.version))
+            })
+            .collect::<Vec<_>>()
+    };
+    for (uri, diagnostics, version) in publications {
+        client.publish_diagnostics(uri, diagnostics, version).await;
     }
     client
         .log_message(
@@ -622,13 +637,13 @@ fn current_module_graph(registry: &XenoRegistry) -> HashSet<String> {
 
 /// Apply editor buffers in import order so newly imported open documents use
 /// their unsaved text, and unrelated documents do not become graph members.
-fn synchronize_documents(registry: &XenoRegistry, documents: &HashMap<Url, String>) {
+fn synchronize_documents(registry: &XenoRegistry, documents: &HashMap<Url, OpenDocument>) {
     let sources: HashMap<_, _> = documents
         .iter()
-        .filter_map(|(uri, text)| {
+        .filter_map(|(uri, document)| {
             let path = uri.to_file_path().ok()?;
             let module = registry.abs_path_to_module_path(&path)?;
-            Some((module, (path, text)))
+            Some((module, (path, &document.text)))
         })
         .collect();
     let mut visited = HashSet::new();
@@ -651,19 +666,45 @@ fn synchronize_documents(registry: &XenoRegistry, documents: &HashMap<Url, Strin
             pending.extend(imports);
         }
     }
+    registry.retain_modules(&current_module_graph(registry));
 }
 
 fn outside_module_graph_diagnostic(source: &str) -> Diagnostic {
-    let source = xenomorph_common::SourceDocument::new(source.to_string());
-    let (line, character) = source.position(source.text().len() as u32, true);
     Diagnostic {
-        range: Range::new(Position::new(0, 0), Position::new(line, character)),
+        range: document_range(source),
         severity: Some(DiagnosticSeverity::INFORMATION),
         message: "Not part of the current module graph.".to_string(),
         source: Some("xenomorph".to_string()),
         tags: Some(vec![DiagnosticTag::UNNECESSARY]),
         ..Default::default()
     }
+}
+
+fn document_range(source: &str) -> Range {
+    let source = xenomorph_common::SourceDocument::new(source.to_string());
+    let (line, character) = source.position(source.text().len() as u32, true);
+    Range::new(Position::new(0, 0), Position::new(line, character))
+}
+
+fn apply_document_changes(
+    source: &str,
+    changes: Vec<TextDocumentContentChangeEvent>,
+) -> Option<String> {
+    let mut text = source.to_string();
+    for change in changes {
+        if let Some(range) = change.range {
+            let document = xenomorph_common::SourceDocument::new(text.clone());
+            let start = document.offset(range.start.line, range.start.character, true)? as usize;
+            let end = document.offset(range.end.line, range.end.character, true)? as usize;
+            if start > end {
+                return None;
+            }
+            text.replace_range(start..end, &change.text);
+        } else {
+            text = change.text;
+        }
+    }
+    Some(text)
 }
 
 fn diagnostics_for_document(
@@ -1013,21 +1054,48 @@ impl Backend {
     // ── Document validation ─────────────────────────────────────────
 
     /// Synchronizes graph members and updates diagnostics for cached and open files.
-    async fn validate_document(&self, uri: &Url, source: String) {
+    async fn validate_document(&self, uri: &Url, source: String, version: i32) {
+        // Keep mutation and publication in one ordered operation. LSP handlers
+        // run concurrently, so the version check also rejects late older edits.
+        let _update = self.runtime.updates.lock().await;
+        self.validate_document_locked(uri, source, version).await;
+    }
+
+    async fn validate_document_locked(&self, uri: &Url, source: String, version: i32) {
         let publications = {
             let _coordinator = self.runtime.coordinator.lock().unwrap();
             let mut documents = self.runtime.documents.lock().unwrap();
-            documents.insert(uri.clone(), source);
+            if documents
+                .get(uri)
+                .is_some_and(|document| document.version >= version)
+            {
+                return;
+            }
+            documents.insert(
+                uri.clone(),
+                OpenDocument {
+                    text: source,
+                    version,
+                },
+            );
             let registry = self.runtime.snapshot();
-            synchronize_documents(&registry, &documents);
-            let graph = current_module_graph(&registry);
-            let affected_paths: Vec<_> = registry
+            let mut affected_paths: Vec<_> = registry
                 .module_cache
                 .read()
                 .unwrap()
                 .values()
                 .map(|module| module.read().unwrap().borrow_abs_path().to_path_buf())
                 .collect();
+            synchronize_documents(&registry, &documents);
+            let graph = current_module_graph(&registry);
+            affected_paths.extend(
+                registry
+                    .module_cache
+                    .read()
+                    .unwrap()
+                    .values()
+                    .map(|module| module.read().unwrap().borrow_abs_path().to_path_buf()),
+            );
             let mut uris: HashSet<_> = documents.keys().cloned().collect();
             uris.extend(
                 affected_paths
@@ -1036,19 +1104,20 @@ impl Backend {
             );
             uris.into_iter()
                 .map(|uri| {
+                    let document = documents.get(&uri);
                     let diagnostics = diagnostics_for_document(
                         &registry,
                         &graph,
                         &uri,
-                        documents.get(&uri).map(String::as_str),
+                        document.map(|document| document.text.as_str()),
                     );
-                    (uri, diagnostics)
+                    (uri, diagnostics, document.map(|document| document.version))
                 })
                 .collect::<Vec<_>>()
         };
-        for (uri, diagnostics) in publications {
+        for (uri, diagnostics, version) in publications {
             self.client
-                .publish_diagnostics(uri, diagnostics, None)
+                .publish_diagnostics(uri, diagnostics, version)
                 .await;
         }
     }
@@ -1480,19 +1549,31 @@ impl LanguageServer for Backend {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri;
         let text = params.text_document.text;
-        self.validate_document(&uri, text).await;
+        self.validate_document(&uri, text, params.text_document.version)
+            .await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        let _update = self.runtime.updates.lock().await;
         let uri = params.text_document.uri;
-
-        // With TextDocumentSyncKind::FULL, last change contains the full text
-        if let Some(change) = params.content_changes.into_iter().last() {
-            self.validate_document(&uri, change.text).await;
+        let source = {
+            let documents = self.runtime.documents.lock().unwrap();
+            let Some(document) = documents.get(&uri) else {
+                return;
+            };
+            if document.version >= params.text_document.version {
+                return;
+            }
+            apply_document_changes(&document.text, params.content_changes)
+        };
+        if let Some(source) = source {
+            self.validate_document_locked(&uri, source, params.text_document.version)
+                .await;
         }
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
+        let _update = self.runtime.updates.lock().await;
         self.runtime
             .documents
             .lock()
@@ -1568,37 +1649,40 @@ impl LanguageServer for Backend {
     }
 
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
+        let _update = self.runtime.updates.lock().await;
+        let registry = self.runtime.snapshot();
         let uri = params.text_document.uri;
-        let module_path = self.uri_to_module_path(&uri);
+        let documents = self.runtime.documents.lock().unwrap();
+        let Some(document) = documents.get(&uri) else {
+            return Ok(None);
+        };
+        let source = document.text.as_str();
+        let module_path = uri
+            .to_file_path()
+            .ok()
+            .and_then(|path| registry.abs_path_to_module_path(&path));
 
-        let result = self.registry.with_module(
-            module_path.as_deref().unwrap_or(""),
-            |tokens, ast, module| {
-                let source = module.borrow_source();
-                let formatted = format_xenomorph_with_syntax(
-                    source,
-                    tokens,
-                    ast,
-                    &self.registry.config.formatter,
-                );
+        let formatted = registry
+            .with_module(
+                module_path.as_deref().unwrap_or(""),
+                |tokens, ast, module| {
+                    (module.borrow_source() == source).then(|| {
+                        format_xenomorph_with_syntax(
+                            source,
+                            tokens,
+                            ast,
+                            &registry.config.formatter,
+                        )
+                    })
+                },
+            )
+            .flatten()
+            .unwrap_or_else(|| format_xenomorph(source, &registry.config.formatter));
 
-                vec![TextEdit {
-                    range: Range {
-                        start: Position {
-                            line: 0,
-                            character: 0,
-                        },
-                        end: Position {
-                            line: source.lines().count() as u32,
-                            character: 0,
-                        },
-                    },
-                    new_text: formatted,
-                }]
-            },
-        );
-
-        Ok(result)
+        Ok(Some(vec![TextEdit {
+            range: document_range(source),
+            new_text: formatted,
+        }]))
     }
 
     async fn goto_definition(
@@ -1972,6 +2056,7 @@ async fn main() {
     let runtime = Arc::new(RuntimeState {
         registry: RwLock::new(Arc::new(reg)),
         documents: Mutex::new(HashMap::new()),
+        updates: tokio::sync::Mutex::new(()),
         coordinator: Mutex::new(()),
         config_watcher: Mutex::new(None),
         stopped: std::sync::atomic::AtomicBool::new(false),
@@ -2067,6 +2152,7 @@ mod tests {
                 runtime: Arc::new(RuntimeState {
                     registry: RwLock::new(registry),
                     documents: Mutex::new(HashMap::new()),
+                    updates: tokio::sync::Mutex::new(()),
                     coordinator: Mutex::new(()),
                     config_watcher: Mutex::new(None),
                     stopped: std::sync::atomic::AtomicBool::new(false),
@@ -2099,6 +2185,24 @@ mod tests {
     }
 
     #[test]
+    fn document_changes_apply_utf16_ranges_sequentially() {
+        let source = "// \u{1f600}\r\ntype A = string;";
+        let changes = serde_json::from_value(serde_json::json!([
+            { "range": { "start": { "line": 0, "character": 3 }, "end": { "line": 0, "character": 5 } }, "text": "header" },
+            { "range": { "start": { "line": 1, "character": 5 }, "end": { "line": 1, "character": 6 } }, "text": "Renamed" },
+            { "range": { "start": { "line": 1, "character": 15 }, "end": { "line": 1, "character": 21 } }, "text": "number" }
+        ])).unwrap();
+        assert_eq!(
+            apply_document_changes(source, changes).unwrap(),
+            "// header\r\ntype Renamed = number;"
+        );
+        let invalid = serde_json::from_value(serde_json::json!([
+            { "range": { "start": { "line": 0, "character": 4 }, "end": { "line": 0, "character": 5 } }, "text": "x" }
+        ])).unwrap();
+        assert!(apply_document_changes(source, invalid).is_none());
+    }
+
+    #[test]
     fn current_graph_follows_transitive_imports_and_cycles_and_excludes_cached_orphans() {
         let workspace = ReferenceWorkspace::new(&[
             ("index", "import middle; type Root = string;"),
@@ -2122,15 +2226,24 @@ mod tests {
         let documents = HashMap::from([
             (
                 workspace.location("index", 0, 0, 0).uri,
-                "import middle; type Root = string;".into(),
+                OpenDocument {
+                    text: "import middle; type Root = string;".into(),
+                    version: 1,
+                },
             ),
             (
                 workspace.location("middle", 0, 0, 0).uri,
-                "import leaf; type Middle = string;".into(),
+                OpenDocument {
+                    text: "import leaf; type Middle = string;".into(),
+                    version: 1,
+                },
             ),
             (
                 workspace.location("leaf", 0, 0, 0).uri,
-                "type Draft = string;".into(),
+                OpenDocument {
+                    text: "type Draft = string;".into(),
+                    version: 1,
+                },
             ),
         ]);
         synchronize_documents(&workspace.registry, &documents);
@@ -2142,6 +2255,53 @@ mod tests {
             .registry
             .with_module("leaf", |_, _, data| data.declarations.contains_key("Draft"))
             .unwrap());
+    }
+
+    #[tokio::test]
+    async fn older_document_versions_cannot_restore_removed_imports() {
+        let workspace = ReferenceWorkspace::new(&[
+            ("index", "import other; type Root = string;"),
+            ("other", "type Other = string; type Root = string;"),
+        ]);
+        assert!(!workspace.registry.get_all_errors_for("index").is_empty());
+        let registry = Arc::clone(&workspace.registry);
+        let (service, _socket) = LspService::new(|client| Backend {
+            client,
+            registry: Arc::clone(&registry),
+            runtime: Arc::new(RuntimeState {
+                registry: RwLock::new(registry),
+                documents: Mutex::new(HashMap::new()),
+                updates: tokio::sync::Mutex::new(()),
+                coordinator: Mutex::new(()),
+                config_watcher: Mutex::new(None),
+                stopped: std::sync::atomic::AtomicBool::new(false),
+            }),
+        });
+        let uri = workspace.location("index", 0, 0, 0).uri;
+        let backend = service.inner();
+        backend
+            .validate_document(&uri, "// import other;\ntype Root = string;".into(), 3)
+            .await;
+        backend
+            .validate_document(&uri, "import other;\ntype Root = string;".into(), 2)
+            .await;
+        assert_eq!(
+            current_module_graph(&workspace.registry),
+            HashSet::from(["index".into()])
+        );
+        assert!(workspace
+            .registry
+            .with_module("other", |_, _, _| ())
+            .is_none());
+        assert!(workspace
+            .registry
+            .hierarchy
+            .read()
+            .unwrap()
+            .get_type_in(Some("other"), "Other")
+            .is_none());
+        assert_eq!(backend.runtime.documents.lock().unwrap()[&uri].version, 3);
+        assert!(workspace.registry.get_all_errors_for("index").is_empty());
     }
 
     #[tokio::test]

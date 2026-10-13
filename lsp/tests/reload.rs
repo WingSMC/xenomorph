@@ -165,6 +165,203 @@ fn config(directory: &Path, plugins: &[&str]) {
 }
 
 #[test]
+fn formatting_disconnected_documents_uses_the_current_complete_buffer() {
+    use tower_lsp::lsp_types::Url;
+
+    let directory = std::env::temp_dir().join(format!(
+        "xenomorph-lsp-formatting-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir(&directory).unwrap();
+    fs::write(
+        directory.join("index.xen"),
+        "import other;\ntype Root = string;",
+    )
+    .unwrap();
+    fs::write(directory.join("other.xen"), "type Saved = string;").unwrap();
+    config(&directory, &[]);
+    let entry = Url::from_file_path(directory.join("index.xen")).unwrap();
+    let other = Url::from_file_path(directory.join("other.xen")).unwrap();
+    let mut server = Server::start(directory);
+    server.request(1, "initialize", json!({ "capabilities": {} }));
+    server.notification("initialized", json!({}));
+    server.wait_for_log("Language Server initialized");
+    server.open(&entry, "import other;\ntype Root = string;");
+    server.diagnostics(&entry);
+    server.diagnostics(&other);
+    let source = "// \u{1f600} draft\r\ntype Draft=string;\r\ntype Tail=number;";
+    server.open(&other, source);
+    server.diagnostics(&entry);
+    server.diagnostics(&other);
+    let connected = server.request(
+        10,
+        "textDocument/formatting",
+        json!({
+            "textDocument": { "uri": other }, "options": { "tabSize": 4, "insertSpaces": true }
+        }),
+    );
+    assert_eq!(
+        connected["result"][0]["range"],
+        json!({
+            "start": { "line": 0, "character": 0 }, "end": { "line": 2, "character": 17 }
+        })
+    );
+    server.change(&entry, 2, "// import other;\ntype Root = string;");
+    server.diagnostics(&entry);
+    server.diagnostics(&other);
+    let edited = source.replace("Draft", "Edited");
+    server.change(&other, 2, &edited);
+    server.diagnostics(&entry);
+    server.diagnostics(&other);
+    server.notification("textDocument/didChange", json!({
+        "textDocument": { "uri": other, "version": 3 },
+        "contentChanges": [
+            { "range": { "start": { "line": 1, "character": 5 }, "end": { "line": 1, "character": 11 } }, "text": "Latest" },
+            { "range": { "start": { "line": 2, "character": 10 }, "end": { "line": 2, "character": 16 } }, "text": "string" }
+        ]
+    }));
+    server.diagnostics(&entry);
+    server.diagnostics(&other);
+    let edited = edited
+        .replace("Edited", "Latest")
+        .replace("Tail=number", "Tail=string");
+    let formatted = server.request(
+        2,
+        "textDocument/formatting",
+        json!({
+            "textDocument": { "uri": other }, "options": { "tabSize": 4, "insertSpaces": true }
+        }),
+    );
+    let edits = formatted["result"]
+        .as_array()
+        .expect("format disconnected document");
+    assert_eq!(edits.len(), 1, "{formatted}");
+    assert_eq!(
+        edits[0]["range"],
+        json!({
+            "start": { "line": 0, "character": 0 }, "end": { "line": 2, "character": 17 }
+        })
+    );
+    let expected = xenomorph_common::formatter::format_xenomorph(
+        &edited,
+        &xenomorph_common::config::FormatterConfig::default(),
+    );
+    assert_eq!(edits[0]["newText"], expected);
+    assert_eq!(expected.matches("type Latest").count(), 1);
+    assert_eq!(expected.matches("type Tail").count(), 1);
+    let symbols = server.request(
+        3,
+        "textDocument/documentSymbol",
+        json!({ "textDocument": { "uri": other } }),
+    );
+    assert!(
+        symbols["result"].is_null(),
+        "Standalone formatting added a module: {symbols}"
+    );
+    server.change(&entry, 3, "import other;\ntype Root = string;");
+    server.diagnostics(&entry);
+    server.diagnostics(&other);
+    let symbols = server.request(
+        4,
+        "textDocument/documentSymbol",
+        json!({ "textDocument": { "uri": other } }),
+    );
+    assert_eq!(symbols["result"][0]["name"], "Latest", "{symbols}");
+    assert_eq!(symbols["result"][1]["name"], "Tail", "{symbols}");
+    let formatted = server.request(
+        5,
+        "textDocument/formatting",
+        json!({
+            "textDocument": { "uri": other }, "options": { "tabSize": 4, "insertSpaces": true }
+        }),
+    );
+    assert_eq!(formatted["result"][0]["newText"], expected);
+}
+
+#[test]
+fn rapid_import_toggles_leave_the_latest_diagnostic_visible() {
+    use tower_lsp::lsp_types::Url;
+
+    let directory = std::env::temp_dir().join(format!(
+        "xenomorph-lsp-import-toggles-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir(&directory).unwrap();
+    fs::write(
+        directory.join("index.xen"),
+        "import other;\ntype Root = string;",
+    )
+    .unwrap();
+    fs::write(directory.join("other.xen"), "type Other = string;").unwrap();
+    config(&directory, &[]);
+    let entry = Url::from_file_path(directory.join("index.xen")).unwrap();
+    let other = Url::from_file_path(directory.join("other.xen")).unwrap();
+    let mut server = Server::start(directory);
+    server.request(1, "initialize", json!({ "capabilities": {} }));
+    server.notification("initialized", json!({}));
+    server.wait_for_log("Language Server initialized");
+    server.open(&entry, "import other;\ntype Root = string;");
+    server.diagnostics(&entry);
+    server.diagnostics(&other);
+    server.open(&other, "type Other = string;");
+    server.diagnostics(&entry);
+    server.diagnostics(&other);
+
+    for batch in 0..10 {
+        for edit in 0..50 {
+            let text = if (edit + batch) % 2 == 0 {
+                "import other;\ntype Root = string;"
+            } else {
+                "// import other;\ntype Root = string;"
+            };
+            server.change(&entry, 2 + batch * 50 + edit, text);
+        }
+        let final_version = 2 + batch * 50 + 49;
+        server.wait_for_message(|message| {
+            message["method"] == "textDocument/publishDiagnostics"
+                && message["params"]["uri"] == entry.as_str()
+                && message["params"]["version"] == final_version
+        });
+        // Older notifications can be coalesced. Wait for the final version,
+        // then inspect the last publication for the imported document.
+        while let Ok(message) = server.messages.recv_timeout(Duration::from_millis(50)) {
+            server.pending_messages.push(message);
+        }
+        let latest = server
+            .pending_messages
+            .iter()
+            .rev()
+            .find(|message| {
+                message["method"] == "textDocument/publishDiagnostics"
+                    && message["params"]["uri"] == other.as_str()
+            })
+            .expect("diagnostics for imported document")["params"]["diagnostics"]
+            .clone();
+        server.pending_messages.clear();
+        if batch % 2 == 0 {
+            assert_eq!(
+                latest[0]["message"], "Not part of the current module graph.",
+                "Stale diagnostic after rapid toggles in batch {batch}: {latest}"
+            );
+        } else {
+            assert_eq!(
+                latest,
+                json!([]),
+                "Stale diagnostic after rapid toggles in batch {batch}"
+            );
+        }
+    }
+}
+
+#[test]
 fn files_outside_the_module_graph_are_dimmed_and_update_with_imports_and_reload() {
     use tower_lsp::lsp_types::Url;
 
@@ -247,6 +444,15 @@ fn files_outside_the_module_graph_are_dimmed_and_update_with_imports_and_reload(
     server.change(&entry, 2, "type Root = string;");
     assert_eq!(server.diagnostics(&other), expected);
     server.diagnostics(&entry);
+    let symbols = server.request(
+        20,
+        "textDocument/documentSymbol",
+        json!({ "textDocument": { "uri": other } }),
+    );
+    assert!(
+        symbols["result"].is_null(),
+        "Disconnected module still has symbols: {symbols}"
+    );
     server.open(&outside, "type Outside = string;");
     let diagnostics = server.diagnostics(&outside);
     assert_eq!(diagnostics[0]["message"], expected[0]["message"]);
