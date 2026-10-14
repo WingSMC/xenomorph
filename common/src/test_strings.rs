@@ -8,7 +8,7 @@ pub mod lexer {
     ];
     pub const WORDS: &str = "type T_1 = set enum true false validator;";
     pub const POSITIONED_WORDS: &str = "foo\n  bar";
-    pub const IMPORT: &str = "import foo2/bar_3;";
+    pub const IMPORT: &str = "import foo2::bar_3;";
     pub const EMPTY_IMPORT: &str = "import ;";
     pub const NUMBERS: &str = "0 -42 3.14";
     pub const MINUS_IDENTIFIER: &str = "-value";
@@ -22,10 +22,10 @@ pub mod lexer {
     pub const UNTERMINATED_COMMENT: &str = "/* comment";
     pub const WORD_DELIMITER: &str = "name;";
     pub const NUMBER_DELIMITER: &str = "-42;";
-    pub const IMPORT_DELIMITER: &str = "import foo/bar;";
+    pub const IMPORT_DELIMITER: &str = "import foo::bar;";
     pub const WORD_EOF: &str = "name";
     pub const NUMBER_EOF: &str = "-42";
-    pub const IMPORT_EOF: &str = "import foo/bar";
+    pub const IMPORT_EOF: &str = "import foo::bar";
     pub const UTF8_DELIMITED: &str = "\"é\";/ø/;";
     pub const UNKNOWN_UTF8: &str = "é";
     pub const UNKNOWN_ASCII: &str = ".";
@@ -42,7 +42,7 @@ pub mod parser {
     pub const TYPE_DOCS: &str = "A documented type.";
     pub const FIELD_DOCS: &str = "A documented field.";
     pub const DANGLING_DOCS: &str = "No field follows.";
-    pub const IMPORT_PATH: &str = "models/user";
+    pub const IMPORT_PATH: &str = "models::user";
     pub const IDENTIFIER: &str = "u8";
     pub const CUSTOM_IDENTIFIER: &str = "User";
     pub const INTEGER: &str = "42";
@@ -82,7 +82,7 @@ pub mod parser {
     }
 
     pub fn import(path: &str) -> String {
-        format!("import {path};")
+        format!("import {path}::User;")
     }
 
     pub fn optional(ty: &str) -> String {

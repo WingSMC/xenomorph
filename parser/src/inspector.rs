@@ -203,11 +203,25 @@ fn token_node(kind: &'static str, token: &TokenData, source: &str) -> AstNode {
 
 fn declaration_node(declaration: &Declaration, tokens: &[Token], source: &str) -> AstNode {
     match declaration {
-        Declaration::Import { path, location } => node(
+        Declaration::Import {
+            path,
+            names,
+            public,
+            location,
+            ..
+        } => node(
             "ImportDeclaration",
-            Some(path.join("/")),
+            Some(path.join("::")),
             Some(declaration_range(tokens, location, location, source)),
-            Vec::new(),
+            public
+                .iter()
+                .map(|p| token_node("Public", p, source))
+                .chain(
+                    names
+                        .iter()
+                        .map(|name| token_node("ImportedDeclaration", name, source)),
+                )
+                .collect(),
         ),
         Declaration::Type {
             docs,
@@ -216,8 +230,12 @@ fn declaration_node(declaration: &Declaration, tokens: &[Token], source: &str) -
             ty,
             from,
             to,
+            public,
         } => {
             let mut children = Vec::new();
+            if let Some(public) = public {
+                children.push(token_node("Public", public, source));
+            }
             if let Some(docs) = docs {
                 children.push(node(
                     "Documentation",

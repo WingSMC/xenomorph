@@ -146,8 +146,19 @@ pub fn source_tokens(ast: &[Declaration]) -> Vec<TokenData> {
     }
     let mut out = vec![];
     for d in ast {
+        if let Some(public) = d.public() {
+            out.push(public);
+        }
         match d {
-            Declaration::Import { location, .. } => out.push(*location),
+            Declaration::Import {
+                location,
+                path_tokens,
+                names,
+                ..
+            } => {
+                out.push(*location);
+                out.extend(path_tokens.iter().chain(names).copied());
+            }
             Declaration::Type {
                 name,
                 generics,

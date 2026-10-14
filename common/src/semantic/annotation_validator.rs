@@ -145,6 +145,7 @@ impl<'context> AnnotationValidator<'context> {
         for candidate in self.current_types() {
             if !self.type_matches_constraint(candidate, &target.constraint) {
                 errors.push(XenoDiagnostic {
+                    tags: vec![],
                     location: (*name),
                     message: format!(
                         "Annotation '@{}' is not applicable to type '{}'. Required {}(s): {}.",
@@ -174,6 +175,7 @@ impl<'context> AnnotationValidator<'context> {
         };
         if invalid_count {
             errors.push(XenoDiagnostic {
+                tags: vec![],
                 severity: crate::XenoDiagSeverity::Err,
                 location: (*name),
                 message: format!(
@@ -193,6 +195,7 @@ impl<'context> AnnotationValidator<'context> {
             };
             if !self.arg_matches_constraint(arg, &param.constraint) {
                 errors.push(XenoDiagnostic {
+                    tags: vec![],
                     severity: crate::XenoDiagSeverity::Err,
                     location: Self::expr_location(arg),
                     message: format!(
@@ -485,6 +488,7 @@ mod tests {
         let ast = vec![
             Declaration::Type {
                 docs: None,
+                public: None,
                 name: a_name,
                 generics: None,
                 ty: (
@@ -499,6 +503,7 @@ mod tests {
             },
             Declaration::Type {
                 docs: None,
+                public: None,
                 name: b_name,
                 generics: None,
                 ty: b_type.clone(),
@@ -541,6 +546,7 @@ mod tests {
         let ast = vec![
             Declaration::Type {
                 docs: None,
+                public: None,
                 name: a_name,
                 generics: None,
                 ty: (Type::Simple(SimpleType::Identifier(u8_type, None)), vec![]),
@@ -549,6 +555,7 @@ mod tests {
             },
             Declaration::Type {
                 docs: None,
+                public: None,
                 name: b_name,
                 generics: None,
                 ty: b_type.clone(),

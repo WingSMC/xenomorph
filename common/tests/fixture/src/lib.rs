@@ -101,6 +101,7 @@ impl<'src> AnalyzerListener<'src> for Listener {
     fn on_before_decl(&mut self, declaration: &Declaration, errors: &mut Vec<XenoDiagnostic>) {
         if let Declaration::Type { name, .. } = declaration {
             errors.push(XenoDiagnostic {
+                tags: vec![],
                 location: (*name),
                 severity: XenoDiagSeverity::Info,
                 message: format!("fixture initialized for {}", self.workdir.display()),

@@ -335,7 +335,7 @@ impl Analyzer {
         &self,
         ast: &[Declaration],
         module_data: &ModuleData,
-        imports: &[String],
+        _imports: &[String],
         cache: &HashMap<String, ModuleData>,
         plugins: &[LoadedPlugin],
         _plugin_configs: &PluginConfigs,
@@ -365,8 +365,27 @@ impl Analyzer {
         // unrelated names through ScopeInfo::has_type.
         let module_path_str = module_data.borrow_module_path().to_string();
         type_hierarchy.set_current_module(module_path_str.clone());
+        let index: HashMap<_, _> = cache
+            .iter()
+            .map(|(path, module)| {
+                (
+                    path.clone(),
+                    crate::module::ModuleSummary::from_module(module),
+                )
+            })
+            .collect();
         for (module_path, module) in cache {
-            type_hierarchy.register_module(module_path.clone(), module.borrow_imports().to_vec());
+            let mut bindings: HashMap<String, Vec<String>> = HashMap::new();
+            for declaration in crate::module::in_scope(&index, module_path)
+                .into_iter()
+                .filter(|d| d.module_path != *module_path)
+            {
+                bindings
+                    .entry(declaration.module_path)
+                    .or_default()
+                    .push(declaration.name);
+            }
+            type_hierarchy.register_bindings(module_path.clone(), bindings);
             for declaration in module.borrow_declarations().values() {
                 type_hierarchy.insert_declaration(
                     module_path.clone(),
@@ -384,18 +403,14 @@ impl Analyzer {
 
         // Imported declarations grouped by module (skip self-imports)
         let mut imported_types: HashMap<String, Vec<String>> = HashMap::new();
-        for import in imports {
-            if import == &module_path_str {
-                continue; // skip self-import
-            }
-            if let Some(m) = cache.get(import) {
-                let names: Vec<String> = m
-                    .borrow_declarations()
-                    .keys()
-                    .map(|k| k.to_string())
-                    .collect();
-                imported_types.insert(import.clone(), names);
-            }
+        for declaration in crate::module::in_scope(&index, &module_path_str)
+            .into_iter()
+            .filter(|d| d.module_path != module_path_str)
+        {
+            imported_types
+                .entry(declaration.module_path)
+                .or_default()
+                .push(declaration.name);
         }
 
         let scope = ScopeInfo {
@@ -419,6 +434,17 @@ impl Analyzer {
         scope: &ScopeInfo,
         plugins: &[LoadedPlugin],
     ) -> Vec<XenoDiagnostic> {
+        self.run_scope_with_bundle(ast, source, scope, plugins, None)
+    }
+
+    pub fn run_scope_with_bundle(
+        &self,
+        ast: &[Declaration],
+        source: &str,
+        scope: &ScopeInfo,
+        plugins: &[LoadedPlugin],
+        reachable: Option<&HashSet<(String, String)>>,
+    ) -> Vec<XenoDiagnostic> {
         // ── Pass 2: validate and generate with the completed hierarchy ──
         let mut listeners: Vec<Box<dyn AnalyzerListener<'_> + '_>> = vec![
             Box::new(NameValidator::new(scope, source)),
@@ -437,10 +463,11 @@ impl Analyzer {
 
         // Check for self-imports
         for decl in ast {
-            if let Declaration::Import { path, location } = decl {
+            if let Declaration::Import { path, location, .. } = decl {
                 let import_path = path.join("/");
                 if import_path == scope.module_path {
                     errors.push(XenoDiagnostic {
+                        tags: vec![],
                         severity: crate::XenoDiagSeverity::Err,
                         location: *location,
                         message: format!("Module '{}' cannot import itself", import_path),
@@ -461,8 +488,56 @@ impl Analyzer {
             .filter(|plugin| plugin.capabilities & capability != 0)
             .peekable();
         if applicable.peek().is_some() && (!self.generation_mode || can_generate(&errors)) {
-            let input = crate::plugins::encode_request(self.generation_mode, source, ast, scope);
-            let token_ranges = crate::plugins::syntax::source_tokens(ast);
+            let bundle: Vec<_> = ast
+                .iter()
+                .filter(|d| match d {
+                    Declaration::Type { name, .. } => reachable.is_none_or(|set| {
+                        set.contains(&(scope.module_path.clone(), name.text(source).into()))
+                    }),
+                    Declaration::Custom { .. } => reachable.is_none() || d.public().is_some(),
+                    Declaration::Import { .. } => true,
+                })
+                .cloned()
+                .map(|mut d| {
+                    if let (Some(reachable), Declaration::Import { names, .. }) =
+                        (reachable, &mut d)
+                    {
+                        names.retain(|token| {
+                            scope
+                                .type_hierarchy
+                                .get_type(token.text(source))
+                                .is_some_and(|definition| {
+                                    definition.module_path.as_ref().is_some_and(|path| {
+                                        reachable
+                                            .contains(&(path.clone(), token.text(source).into()))
+                                    })
+                                })
+                        });
+                    }
+                    d
+                })
+                .filter(|d| !matches!(d, Declaration::Import { names, .. } if names.is_empty()))
+                .collect();
+            let mut bundle_scope = scope.clone();
+            if let Some(reachable) = reachable {
+                bundle_scope
+                    .own_types
+                    .retain(|name| reachable.contains(&(scope.module_path.clone(), name.clone())));
+                for (path, names) in &mut bundle_scope.imported_types {
+                    names.retain(|name| reachable.contains(&(path.clone(), name.clone())));
+                }
+                bundle_scope
+                    .imported_types
+                    .retain(|_, names| !names.is_empty());
+                bundle_scope.type_hierarchy.retain_declarations(reachable);
+            }
+            let input = crate::plugins::encode_request(
+                self.generation_mode,
+                source,
+                &bundle,
+                &bundle_scope,
+            );
+            let token_ranges = crate::plugins::syntax::source_tokens(&bundle);
             for plugin in applicable {
                 if self.generation_mode && !can_generate(&errors) {
                     break;
@@ -474,6 +549,7 @@ impl Analyzer {
                 {
                     Ok(diagnostics) => errors.extend(diagnostics),
                     Err(error) => errors.push(XenoDiagnostic {
+                        tags: vec![],
                         location: first_source_location(ast),
                         message: format!("Plugin '{}' failed: {error}", plugin.description.name),
                         severity: crate::XenoDiagSeverity::Err,
@@ -491,6 +567,13 @@ impl Analyzer {
             }
         }
 
+        errors.extend(super::analyze_usage(
+            ast,
+            source,
+            &scope.module_path,
+            &scope.imported_types,
+            reachable,
+        ));
         errors
     }
 }
@@ -775,6 +858,7 @@ mod tests {
 
     fn diagnostic(severity: XenoDiagSeverity) -> XenoDiagnostic {
         XenoDiagnostic {
+            tags: vec![],
             location: TokenData::default(),
             message: "diagnostic".to_string(),
             severity,

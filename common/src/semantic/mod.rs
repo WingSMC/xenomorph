@@ -7,8 +7,10 @@ mod intersection_validator;
 mod metadata;
 mod name_collision_validator;
 mod name_validator;
+mod references;
 mod target_mapping;
 mod type_hierarchy;
+mod usage;
 
 pub use analyzer::*;
 pub use annotation_validator::*;
@@ -17,5 +19,7 @@ pub use builtin_types::*;
 pub use intersection_validator::*;
 pub use metadata::*;
 pub use name_collision_validator::*;
+pub use references::*;
 pub use target_mapping::*;
 pub use type_hierarchy::*;
+pub use usage::*;

@@ -114,6 +114,7 @@ impl<'src, 'context> AnalyzerListener<'src> for IntersectionValidator<'context> 
                 },
             );
         errors.push(XenoDiagnostic {
+            tags: vec![],
             location,
             message,
             severity: XenoDiagSeverity::Err,

@@ -129,7 +129,16 @@ impl<'src> Lexer<'src> {
                 break;
             };
             let token = match c {
-                ':' => (TokenVariant::Colon, self.single_char_token_next()),
+                ':' => {
+                    let start = self.location_snapshot();
+                    self.next();
+                    if self.peek() == Some(&':') {
+                        self.next();
+                        (TokenVariant::PathSeparator, self.token_from(&start))
+                    } else {
+                        (TokenVariant::Colon, self.token_from(&start))
+                    }
+                }
                 '?' => (TokenVariant::Question, self.single_char_token_next()),
                 ',' => (TokenVariant::Comma, self.single_char_token_next()),
                 ';' => (TokenVariant::Semicolon, self.single_char_token_next()),
@@ -169,6 +178,7 @@ impl<'src> Lexer<'src> {
                 }
                 _ => {
                     return Err(XenoDiagnostic {
+                        tags: vec![],
                         message: NOT_RECOGNIZED.to_string(),
                         location: self.token_single_at_lexer(),
                         severity: crate::XenoDiagSeverity::Err,
@@ -315,32 +325,19 @@ impl<'src> Lexer<'src> {
 
         let w = match token_data.text(self.src) {
             "type" => (TokenVariant::Type, token_data),
+            "pub" => (TokenVariant::Pub, token_data),
             // "validator" => (TokenVariant::Validator, token_data),
+            // "migration" => (TokenVariant::Migration, token_data),
             "set" => (TokenVariant::Set, token_data),
             "enum" => (TokenVariant::Enum, token_data),
             "as" => (TokenVariant::As, token_data),
             "true" => (TokenVariant::True, token_data),
             "false" => (TokenVariant::False, token_data),
-            "import" => {
-                self.tokens.push((TokenVariant::Import, token_data));
-                self.skip_whitespace();
-                self.consume_path();
-                return;
-            }
+            "import" => (TokenVariant::Import, token_data),
             _ => (TokenVariant::Identifier, token_data),
         };
 
         self.tokens.push(w);
-    }
-    fn consume_path(&mut self) {
-        let initial_loc = self.location_snapshot();
-        while let Some('a'..='z' | 'A'..='Z' | '_' | '0'..='9' | '/') = self.peek() {
-            self.next();
-        }
-        if self.location.src_index > initial_loc.src_index {
-            self.tokens
-                .push((TokenVariant::Path, self.token_from(&initial_loc)));
-        }
     }
 
     fn consume_string(&mut self) -> Result<Token, XenoDiagnostic> {
@@ -355,6 +352,7 @@ impl<'src> Lexer<'src> {
         }
 
         Err(XenoDiagnostic {
+            tags: vec![],
             message: STRING_TERMINATION_ERROR.to_string(),
             location: self.token_from(&initial_loc),
             severity: crate::XenoDiagSeverity::Err,
@@ -504,6 +502,7 @@ impl<'src> Lexer<'src> {
         }
 
         Err(XenoDiagnostic {
+            tags: vec![],
             message: COMMENT_NOT_TERMINATED.to_string(),
             location: self.token_from(&start),
             severity: crate::XenoDiagSeverity::Err,
@@ -524,6 +523,7 @@ impl<'src> Lexer<'src> {
         }
 
         Err(XenoDiagnostic {
+            tags: vec![],
             message: MALFORMED_REGEX.to_string(),
             location: self.token_from(&start),
             severity: crate::XenoDiagSeverity::Err,

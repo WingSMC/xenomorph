@@ -394,6 +394,8 @@ pub struct TypeHierarchy {
     #[serde(with = "arc_named_map")]
     traits: Arc<HashMap<String, OwnedTrait>>,
     module_imports: Arc<HashMap<String, Vec<String>>>,
+    #[serde(default)]
+    module_bindings: Arc<HashMap<String, HashMap<String, Vec<String>>>>,
     current_module: Option<String>,
 }
 
@@ -533,6 +535,30 @@ impl TypeHierarchy {
         Arc::make_mut(&mut self.module_imports).insert(module_path.into(), imports);
     }
 
+    pub fn register_bindings(&mut self, module: String, bindings: HashMap<String, Vec<String>>) {
+        self.register_module(module.clone(), bindings.keys().cloned().collect());
+        Arc::make_mut(&mut self.module_bindings).insert(module, bindings);
+    }
+
+    pub fn retain_declarations(&mut self, reachable: &HashSet<(String, String)>) {
+        Arc::make_mut(&mut self.types).retain(|key, _| {
+            key.module_path
+                .as_ref()
+                .is_none_or(|module| reachable.contains(&(module.clone(), key.name.clone())))
+        });
+        for bindings in Arc::make_mut(&mut self.module_bindings).values_mut() {
+            for (module, names) in bindings.iter_mut() {
+                names.retain(|name| reachable.contains(&(module.clone(), name.clone())));
+            }
+            bindings.retain(|_, names| !names.is_empty());
+        }
+        for (module, imports) in Arc::make_mut(&mut self.module_imports).iter_mut() {
+            if let Some(bindings) = self.module_bindings.get(module) {
+                imports.retain(|import| bindings.contains_key(import));
+            }
+        }
+    }
+
     pub fn insert_trait(&mut self, xeno_trait: &XenoTrait) {
         self.insert_metadata(&MetadataGraph::from_all_descriptors(
             &[],
@@ -634,6 +660,7 @@ impl TypeHierarchy {
     pub fn remove_module(&mut self, module: &str) {
         Arc::make_mut(&mut self.types).retain(|key, _| key.module_path.as_deref() != Some(module));
         Arc::make_mut(&mut self.module_imports).remove(module);
+        Arc::make_mut(&mut self.module_bindings).remove(module);
     }
 
     /// Retains canonical definitions for declarations that survived an edit.
@@ -2061,6 +2088,17 @@ impl TypeHierarchy {
                 .map(Vec::as_slice)
                 .unwrap_or(&[])
             {
+                if self
+                    .module_bindings
+                    .get(module_path)
+                    .is_some_and(|bindings| {
+                        !bindings
+                            .get(import)
+                            .is_some_and(|names| names.iter().any(|n| n == name))
+                    })
+                {
+                    continue;
+                }
                 let imported = TypeKey {
                     module_path: Some(import.clone()),
                     name: name.to_string(),

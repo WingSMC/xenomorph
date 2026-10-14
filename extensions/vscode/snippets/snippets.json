@@ -1,1 +1,12 @@
-{}
+{
+    "Import declarations": {
+        "prefix": "import",
+        "body": "import ${1:module}::{${2:Declaration}};",
+        "description": "Import named public declarations"
+    },
+    "Export declarations": {
+        "prefix": "pub import",
+        "body": "pub import ${1:module}::{${2:Declaration}};",
+        "description": "Re-export imported declarations"
+    }
+}

@@ -11,10 +11,9 @@ use xenomorph_common::{
         types::{DeclarationInfo, ModuleDiagnostic},
         XenoRegistry,
     },
-    parser::{
-        Annotation, Declaration, Expr, Literal, SimpleType, Type, XenoType as ParsedXenoType,
-    },
+    parser::Declaration,
     semantic::{
+        collect_source_type_occurrences, collect_static_type_references, collect_type_references,
         OwnedAnnotation, OwnedConstraint, OwnedSemanticType, OwnedTrait, OwnedTraitKind, OwnedType,
         TypeHierarchy,
     },
@@ -146,125 +145,6 @@ fn generic_parameter_target_at(
         }
     }
     None
-}
-
-fn collect_type_references(
-    (ty, annotations): &ParsedXenoType,
-    name: &str,
-    references: &mut Vec<TokenData>,
-    source: &str,
-) {
-    collect_type_references_from_type(ty, name, references, source);
-    for annotation in annotations {
-        collect_type_references_from_annotation(annotation, name, references, source);
-    }
-}
-
-fn collect_type_references_from_type(
-    ty: &Type,
-    name: &str,
-    references: &mut Vec<TokenData>,
-    source: &str,
-) {
-    match ty {
-        Type::Simple(ty) => collect_type_references_from_simple_type(ty, name, references, source),
-        Type::Tuple(types) | Type::Sum(types) | Type::Intersection(types) => {
-            for ty in types {
-                collect_type_references_from_simple_type(ty, name, references, source);
-            }
-        }
-        Type::Set(set) => {
-            if let Some(element_type) = &set.element_type {
-                collect_type_references_from_simple_type(element_type, name, references, source);
-            }
-            for literal in set.values.as_deref().unwrap_or_default() {
-                collect_type_references_from_literal(literal, name, references, source);
-            }
-        }
-        Type::Struct(fields) | Type::Enum(fields) => {
-            for (_, ty, _) in fields {
-                collect_type_references_from_simple_type(ty, name, references, source);
-            }
-        }
-    }
-}
-
-fn collect_type_references_from_simple_type(
-    ty: &SimpleType,
-    name: &str,
-    references: &mut Vec<TokenData>,
-    source: &str,
-) {
-    match ty {
-        SimpleType::Optional(inner) => {
-            collect_type_references_from_simple_type(inner, name, references, source)
-        }
-        SimpleType::Literal(literal) => {
-            collect_type_references_from_literal(literal, name, references, source);
-        }
-        SimpleType::Identifier(token, arguments) | SimpleType::Array(token, arguments) => {
-            if token.text(source) == name {
-                references.push(*token);
-            }
-            for argument in arguments.as_deref().unwrap_or_default() {
-                collect_type_references_from_simple_type(argument, name, references, source);
-            }
-        }
-    }
-}
-
-fn collect_type_references_from_literal(
-    literal: &Literal,
-    name: &str,
-    references: &mut Vec<TokenData>,
-    source: &str,
-) {
-    if let Some(target) = literal
-        .cast_target()
-        .filter(|target| target.text(source) == name)
-    {
-        references.push(target);
-    }
-}
-
-fn collect_type_references_from_annotation(
-    annotation: &Annotation,
-    name: &str,
-    references: &mut Vec<TokenData>,
-    source: &str,
-) {
-    for parameter in &annotation.params {
-        match parameter {
-            Expr::Regex(_) => {}
-            Expr::Annotation(annotation) => {
-                collect_type_references_from_annotation(annotation, name, references, source)
-            }
-            Expr::Type(ty) => collect_type_references_from_type(ty, name, references, source),
-        }
-    }
-}
-
-fn collect_static_type_references(ast: &[Declaration], name: &str, source: &str) -> Vec<TokenData> {
-    let mut references = Vec::new();
-    for declaration in ast {
-        let Declaration::Type { generics, ty, .. } = declaration else {
-            continue;
-        };
-        let generics = generics.as_deref().unwrap_or_default();
-        references.extend(
-            generics
-                .iter()
-                .filter_map(|(_, constraint)| *constraint)
-                .filter(|constraint| constraint.text(source) == name),
-        );
-        if !generics
-            .iter()
-            .any(|(parameter, _)| parameter.text(source) == name)
-        {
-            collect_type_references(ty, name, &mut references, source);
-        }
-    }
-    references
 }
 
 #[derive(Clone, Copy)]
@@ -586,7 +466,7 @@ async fn reload_runtime(
         .map_err(|error| format!("Runtime reload task failed: {error}"))??;
     let publications = {
         let documents = runtime.documents.lock().unwrap();
-        let graph = current_module_graph(&candidate);
+        let graph = candidate.module_graph();
         let mut uris: HashSet<Url> = documents.keys().cloned().collect();
         for registry in [&previous, &candidate] {
             for module in registry.module_cache.read().unwrap().values() {
@@ -621,20 +501,6 @@ async fn reload_runtime(
     Ok(())
 }
 
-fn current_module_graph(registry: &XenoRegistry) -> HashSet<String> {
-    let index = registry.index.read().unwrap();
-    let mut graph = HashSet::new();
-    let mut pending = vec![registry.entry.clone()];
-    while let Some(path) = pending.pop() {
-        if graph.insert(path.clone()) {
-            if let Some(module) = index.get(&path) {
-                pending.extend(module.imports.iter().cloned());
-            }
-        }
-    }
-    graph
-}
-
 /// Apply editor buffers in import order so newly imported open documents use
 /// their unsaved text, and unrelated documents do not become graph members.
 fn synchronize_documents(registry: &XenoRegistry, documents: &HashMap<Url, OpenDocument>) {
@@ -666,7 +532,7 @@ fn synchronize_documents(registry: &XenoRegistry, documents: &HashMap<Url, OpenD
             pending.extend(imports);
         }
     }
-    registry.retain_modules(&current_module_graph(registry));
+    registry.retain_modules(&registry.module_graph());
 }
 
 fn outside_module_graph_diagnostic(source: &str) -> Diagnostic {
@@ -780,6 +646,17 @@ fn diagnostics_for_module(errors: &[ModuleDiagnostic], module_path: &str) -> Vec
                 }),
                 message: error.message.clone(),
                 source: Some("xenomorph".to_string()),
+                tags: (!error.tags.is_empty()).then(|| {
+                    error
+                        .tags
+                        .iter()
+                        .map(|tag| match tag {
+                            xenomorph_common::XenoDiagnosticTag::Unnecessary => {
+                                DiagnosticTag::UNNECESSARY
+                            }
+                        })
+                        .collect()
+                }),
                 ..Default::default()
             })
         })
@@ -998,7 +875,7 @@ impl Backend {
                     }),
                     // For directories, append / to keep completing
                     insert_text: if is_dir {
-                        Some(format!("{}/", name))
+                        Some(format!("{}::", name))
                     } else {
                         None
                     },
@@ -1087,7 +964,7 @@ impl Backend {
                 .map(|module| module.read().unwrap().borrow_abs_path().to_path_buf())
                 .collect();
             synchronize_documents(&registry, &documents);
-            let graph = current_module_graph(&registry);
+            let graph = registry.module_graph();
             affected_paths.extend(
                 registry
                     .module_cache
@@ -1127,12 +1004,96 @@ impl Backend {
     fn get_context_completions(
         &self,
         tokens: &[Token],
-        _ast: &[Declaration],
+        ast: &[Declaration],
         source: &str,
         position: Position,
         module_path: Option<&str>,
     ) -> Vec<CompletionItem> {
         let mut items = Vec::new();
+
+        let document = xenomorph_common::SourceDocument::new(source.to_string());
+        if let Some(offset) = document.offset(position.line, position.character, true) {
+            let visible: Vec<_> = tokens
+                .iter()
+                .filter(|(_, token)| token.start < offset)
+                .collect();
+            let start = visible
+                .iter()
+                .rposition(|(kind, _)| *kind == TokenVariant::Semicolon)
+                .map_or(0, |i| i + 1);
+            if let Some((_, import)) = visible[start..]
+                .iter()
+                .find(|(kind, _)| *kind == TokenVariant::Import)
+            {
+                let tail = &source[import.end as usize..offset as usize];
+                let tail = tail.trim();
+                let (module, partial, in_group) =
+                    if let Some((module, names)) = tail.split_once('{') {
+                        (
+                            module.trim().trim_end_matches("::").trim().to_string(),
+                            names.rsplit(',').next().unwrap_or("").trim().to_string(),
+                            true,
+                        )
+                    } else if let Some((module, partial)) = tail.rsplit_once("::") {
+                        (module.to_string(), partial.to_string(), false)
+                    } else {
+                        (String::new(), tail.to_string(), false)
+                    };
+                if !in_group {
+                    items.extend(self.get_import_completions(tail));
+                }
+                if !module.is_empty() {
+                    let is_selected =
+                        |token: &TokenData| !(token.start <= offset && offset <= token.end);
+                    let mut imported: HashSet<_> = ast
+                        .iter()
+                        .filter_map(|declaration| match declaration {
+                            Declaration::Import { names, .. } => Some(names),
+                            _ => None,
+                        })
+                        .flatten()
+                        .filter(|token| is_selected(token))
+                        .map(|token| token.text(source))
+                        .collect();
+                    // An unfinished import is absent from the AST. Retain its
+                    // completed selections on either side of the cursor.
+                    let active: Vec<_> = tokens
+                        .iter()
+                        .skip_while(|(_, token)| token.start < import.start)
+                        .take_while(|(kind, _)| *kind != TokenVariant::Semicolon)
+                        .collect();
+                    if let Some(open) = active
+                        .iter()
+                        .position(|(kind, _)| *kind == TokenVariant::LCurly)
+                    {
+                        for pair in active[open + 1..].windows(2) {
+                            if pair[0].0 == TokenVariant::Identifier
+                                && matches!(pair[1].0, TokenVariant::Comma | TokenVariant::RCurly)
+                                && is_selected(&pair[0].1)
+                            {
+                                imported.insert(pair[0].1.text(source));
+                            }
+                        }
+                    }
+                    items.extend(
+                        self.registry
+                            .get_exported_declarations(&module.replace("::", "/"))
+                            .into_iter()
+                            .filter(|d| {
+                                d.name.starts_with(&partial) && !imported.contains(d.name.as_str())
+                            })
+                            .map(|d| {
+                                create_completion_item(
+                                    &d.name,
+                                    d.docs.as_deref(),
+                                    CompletionItemKind::CLASS,
+                                )
+                            }),
+                    );
+                }
+                return deduplicate_completions(items);
+            }
+        }
 
         if let Some((annotation_name, parameter_index)) =
             annotation_argument_context(tokens, source, position)
@@ -1159,8 +1120,14 @@ impl Backend {
                 label: "import".to_string(),
                 kind: Some(CompletionItemKind::KEYWORD),
                 detail: Some("Import a module".to_string()),
-                insert_text: Some("import ${1:module};".to_string()),
+                insert_text: Some("import ${1:module}::{${2:Declaration}};".to_string()),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
+                ..Default::default()
+            });
+            items.push(CompletionItem {
+                label: "pub".into(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                detail: Some("Export a declaration or import".into()),
                 ..Default::default()
             });
         };
@@ -1700,10 +1667,13 @@ impl LanguageServer for Backend {
             let token = Self::find_token_at_position(source, tokens, position)?;
 
             // If cursor is on an import line, navigate to the imported file
-            if token.0 == TokenVariant::Path {
+            if token.0 == TokenVariant::Identifier {
                 for decl in ast.iter() {
-                    if let Declaration::Import { path, .. } = decl {
-                        if path.join("/") == token.1.text(source) {
+                    if let Declaration::Import {
+                        path, path_tokens, ..
+                    } = decl
+                    {
+                        if path_tokens.contains(&token.1) {
                             let segments = path.to_vec();
                             if let Ok((_, abs_path)) = self.registry.resolve_import(
                                 &segments.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -1784,6 +1754,12 @@ impl LanguageServer for Backend {
                 if token.0 != TokenVariant::Identifier {
                     return None;
                 }
+                if generic_parameter_target_at(ast, &token.1, source).is_none()
+                    && !collect_source_type_occurrences(ast, token.1.text(source), source)
+                        .contains(&token.1)
+                {
+                    return None;
+                }
                 Some((
                     token.1.text(source).to_string(),
                     generic_parameter_target_at(ast, &token.1, source).map(|generic| {
@@ -1844,7 +1820,7 @@ impl LanguageServer for Backend {
 
             if let Some(mut module_locations) = self
                 .registry
-                .with_module(&module_path, |tokens, ast, module| {
+                .with_module(&module_path, |_, ast, module| {
                     let uri = Url::from_file_path(module.borrow_abs_path()).ok()?;
                     let source = module.borrow_source();
                     if target.is_none() {
@@ -1859,27 +1835,21 @@ impl LanguageServer for Backend {
                         );
                     }
                     Some(
-                        tokens
-                            .iter()
+                        collect_source_type_occurrences(ast, &searched_name, source)
+                            .into_iter()
                             .filter_map(|token| {
-                                if token.0 != TokenVariant::Identifier
-                                    || token.1.text(source) != searched_name
-                                {
-                                    return None;
-                                }
-
                                 if target.as_ref().is_some_and(|target| {
                                     !include_declaration
                                         && module_path == target.module_path
-                                        && token.1.line(source) == target.line
-                                        && token.1.column(source) == target.column
+                                        && token.line(source) == target.line
+                                        && token.column(source) == target.column
                                 }) {
                                     return None;
                                 }
 
                                 Some(Location {
                                     uri: uri.clone(),
-                                    range: token_to_editor_range(source, &token.1),
+                                    range: token_to_editor_range(source, &token),
                                 })
                             })
                             .collect::<Vec<Location>>(),
@@ -1955,10 +1925,15 @@ impl LanguageServer for Backend {
                 // Only allow declaration-local generic parameters and
                 // user-defined type declarations to be renamed.
                 let is_user_defined = generic_parameter_target_at(ast, &token.1, source).is_some()
-                    || ast.iter().any(|decl| match decl {
-                        Declaration::Import { .. } | Declaration::Custom { .. } => false,
-                        Declaration::Type { name, .. } => name.text(source) == token.1.text(source),
-                    });
+                    || (self
+                        .registry
+                        .find_declaration(
+                            module_path.as_deref().unwrap_or(""),
+                            token.1.text(source),
+                        )
+                        .is_some()
+                        && collect_source_type_occurrences(ast, token.1.text(source), source)
+                            .contains(&token.1));
 
                 if !is_user_defined {
                     return None;
@@ -2002,45 +1977,60 @@ impl LanguageServer for Backend {
                         .collect();
                     let mut changes = HashMap::new();
                     changes.insert(uri.clone(), edits);
-                    return Some(WorkspaceEdit {
-                        changes: Some(changes),
-                        ..Default::default()
-                    });
+                    return Some((
+                        old_name.to_string(),
+                        Some(WorkspaceEdit {
+                            changes: Some(changes),
+                            ..Default::default()
+                        }),
+                    ));
                 }
 
-                let is_user_defined = ast.iter().any(|decl| match decl {
-                    Declaration::Import { .. } | Declaration::Custom { .. } => false,
-                    Declaration::Type { name, .. } => name.text(source) == old_name,
-                });
+                let is_user_defined = self
+                    .registry
+                    .find_declaration(module_path.as_deref().unwrap_or(""), old_name)
+                    .is_some()
+                    && collect_source_type_occurrences(ast, old_name, source).contains(&token.1);
 
                 if !is_user_defined {
                     return None;
                 }
 
-                let edits: Vec<TextEdit> = tokens
-                    .iter()
-                    .filter(|t| t.0 == TokenVariant::Identifier && t.1.text(source) == old_name)
-                    .map(|t| TextEdit {
-                        range: token_to_editor_range(source, &t.1),
-                        new_text: new_name.clone(),
-                    })
-                    .collect();
-
-                if edits.is_empty() {
-                    return None;
-                }
-
-                let mut changes = HashMap::new();
-                changes.insert(uri.clone(), edits);
-
-                Some(WorkspaceEdit {
-                    changes: Some(changes),
-                    ..Default::default()
-                })
+                Some((old_name.to_string(), None))
             },
         );
 
-        Ok(result.flatten())
+        let Some((_, generic)) = result.flatten() else {
+            return Ok(None);
+        };
+        if generic.is_some() {
+            return Ok(generic);
+        }
+        let locations = self
+            .references(ReferenceParams {
+                text_document_position: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri },
+                    position,
+                },
+                context: ReferenceContext {
+                    include_declaration: true,
+                },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            })
+            .await?
+            .unwrap_or_default();
+        let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        for location in locations {
+            changes.entry(location.uri).or_default().push(TextEdit {
+                range: location.range,
+                new_text: new_name.clone(),
+            });
+        }
+        Ok(Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }))
     }
 }
 
@@ -2205,14 +2195,206 @@ mod tests {
     #[test]
     fn current_graph_follows_transitive_imports_and_cycles_and_excludes_cached_orphans() {
         let workspace = ReferenceWorkspace::new(&[
-            ("index", "import middle; type Root = string;"),
-            ("middle", "import leaf; type Middle = string;"),
-            ("leaf", "import middle; type Leaf = string;"),
+            ("index", "import middle::Middle; type Root = string;"),
+            ("middle", "import leaf::Leaf; type Middle = string;"),
+            ("leaf", "import middle::Middle; type Leaf = string;"),
             ("orphan", "type Orphan = string;"),
         ]);
         assert_eq!(
-            current_module_graph(&workspace.registry),
+            workspace.registry.module_graph(),
             HashSet::from(["index".into(), "middle".into(), "leaf".into()]),
+        );
+    }
+
+    #[test]
+    fn unused_diagnostics_follow_entry_exports_and_private_dependencies() {
+        let workspace = ReferenceWorkspace::new(&[
+            ("index", "pub import other::Api; type Unused = string;"),
+            (
+                "other",
+                "type Helper = string; pub type Api = Helper; pub type Spare = string;",
+            ),
+        ]);
+        let graph = workspace.registry.module_graph();
+        let uri = workspace.location("other", 0, 0, 0).uri;
+        let diagnostics = diagnostics_for_document(&workspace.registry, &graph, &uri, None);
+        let core_errors = workspace.registry.get_all_errors_for("other");
+        assert_eq!(diagnostics, diagnostics_for_module(&core_errors, "other"));
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|d| d
+                    .tags
+                    .as_ref()
+                    .is_some_and(|t| t.contains(&DiagnosticTag::UNNECESSARY)))
+                .count(),
+            1
+        );
+        assert_eq!(diagnostics[0].range.start.character, 45);
+        workspace.registry.load_module_from_source(
+            &workspace.directory.join("index.xen"),
+            "import other::Api; type Unused = string;".into(),
+        );
+        let diagnostics = diagnostics_for_document(&workspace.registry, &graph, &uri, None);
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|d| d
+                    .tags
+                    .as_ref()
+                    .is_some_and(|t| t.contains(&DiagnosticTag::UNNECESSARY)))
+                .count(),
+            3
+        );
+        let index_uri = workspace.location("index", 0, 0, 0).uri;
+        let diagnostics = diagnostics_for_document(&workspace.registry, &graph, &index_uri, None);
+        let import = diagnostics
+            .iter()
+            .find(|d| d.message == "Unused import 'Api'.")
+            .unwrap();
+        assert_eq!(
+            import.range,
+            Range::new(Position::new(0, 14), Position::new(0, 17))
+        );
+        assert_eq!(import.severity, Some(DiagnosticSeverity::WARNING));
+        assert_eq!(import.tags, Some(vec![DiagnosticTag::UNNECESSARY]));
+    }
+
+    #[tokio::test]
+    async fn import_completions_offer_only_public_declarations_in_groups_and_single_paths() {
+        let workspace = ReferenceWorkspace::new(&[
+            ("index", "pub import other::Open;"),
+            (
+                "other",
+                "pub type Open = string; pub type Fresh = number; type Private = string;",
+            ),
+            ("barrel", "pub import other::Open;"),
+        ]);
+        let registry = Arc::clone(&workspace.registry);
+        let (service, _socket) = LspService::new(|client| Backend {
+            client,
+            registry: Arc::clone(&registry),
+            runtime: Arc::new(RuntimeState {
+                registry: RwLock::new(registry),
+                documents: Mutex::new(HashMap::new()),
+                updates: tokio::sync::Mutex::new(()),
+                coordinator: Mutex::new(()),
+                config_watcher: Mutex::new(None),
+                stopped: std::sync::atomic::AtomicBool::new(false),
+            }),
+        });
+        std::fs::write(
+            workspace.directory.join("uncached.xen"),
+            "pub type Open = string; type Private = string;",
+        )
+        .unwrap();
+        for source in [
+            "pub import other::{",
+            "import other::",
+            "import other::{O",
+            "// imports\npub import other::{",
+            "import uncached::{O",
+        ] {
+            let tokens = Lexer::tokenize(source).unwrap();
+            let doc = xenomorph_common::SourceDocument::new(source.to_string());
+            let (line, character) = doc.position(source.len() as u32, true);
+            let items = service.inner().get_context_completions(
+                &tokens,
+                &[],
+                source,
+                Position::new(line, character),
+                Some("index"),
+            );
+            assert!(
+                items.iter().any(|item| item.label == "Open"),
+                "{source}: {items:?}"
+            );
+            assert!(!items.iter().any(|item| item.label == "Private"));
+        }
+        for (template, expected) in [
+            ("import other::Open; import other::{|", vec!["Fresh"]),
+            ("pub import barrel::Open; import other::{|", vec!["Fresh"]),
+            ("import other::{Open, |", vec!["Fresh"]),
+            ("import other::{|, Open};", vec!["Fresh"]),
+            ("import other::{Fresh, |Open};", vec!["Open"]),
+            ("import other::{Open}; import other::|", vec!["Fresh"]),
+            ("import other::{|}; import other::Open;", vec!["Fresh"]),
+            ("import other::{O|pen};", vec!["Open"]),
+            ("import other::{// \u{1f600}\nOpen, |", vec!["Fresh"]),
+        ] {
+            let offset = template.find('|').unwrap() as u32;
+            let source = template.replace('|', "");
+            let tokens = Lexer::tokenize(&source).unwrap();
+            let (ast, _) = xenomorph_common::parser::Parser::parse(&tokens, &source);
+            let document = xenomorph_common::SourceDocument::new(source.clone());
+            let (line, character) = document.position(offset, true);
+            let items = service.inner().get_context_completions(
+                &tokens,
+                &ast,
+                &source,
+                Position::new(line, character),
+                Some("index"),
+            );
+            let mut names: Vec<_> = items.iter().map(|item| item.label.as_str()).collect();
+            names.sort_unstable();
+            assert_eq!(names, expected, "{template}");
+        }
+        assert!(!workspace
+            .registry
+            .index
+            .read()
+            .unwrap()
+            .contains_key("uncached"));
+    }
+
+    #[tokio::test]
+    async fn rename_updates_imported_names_and_declarations_without_changing_paths_or_fields() {
+        let workspace = ReferenceWorkspace::new(&[
+            ("index", "pub import Named::Named;"),
+            ("Named", "pub type Named = { Named: string };"),
+        ]);
+        let registry = Arc::clone(&workspace.registry);
+        let (service, _socket) = LspService::new(|client| Backend {
+            client,
+            registry: Arc::clone(&registry),
+            runtime: Arc::new(RuntimeState {
+                registry: RwLock::new(registry),
+                documents: Mutex::new(HashMap::new()),
+                updates: tokio::sync::Mutex::new(()),
+                coordinator: Mutex::new(()),
+                config_watcher: Mutex::new(None),
+                stopped: std::sync::atomic::AtomicBool::new(false),
+            }),
+        });
+        let result = service
+            .inner()
+            .rename(RenameParams {
+                text_document_position: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier {
+                        uri: workspace.location("index", 0, 0, 0).uri,
+                    },
+                    position: Position::new(0, 19),
+                },
+                new_name: "Renamed".into(),
+                work_done_progress_params: Default::default(),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let changes = result.changes.unwrap();
+        assert_eq!(
+            changes[&workspace.location("index", 0, 0, 0).uri],
+            vec![TextEdit {
+                range: workspace.location("index", 0, 18, 23).range,
+                new_text: "Renamed".into()
+            }]
+        );
+        assert_eq!(
+            changes[&workspace.location("Named", 0, 0, 0).uri],
+            vec![TextEdit {
+                range: workspace.location("Named", 0, 9, 14).range,
+                new_text: "Renamed".into()
+            }]
         );
     }
 
@@ -2227,14 +2409,14 @@ mod tests {
             (
                 workspace.location("index", 0, 0, 0).uri,
                 OpenDocument {
-                    text: "import middle; type Root = string;".into(),
+                    text: "import middle::Middle; type Root = string;".into(),
                     version: 1,
                 },
             ),
             (
                 workspace.location("middle", 0, 0, 0).uri,
                 OpenDocument {
-                    text: "import leaf; type Middle = string;".into(),
+                    text: "import leaf::Leaf; type Middle = string;".into(),
                     version: 1,
                 },
             ),
@@ -2248,7 +2430,7 @@ mod tests {
         ]);
         synchronize_documents(&workspace.registry, &documents);
         assert_eq!(
-            current_module_graph(&workspace.registry),
+            workspace.registry.module_graph(),
             HashSet::from(["index".into(), "middle".into(), "leaf".into()]),
         );
         assert!(workspace
@@ -2260,7 +2442,7 @@ mod tests {
     #[tokio::test]
     async fn older_document_versions_cannot_restore_removed_imports() {
         let workspace = ReferenceWorkspace::new(&[
-            ("index", "import other; type Root = string;"),
+            ("index", "import other::Other; type Root = string;"),
             ("other", "type Other = string; type Root = string;"),
         ]);
         assert!(!workspace.registry.get_all_errors_for("index").is_empty());
@@ -2280,13 +2462,17 @@ mod tests {
         let uri = workspace.location("index", 0, 0, 0).uri;
         let backend = service.inner();
         backend
-            .validate_document(&uri, "// import other;\ntype Root = string;".into(), 3)
+            .validate_document(
+                &uri,
+                "// import other::Other;\ntype Root = string;".into(),
+                3,
+            )
             .await;
         backend
-            .validate_document(&uri, "import other;\ntype Root = string;".into(), 2)
+            .validate_document(&uri, "import other::Other;\ntype Root = string;".into(), 2)
             .await;
         assert_eq!(
-            current_module_graph(&workspace.registry),
+            workspace.registry.module_graph(),
             HashSet::from(["index".into()])
         );
         assert!(workspace
@@ -2301,7 +2487,17 @@ mod tests {
             .get_type_in(Some("other"), "Other")
             .is_none());
         assert_eq!(backend.runtime.documents.lock().unwrap()[&uri].version, 3);
-        assert!(workspace.registry.get_all_errors_for("index").is_empty());
+        let diagnostics = workspace.registry.get_all_errors_for("index");
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].severity, XenoDiagSeverity::Info);
+        assert_eq!(
+            diagnostics[0].message,
+            "Not used by the entry module's exports."
+        );
+        assert_eq!(
+            diagnostics[0].tags,
+            [xenomorph_common::XenoDiagnosticTag::Unnecessary]
+        );
     }
 
     #[tokio::test]
@@ -2399,25 +2595,26 @@ mod tests {
     #[tokio::test]
     async fn references_keep_source_declarations_scoped_and_honor_include_declaration() {
         let workspace = ReferenceWorkspace::new(&[
-            ("index", "type Named = string; type Alias = Named;"),
-            ("other", "import index; type Other = Named;"),
+            ("index", "pub type Named = string; type Alias = Named;"),
+            ("other", "import index::Named; type Other = Named;"),
             ("unrelated", "type Named = u64; type Separate = Named;"),
         ]);
         let expected = vec![
-            workspace.location("index", 0, 34, 39),
-            workspace.location("other", 0, 27, 32),
+            workspace.location("index", 0, 38, 43),
+            workspace.location("other", 0, 14, 19),
+            workspace.location("other", 0, 34, 39),
         ];
         assert_eq!(
             workspace
-                .references("other", Position::new(0, 28), false)
+                .references("other", Position::new(0, 35), false)
                 .await,
             Some(expected.clone())
         );
         assert_eq!(
             workspace
-                .references("index", Position::new(0, 6), true)
+                .references("index", Position::new(0, 10), true)
                 .await,
-            Some([vec![workspace.location("index", 0, 5, 10)], expected].concat())
+            Some([vec![workspace.location("index", 0, 9, 14)], expected].concat())
         );
     }
 
@@ -2459,6 +2656,7 @@ mod tests {
     fn diagnostic_ending_inside_crlf_stops_at_the_content_column() {
         let source = xenomorph_common::SourceDocument::new("a\u{e9}\u{1f600}\r\nnext".into());
         let errors = [ModuleDiagnostic {
+            tags: vec![xenomorph_common::XenoDiagnosticTag::Unnecessary],
             module_path: "test".into(),
             message: "boundary diagnostic".into(),
             location: Some((0, 1, 7)),
@@ -2470,6 +2668,7 @@ mod tests {
             diagnostics[0].range,
             Range::new(Position::new(0, 1), Position::new(0, 4))
         );
+        assert_eq!(diagnostics[0].tags, Some(vec![DiagnosticTag::UNNECESSARY]));
     }
 
     fn context_at_end(source: &str) -> Option<(String, usize)> {
@@ -2644,6 +2843,7 @@ mod tests {
     fn diagnostics_are_only_published_for_their_own_module() {
         let errors = vec![
             ModuleDiagnostic {
+                tags: vec![],
                 module_path: "parser/p1".to_string(),
                 message: "p1 error".to_string(),
                 location: Some((1, 2, 3)),
@@ -2651,6 +2851,7 @@ mod tests {
                 severity: XenoDiagSeverity::Err,
             },
             ModuleDiagnostic {
+                tags: vec![],
                 module_path: "parser/p2".to_string(),
                 message: "p2 error".to_string(),
                 location: Some((4, 5, 6)),

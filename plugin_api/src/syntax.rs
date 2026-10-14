@@ -6,10 +6,14 @@ use std::fmt;
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub enum Declaration {
     Import {
+        public: Option<TokenData>,
         path: Vec<String>,
+        path_tokens: Vec<TokenData>,
+        names: Vec<TokenData>,
         location: TokenData,
     },
     Type {
+        public: Option<TokenData>,
         docs: Option<String>,
         name: TokenData,
         generics: Option<Vec<(TokenData, Option<TokenData>)>>,
@@ -18,12 +22,31 @@ pub enum Declaration {
         to: TokenData,
     },
     Custom {
+        public: Option<TokenData>,
         plugin_id: String,
         decl_id: String,
         docs: Option<String>,
         name: Option<TokenData>,
         value: Vec<u8>,
     },
+}
+
+impl Declaration {
+    pub fn public(&self) -> Option<TokenData> {
+        match self {
+            Self::Import { public, .. }
+            | Self::Type { public, .. }
+            | Self::Custom { public, .. } => *public,
+        }
+    }
+
+    pub fn set_public(&mut self, visibility: Option<TokenData>) {
+        match self {
+            Self::Import { public, .. }
+            | Self::Type { public, .. }
+            | Self::Custom { public, .. } => *public = visibility,
+        }
+    }
 }
 
 // pub type BinaryExpr<'src> = Box<(Expr, Expr)>;
@@ -198,9 +221,17 @@ pub enum Expr {
 impl fmt::Debug for Declaration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Declaration::Import { path, location } => f
+            Declaration::Import {
+                path,
+                names,
+                public,
+                location,
+                ..
+            } => f
                 .debug_struct("Import")
+                .field("public", public)
                 .field("path", path)
+                .field("names", names)
                 .field("location", location)
                 .finish(),
             Declaration::Type {
@@ -210,8 +241,10 @@ impl fmt::Debug for Declaration {
                 ty,
                 from,
                 to,
+                public,
             } => f
                 .debug_struct("Type")
+                .field("public", public)
                 .field("docs", docs)
                 .field("name", name)
                 .field("generics", generics)
@@ -380,6 +413,8 @@ pub enum TokenVariant {
 
     Documentation = 33,
     Path = 34,
+    Pub = 35,
+    PathSeparator = 36,
 }
 
 pub type Token = (TokenVariant, TokenData);
@@ -471,8 +506,23 @@ impl Declaration {
                 }
             }
         }
+        let visibility = self.public().map(|mut token| {
+            range(&mut token, delta);
+            token
+        });
+        self.set_public(visibility);
         match self {
-            Self::Import { location, .. } => range(location, delta),
+            Self::Import {
+                location,
+                path_tokens,
+                names,
+                ..
+            } => {
+                range(location, delta);
+                for token in path_tokens.iter_mut().chain(names) {
+                    range(token, delta);
+                }
+            }
             Self::Type {
                 name,
                 generics,

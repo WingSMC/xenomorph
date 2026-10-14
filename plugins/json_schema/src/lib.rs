@@ -709,6 +709,17 @@ impl<'src> AnalyzerListener<'src> for JsonSchemaGenerator {
         };
 
         for decl in ast {
+            if let Declaration::Import {
+                public: Some(_),
+                names,
+                ..
+            } = decl
+            {
+                for name in names {
+                    let text = name.text(&self.source);
+                    self.defs.insert(text.to_string(), self.ref_for(text));
+                }
+            }
             if let Declaration::Type {
                 docs,
                 name,

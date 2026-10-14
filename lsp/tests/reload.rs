@@ -179,7 +179,7 @@ fn formatting_disconnected_documents_uses_the_current_complete_buffer() {
     fs::create_dir(&directory).unwrap();
     fs::write(
         directory.join("index.xen"),
-        "import other;\ntype Root = string;",
+        "pub import other::Other;\ntype Root = string;",
     )
     .unwrap();
     fs::write(directory.join("other.xen"), "type Saved = string;").unwrap();
@@ -190,7 +190,7 @@ fn formatting_disconnected_documents_uses_the_current_complete_buffer() {
     server.request(1, "initialize", json!({ "capabilities": {} }));
     server.notification("initialized", json!({}));
     server.wait_for_log("Language Server initialized");
-    server.open(&entry, "import other;\ntype Root = string;");
+    server.open(&entry, "pub import other::Other;\ntype Root = string;");
     server.diagnostics(&entry);
     server.diagnostics(&other);
     let source = "// \u{1f600} draft\r\ntype Draft=string;\r\ntype Tail=number;";
@@ -210,7 +210,11 @@ fn formatting_disconnected_documents_uses_the_current_complete_buffer() {
             "start": { "line": 0, "character": 0 }, "end": { "line": 2, "character": 17 }
         })
     );
-    server.change(&entry, 2, "// import other;\ntype Root = string;");
+    server.change(
+        &entry,
+        2,
+        "// pub import other::Other;\ntype Root = string;",
+    );
     server.diagnostics(&entry);
     server.diagnostics(&other);
     let edited = source.replace("Draft", "Edited");
@@ -262,7 +266,7 @@ fn formatting_disconnected_documents_uses_the_current_complete_buffer() {
         symbols["result"].is_null(),
         "Standalone formatting added a module: {symbols}"
     );
-    server.change(&entry, 3, "import other;\ntype Root = string;");
+    server.change(&entry, 3, "pub import other::Other;\ntype Root = string;");
     server.diagnostics(&entry);
     server.diagnostics(&other);
     let symbols = server.request(
@@ -297,10 +301,10 @@ fn rapid_import_toggles_leave_the_latest_diagnostic_visible() {
     fs::create_dir(&directory).unwrap();
     fs::write(
         directory.join("index.xen"),
-        "import other;\ntype Root = string;",
+        "pub import other::Other;\ntype Root = string;",
     )
     .unwrap();
-    fs::write(directory.join("other.xen"), "type Other = string;").unwrap();
+    fs::write(directory.join("other.xen"), "pub type Other = string;").unwrap();
     config(&directory, &[]);
     let entry = Url::from_file_path(directory.join("index.xen")).unwrap();
     let other = Url::from_file_path(directory.join("other.xen")).unwrap();
@@ -308,19 +312,19 @@ fn rapid_import_toggles_leave_the_latest_diagnostic_visible() {
     server.request(1, "initialize", json!({ "capabilities": {} }));
     server.notification("initialized", json!({}));
     server.wait_for_log("Language Server initialized");
-    server.open(&entry, "import other;\ntype Root = string;");
+    server.open(&entry, "pub import other::Other;\ntype Root = string;");
     server.diagnostics(&entry);
     server.diagnostics(&other);
-    server.open(&other, "type Other = string;");
+    server.open(&other, "pub type Other = string;");
     server.diagnostics(&entry);
     server.diagnostics(&other);
 
     for batch in 0..10 {
         for edit in 0..50 {
             let text = if (edit + batch) % 2 == 0 {
-                "import other;\ntype Root = string;"
+                "pub import other::Other;\ntype Root = string;"
             } else {
-                "// import other;\ntype Root = string;"
+                "// pub import other::Other;\ntype Root = string;"
             };
             server.change(&entry, 2 + batch * 50 + edit, text);
         }
@@ -419,7 +423,7 @@ fn files_outside_the_module_graph_are_dimmed_and_update_with_imports_and_reload(
     assert_eq!(server.diagnostics(&other), expected);
 
     // Connecting an already open file must validate its unsaved text.
-    server.open(&entry, "import other; type Root = string;");
+    server.open(&entry, "import other::Other; type Root = string;");
     let diagnostics = server.diagnostics(&other);
     assert!(
         diagnostics.as_array().unwrap().iter().any(|diagnostic| {
@@ -432,6 +436,7 @@ fn files_outside_the_module_graph_are_dimmed_and_update_with_imports_and_reload(
         .as_array()
         .unwrap()
         .iter()
+        .filter(|diagnostic| diagnostic["severity"] == 1)
         .all(|diagnostic| diagnostic["tags"].is_null()));
     let symbols = server.request(
         3,
@@ -483,7 +488,7 @@ fn files_outside_the_module_graph_are_dimmed_and_update_with_imports_and_reload(
     );
     assert!(symbols["result"].is_null(), "{symbols}");
 
-    server.change(&entry, 3, "import other; type Root = string;");
+    server.change(&entry, 3, "import other::Other; type Root = string;");
     let diagnostics = server.diagnostics(&other);
     assert!(diagnostics
         .as_array()

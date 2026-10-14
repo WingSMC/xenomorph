@@ -21,7 +21,11 @@ impl Workspace {
                 .as_nanos()
         ));
         fs::create_dir(&path).unwrap();
-        fs::write(path.join("index.xen"), "type Example = { value: string };").unwrap();
+        fs::write(
+            path.join("index.xen"),
+            "pub type Example = { value: string };",
+        )
+        .unwrap();
         Self(path)
     }
 
@@ -103,6 +107,87 @@ fn authoritative_config_drives_all_generator_output_paths() {
         .is_file());
     assert_eq!(registry.plugins.len(), 3);
     assert!(registry.plugins.iter().all(LoadedPlugin::is_loaded));
+}
+
+#[test]
+#[ignore = "Build workspace cdylibs first: cargo build --workspace"]
+fn generators_only_receive_entry_exports_and_their_dependencies() {
+    let workspace = Workspace::new();
+    fs::write(workspace.0.join("index.xen"), "pub import barrel::Api; import other::Spare; type Local = Api; pub type Root = Local; type Unused = Missing;").unwrap();
+    fs::write(workspace.0.join("barrel.xen"), "pub import other::Api;").unwrap();
+    fs::write(
+        workspace.0.join("other.xen"),
+        "type Helper = string; pub type Api = { id: Helper }; pub type Spare = number;",
+    )
+    .unwrap();
+    let config = workspace.config(
+        &plugin_directory(),
+        &[
+            "xenomorph_typescript",
+            "xenomorph_java",
+            "xenomorph_json_schema",
+        ],
+    );
+    let registry = XenoRegistry::load_workspace_with_config(config, true).unwrap();
+    let diagnostics = registry.get_all_errors_for("index");
+    assert!(diagnostics
+        .iter()
+        .any(|d| d.message == "Unused import 'Spare'."
+            && d.severity == crate::XenoDiagSeverity::Warn
+            && d.tags.contains(&crate::XenoDiagnosticTag::Unnecessary)));
+    assert!(diagnostics
+        .iter()
+        .any(|d| d.message == "Not used by the entry module's exports."));
+    assert!(!diagnostics
+        .iter()
+        .any(|d| d.message == "Unused import 'Api'."));
+    let entry = fs::read_to_string(workspace.0.join("index.ts")).unwrap();
+    assert!(
+        entry.contains("export type { Api } from \"./other\";"),
+        "{entry}"
+    );
+    assert!(entry.contains("export type Root = Local;"));
+    assert!(!entry.contains("Spare") && !entry.contains("Unused") && !entry.contains("Missing"));
+    let other = fs::read_to_string(workspace.0.join("other.ts")).unwrap();
+    assert!(other.contains("type Helper = string;"));
+    assert!(!other.contains("export type Helper"));
+    assert!(other.contains("export interface Api"));
+    assert!(!other.contains("Spare"));
+    let schema: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(workspace.0.join("index.schema.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        schema["$defs"]["Api"]["$ref"],
+        "./other.schema.json#/$defs/Api"
+    );
+    assert_eq!(
+        schema["$defs"]["Local"]["$ref"],
+        "./other.schema.json#/$defs/Api"
+    );
+    assert_eq!(schema["$defs"]["Root"]["$ref"], "#/$defs/Local");
+    let schema: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(workspace.0.join("other.schema.json")).unwrap())
+            .unwrap();
+    assert_eq!(schema["$defs"]["Helper"]["type"], "string");
+    assert_eq!(
+        schema["$defs"]["Api"]["properties"]["id"]["$ref"],
+        "#/$defs/Helper"
+    );
+    assert!(schema["$defs"].get("Spare").is_none());
+    assert!(workspace.0.join("Api.java").is_file());
+    assert!(!workspace.0.join("Unused.java").exists());
+    assert!(!workspace.0.join("Spare.java").exists());
+    registry.load_module_from_source(
+        &workspace.0.join("index.xen"),
+        "pub import other::Spare;".into(),
+    );
+    assert!(registry.get_all_errors_for("index").is_empty());
+    let other = fs::read_to_string(workspace.0.join("other.ts")).unwrap();
+    assert!(other.contains("Spare"));
+    assert!(
+        !other.contains("Api") && !other.contains("Helper"),
+        "{other}"
+    );
 }
 
 #[test]

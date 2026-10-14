@@ -102,12 +102,14 @@ mod tests {
     }
 
     #[test]
-    fn imports_are_lexed_as_one_path_token() {
+    fn imports_lex_identifiers_and_namespace_separators() {
         assert_eq!(
             tok(source::IMPORT),
             vec![
                 (TokenVariant::Import, "import"),
-                (TokenVariant::Path, "foo2/bar_3"),
+                (TokenVariant::Identifier, "foo2"),
+                (TokenVariant::PathSeparator, "::"),
+                (TokenVariant::Identifier, "bar_3"),
                 (TokenVariant::Semicolon, ";"),
             ]
         );
@@ -186,7 +188,9 @@ mod tests {
             tok(source::IMPORT_DELIMITER),
             vec![
                 (TokenVariant::Import, "import"),
-                (TokenVariant::Path, "foo/bar"),
+                (TokenVariant::Identifier, "foo"),
+                (TokenVariant::PathSeparator, "::"),
+                (TokenVariant::Identifier, "bar"),
                 (TokenVariant::Semicolon, ";"),
             ]
         );
@@ -203,7 +207,9 @@ mod tests {
             tok(source::IMPORT_EOF),
             vec![
                 (TokenVariant::Import, "import"),
-                (TokenVariant::Path, "foo/bar"),
+                (TokenVariant::Identifier, "foo"),
+                (TokenVariant::PathSeparator, "::"),
+                (TokenVariant::Identifier, "bar"),
             ]
         );
     }
@@ -244,7 +250,7 @@ mod incremental {
     use crate::lexer::Lexer;
     #[test]
     fn edits_match_full_lexing_across_all_lexical_boundaries() {
-        let source="/** docs\nmore */ import models/user; type A = { key: \"hello\nworld\", value: number } @match(/a+/); /* ignored */ type B = |A|number;";
+        let source="/** docs\nmore */ import models::user::User; type A = { key: \"hello\nworld\", value: number } @match(/a+/); /* ignored */ type B = |A|number;";
         let old = Lexer::lex(source);
         assert!(old.error.is_none());
         for offset in source

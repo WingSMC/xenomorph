@@ -3,7 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
+mod bindings;
 pub mod types;
+pub(crate) use bindings::in_scope;
 
 use crate::config::Config;
 use crate::lexer::{Lexed, Lexer, Token, XenoTokens};
@@ -97,6 +99,7 @@ impl ModuleData {
             location: Some((line, column, error.location.len())),
             phase,
             severity: error.severity,
+            tags: error.tags,
         }
     }
     fn update(&mut self, source: String, hash: u64) {
@@ -171,6 +174,7 @@ impl ModuleData {
                     Some((
                         text.clone(),
                         DeclarationInfo {
+                            public: d.public().is_some(),
                             name: text.clone(),
                             module_path: self.module_path.clone(),
                             abs_path: self.abs_path.clone(),
@@ -205,10 +209,40 @@ impl ModuleData {
 
 #[derive(Clone)]
 pub struct ModuleSummary {
+    pub bindings: Vec<bindings::ImportBinding>,
+    pub dependencies: HashMap<String, HashSet<String>>,
     pub abs_path: PathBuf,
     pub imports: Vec<ModulePath>,
     pub declarations: HashMap<String, DeclarationInfo>,
     pub references: HashSet<String>,
+}
+
+impl ModuleSummary {
+    pub(crate) fn from_module(module: &ModuleData) -> Self {
+        Self {
+            abs_path: module.abs_path.clone(),
+            imports: module.imports.clone(),
+            declarations: module.declarations.clone(),
+            bindings: bindings::import_bindings(module.borrow_ast(), module.borrow_source()),
+            dependencies: module
+                .borrow_ast()
+                .iter()
+                .filter_map(|d| match d {
+                    Declaration::Type { name, .. } => Some((
+                        name.text(module.borrow_source()).into(),
+                        crate::semantic::declaration_dependencies(d, module.borrow_source()),
+                    )),
+                    _ => None,
+                })
+                .collect(),
+            references: module
+                .borrow_tokens()
+                .iter()
+                .filter(|(kind, _)| *kind == crate::lexer::TokenVariant::Identifier)
+                .map(|(_, token)| token.text(module.borrow_source()).into())
+                .collect(),
+        }
+    }
 }
 
 struct Change {
@@ -221,6 +255,7 @@ fn get_root(config: &Config) -> Result<(PathBuf, String), ModuleDiagnostic> {
     let mut joined = config.workdir.join(Path::new(&config.parser.entry));
     joined.add_extension("xen");
     let entry_file = joined.canonicalize().map_err(|e| ModuleDiagnostic {
+        tags: vec![],
         module_path: config.parser.entry.clone(),
         message: format!("Cannot resolve entry file '{:?}': {}", joined, e),
         location: None,
@@ -229,6 +264,7 @@ fn get_root(config: &Config) -> Result<(PathBuf, String), ModuleDiagnostic> {
     })?;
 
     let root_err = || ModuleDiagnostic {
+        tags: vec![],
         module_path: config.parser.entry.clone(),
         message: format!(
             "Cannot determine workspace root from entry file '{}'",
@@ -252,6 +288,7 @@ fn get_root(config: &Config) -> Result<(PathBuf, String), ModuleDiagnostic> {
             .and_then(|s| s.to_str())
             .map(|s| s.to_string())
             .ok_or_else(|| ModuleDiagnostic {
+                tags: vec![],
                 module_path: config.parser.entry.clone(),
                 message: format!(
                     "Entry file '{}' does not have a valid stem",
@@ -330,6 +367,7 @@ impl XenoRegistry {
 
     fn runtime_error(message: String) -> ModuleDiagnostic {
         ModuleDiagnostic {
+            tags: vec![],
             module_path: String::new(),
             message,
             location: None,
@@ -384,6 +422,7 @@ impl XenoRegistry {
         let path_res = PathBuf::from(uri)
             .canonicalize()
             .map_err(|e| ModuleDiagnostic {
+                tags: vec![],
                 module_path: uri.to_string(),
                 message: format!("Cannot resolve URI '{}': {}", uri, e),
                 location: None,
@@ -399,6 +438,7 @@ impl XenoRegistry {
             Ok(r) => r,
             Err(e) => {
                 return vec![ModuleDiagnostic {
+                    tags: vec![],
                     module_path: uri.to_string(),
                     message: format!(
                         "URI '{}' is not within workspace root '{}': {}",
@@ -433,6 +473,7 @@ impl XenoRegistry {
             Some(mp) => mp,
             None => {
                 return vec![ModuleDiagnostic {
+                    tags: vec![],
                     module_path: abs_path.to_string_lossy().to_string(),
                     message: format!(
                         "Path '{}' is not within workspace root '{}'",
@@ -450,6 +491,7 @@ impl XenoRegistry {
             Ok(p) => p,
             Err(e) => {
                 return vec![ModuleDiagnostic {
+                    tags: vec![],
                     module_path,
                     message: format!("Cannot canonicalize '{}': {}", abs_path.display(), e),
                     location: None,
@@ -535,17 +577,7 @@ impl XenoRegistry {
         if self.config.debug.ast {
             eprint!("{:?}", module.borrow_ast());
         }
-        let summary = ModuleSummary {
-            abs_path: module.abs_path.clone(),
-            imports: module.imports.clone(),
-            declarations: module.declarations.clone(),
-            references: module
-                .borrow_tokens()
-                .iter()
-                .filter(|(kind, _)| *kind == crate::lexer::TokenVariant::Identifier)
-                .map(|(_, r)| r.text(module.borrow_source()).to_string())
-                .collect(),
-        };
+        let summary = ModuleSummary::from_module(&module);
         names.extend(summary.declarations.keys().cloned());
         let mut hierarchy = self.hierarchy.write().unwrap();
         hierarchy.retain_module_declarations(
@@ -636,6 +668,7 @@ impl XenoRegistry {
             affected
         };
         let owners = self.collision_owners();
+        self.refresh_bindings();
         let (order, blocked) = self.graph_order();
         // Kahn's remaining vertices are cycles and every importer of a cycle.
         for path in blocked {
@@ -652,7 +685,14 @@ impl XenoRegistry {
                     }
                     _ => None,
                 });
-                module.module_errors.push(ModuleDiagnostic{module_path:path,message:"Module dependency cycle; semantic scans are deferred until the cycle is removed".into(),location,phase:ErrorPhase::Module,severity:XenoDiagSeverity::Err});
+                module.module_errors.push(ModuleDiagnostic {
+                    tags: vec![],
+                    module_path: path,
+                    message: "Module dependency cycle; semantic scans are deferred until the cycle is removed".into(),
+                    location,
+                    phase: ErrorPhase::Module,
+                    severity: XenoDiagSeverity::Err,
+                });
             }
         }
         for path in order {
@@ -660,9 +700,43 @@ impl XenoRegistry {
                 .get_all_errors_for(&path)
                 .iter()
                 .any(|d| d.message.starts_with("Module dependency cycle"));
-            if affected.contains(&path) || was_blocked {
+            if self.analyzer.generation_mode
+                || self
+                    .plugins
+                    .iter()
+                    .any(|p| p.capabilities & crate::plugins::abi::ANALYZER != 0)
+                || affected.contains(&path)
+                || was_blocked
+            {
                 self.revalidate_cached_module(&path, &owners);
             }
+        }
+        self.refresh_usage_diagnostics();
+    }
+
+    /// Recompute cheap usage hints across the graph even when semantic scans
+    /// are reused. Changing entry exports can change usage in unchanged files.
+    fn refresh_usage_diagnostics(&self) {
+        let index = self.index.read().unwrap().clone();
+        let reachable = bindings::reachable(&index, &self.entry);
+        let handles = self.module_cache.read().unwrap().clone();
+        for (path, handle) in handles {
+            let mut module = handle.write().unwrap();
+            module
+                .analyzer_errors
+                .retain(|d| !d.tags.contains(&crate::XenoDiagnosticTag::Unnecessary));
+            let diagnostics = crate::semantic::analyze_usage(
+                module.borrow_ast(),
+                module.borrow_source(),
+                &path,
+                &self.imported_types(&index, &path),
+                Some(&reachable),
+            );
+            let diagnostics: Vec<_> = diagnostics
+                .into_iter()
+                .map(|d| module.diagnostic(d, ErrorPhase::Analyzer))
+                .collect();
+            module.analyzer_errors.extend(diagnostics);
         }
     }
 
@@ -716,9 +790,15 @@ impl XenoRegistry {
     }
     fn collision_owners(&self) -> BTreeMap<String, BTreeSet<String>> {
         let index = self.index.read().unwrap();
+        let reachable = bindings::reachable(&index, &self.entry);
         let mut owners: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for (path, module) in index.iter() {
             for name in module.declarations.keys() {
+                if self.analyzer.generation_mode
+                    && !reachable.contains(&(path.clone(), name.clone()))
+                {
+                    continue;
+                }
                 owners.entry(name.clone()).or_default().insert(path.clone());
             }
         }
@@ -731,9 +811,23 @@ impl XenoRegistry {
         owners: &BTreeMap<String, BTreeSet<String>>,
     ) {
         let static_types = self.metadata.types.keys().cloned().collect();
+        let reachable = self.reachable_declarations();
+        let ast: Vec<_> = module
+            .borrow_ast()
+            .iter()
+            .filter(|d| {
+                !self.analyzer.generation_mode
+                    || match d {
+                        Declaration::Type { name, .. } => reachable
+                            .contains(&(path.into(), name.text(module.borrow_source()).into())),
+                        _ => false,
+                    }
+            })
+            .cloned()
+            .collect();
         let diagnostics =
             NameCollisionValidator::new(path, module.borrow_source(), owners, &static_types)
-                .validate(module.borrow_ast());
+                .validate(&ast);
         module.collision_errors = diagnostics
             .into_iter()
             .map(|d| module.diagnostic(d, ErrorPhase::Analyzer))
@@ -823,15 +917,7 @@ impl XenoRegistry {
             module_path: path.into(),
             abs_path: module.abs_path.clone(),
             own_types: module.declarations.keys().cloned().collect(),
-            imported_types: module
-                .imports
-                .iter()
-                .filter_map(|p| {
-                    index
-                        .get(p)
-                        .map(|m| (p.clone(), m.declarations.keys().cloned().collect()))
-                })
-                .collect(),
+            imported_types: self.imported_types(&index, path),
             builtin_types: self.metadata.types.keys().cloned().collect(),
             known_annotations: self.metadata.annotations.keys().cloned().collect(),
             type_hierarchy: hierarchy,
@@ -853,11 +939,27 @@ impl XenoRegistry {
         } else {
             &analysis_only
         };
-        let diagnostics = analyzer.run_scope(
-            module.borrow_ast(),
+        let reachable = self.reachable_declarations();
+        let ast: Vec<_> = module
+            .borrow_ast()
+            .iter()
+            .filter(|d| {
+                !self.analyzer.generation_mode
+                    || match d {
+                        Declaration::Type { name, .. } => reachable
+                            .contains(&(path.into(), name.text(module.borrow_source()).into())),
+                        Declaration::Custom { .. } => path == self.entry && d.public().is_some(),
+                        Declaration::Import { .. } => true,
+                    }
+            })
+            .cloned()
+            .collect();
+        let diagnostics = analyzer.run_scope_with_bundle(
+            &ast,
             module.borrow_source(),
             &scope,
             &self.plugins,
+            Some(&reachable),
         );
         module.analyzer_errors = diagnostics
             .into_iter()
@@ -881,6 +983,7 @@ impl XenoRegistry {
         match pathbuf.canonicalize() {
             Ok(p) => Ok((import_str, p)),
             Err(e) => Err(ModuleDiagnostic {
+                tags: vec![],
                 module_path: import_str.clone(),
                 message: format!("Cannot resolve import '{}': {}", import_str, e),
                 location: None,
@@ -894,15 +997,67 @@ impl XenoRegistry {
     fn validate_imports(&self, module: &ModuleData, module_path: &str) -> Vec<ModuleDiagnostic> {
         let mut errors = Vec::new();
         for decl in module.borrow_ast().iter() {
-            if let Declaration::Import { path, location } = decl {
+            if let Declaration::Import {
+                path,
+                names,
+                location,
+                ..
+            } = decl
+            {
                 let segments = path.to_vec();
                 match self.resolve_import(
                     &segments.iter().map(String::as_str).collect::<Vec<_>>(),
                     None,
                 ) {
-                    Ok((_, abs_path)) => {
+                    Ok((target, abs_path)) => {
+                        let index = self.index.read().unwrap();
+                        let mut selected = HashSet::new();
+                        for name in names {
+                            let text = name.text(module.borrow_source());
+                            let message = if !selected.insert(text) {
+                                Some(format!("Duplicate import of '{text}'"))
+                            } else if bindings::exported(&index, &target, text, &mut HashSet::new())
+                                .is_none()
+                            {
+                                Some(format!(
+                                    "Module '{}' does not export '{text}'",
+                                    path.join("::")
+                                ))
+                            } else if module.declarations.contains_key(text)
+                                || module
+                                    .parsed
+                                    .ast
+                                    .iter()
+                                    .filter_map(|d| match d {
+                                        Declaration::Import { names, .. } => Some(names),
+                                        _ => None,
+                                    })
+                                    .flatten()
+                                    .filter(|n| n.text(module.borrow_source()) == text)
+                                    .count()
+                                    > 1
+                            {
+                                Some(format!(
+                                    "Import '{text}' conflicts with another declaration or import"
+                                ))
+                            } else {
+                                None
+                            };
+                            if let Some(message) = message {
+                                errors.push(module.diagnostic(
+                                    crate::XenoDiagnostic {
+                                        tags: vec![],
+                                        location: *name,
+                                        message,
+                                        severity: XenoDiagSeverity::Err,
+                                    },
+                                    ErrorPhase::Module,
+                                ));
+                            }
+                        }
                         if !abs_path.exists() {
                             errors.push(ModuleDiagnostic {
+                                tags: vec![],
                                 module_path: module_path.to_string(),
                                 message: format!(
                                     "Module '{}' not found (expected at '{}')",
@@ -921,6 +1076,7 @@ impl XenoRegistry {
                     }
                     Err(_) => {
                         errors.push(ModuleDiagnostic {
+                            tags: vec![],
                             module_path: module_path.to_string(),
                             message: format!("Cannot resolve module '{}'", path.join("/")),
                             location: Some((
@@ -941,7 +1097,7 @@ impl XenoRegistry {
     /// Suggest available module paths starting with the given partial path.
     /// Returns `(segment_name, abs_path, is_directory)` tuples.
     pub fn suggest_import(&self, path_so_far: &str) -> Vec<(String, PathBuf, bool)> {
-        let segments: Vec<&str> = path_so_far.split('/').collect();
+        let segments: Vec<&str> = path_so_far.split("::").collect();
         let prefix = segments[..segments.len().saturating_sub(1)].join("/");
         let last_segment = *segments.last().unwrap_or(&"");
         let dir_to_search = if prefix.is_empty() {
@@ -999,6 +1155,8 @@ impl XenoRegistry {
         };
         if removed {
             self.refresh_name_collision_diagnostics();
+            let _update = self.coordinator.lock().unwrap();
+            self.refresh_usage_diagnostics();
         }
     }
 
@@ -1052,30 +1210,109 @@ impl XenoRegistry {
     }
     pub fn find_declaration(&self, current_module: &str, name: &str) -> Option<DeclarationInfo> {
         let index = self.index.read().unwrap();
-        let module = index.get(current_module)?;
-        module
-            .declarations
-            .get(name)
-            .or_else(|| {
-                module
-                    .imports
-                    .iter()
-                    .find_map(|p| index.get(p)?.declarations.get(name))
-            })
-            .cloned()
+        bindings::in_scope(&index, current_module)
+            .into_iter()
+            .find(|d| d.name == name)
     }
     pub fn get_all_declarations_in_scope(&self, current_module: &str) -> Vec<DeclarationInfo> {
         let index = self.index.read().unwrap();
-        let Some(module) = index.get(current_module) else {
-            return vec![];
-        };
-        let mut result: Vec<_> = module.declarations.values().cloned().collect();
-        for p in &module.imports {
-            if let Some(m) = index.get(p) {
-                result.extend(m.declarations.values().cloned())
+        bindings::in_scope(&index, current_module)
+    }
+
+    pub fn reachable_declarations(&self) -> HashSet<(String, String)> {
+        bindings::reachable(&self.index.read().unwrap(), &self.entry)
+    }
+
+    pub fn module_graph(&self) -> HashSet<ModulePath> {
+        let index = self.index.read().unwrap();
+        let mut graph = HashSet::new();
+        let mut pending = vec![self.entry.clone()];
+        while let Some(path) = pending.pop() {
+            if graph.insert(path.clone()) {
+                if let Some(module) = index.get(&path) {
+                    pending.extend(module.imports.iter().cloned());
+                }
             }
         }
-        result
+        graph
+    }
+
+    pub fn get_exported_declarations(&self, path: &str) -> Vec<DeclarationInfo> {
+        let mut index = self.index.read().unwrap().clone();
+        let mut pending = vec![path.to_string()];
+        let mut seen = HashSet::new();
+        while let Some(path) = pending.pop() {
+            if !seen.insert(path.clone()) {
+                continue;
+            }
+            if !index.contains_key(&path) {
+                let Ok((_, abs)) = self.resolve_import(&[], Some(&path)) else {
+                    continue;
+                };
+                let Ok(source) = fs::read_to_string(&abs) else {
+                    continue;
+                };
+                let Ok(module) =
+                    Self::_create_module_data(&path, abs, source, 0, &self.config.debug)
+                else {
+                    continue;
+                };
+                index.insert(path.clone(), ModuleSummary::from_module(&module));
+            }
+            if let Some(module) = index.get(&path) {
+                pending.extend(
+                    module
+                        .bindings
+                        .iter()
+                        .filter(|b| b.public)
+                        .map(|b| b.module.clone()),
+                );
+            }
+        }
+        let Some(module) = index.get(path) else {
+            return vec![];
+        };
+        let names: HashSet<_> = module
+            .declarations
+            .keys()
+            .chain(
+                module
+                    .bindings
+                    .iter()
+                    .filter(|b| b.public)
+                    .flat_map(|b| b.names.iter()),
+            )
+            .collect();
+        names
+            .into_iter()
+            .filter_map(|name| bindings::exported(&index, path, name, &mut HashSet::new()))
+            .collect()
+    }
+
+    fn imported_types(
+        &self,
+        index: &HashMap<String, ModuleSummary>,
+        path: &str,
+    ) -> HashMap<String, Vec<String>> {
+        let mut imported: HashMap<String, Vec<String>> = HashMap::new();
+        for declaration in bindings::in_scope(index, path)
+            .into_iter()
+            .filter(|d| d.module_path != path)
+        {
+            let names = imported.entry(declaration.module_path).or_default();
+            if !names.contains(&declaration.name) {
+                names.push(declaration.name);
+            }
+        }
+        imported
+    }
+
+    fn refresh_bindings(&self) {
+        let index = self.index.read().unwrap();
+        let mut hierarchy = self.hierarchy.write().unwrap();
+        for path in index.keys() {
+            hierarchy.register_bindings(path.clone(), self.imported_types(&index, path));
+        }
     }
 
     fn _create_module_data(
@@ -1136,6 +1373,11 @@ mod tests {
                 (
                     p.clone(),
                     super::ModuleSummary {
+                        bindings: super::bindings::import_bindings(
+                            m.borrow_ast(),
+                            m.borrow_source(),
+                        ),
+                        dependencies: HashMap::new(),
                         abs_path: m.abs_path.clone(),
                         imports: m.imports.clone(),
                         declarations: m.declarations.clone(),
@@ -1147,6 +1389,7 @@ mod tests {
     }
     fn diagnostic(severity: XenoDiagSeverity) -> ModuleDiagnostic {
         ModuleDiagnostic {
+            tags: vec![],
             module_path: "test".to_string(),
             message: "diagnostic".to_string(),
             location: None,
@@ -1188,19 +1431,22 @@ mod tests {
         let mut cache = HashMap::new();
         cache.insert(
             "leaf".to_string(),
-            parsed_module("leaf", "type Leaf = string;"),
+            parsed_module("leaf", "pub type Leaf = string;"),
         );
         cache.insert(
             "a".to_string(),
-            parsed_module("a", "import leaf; import top; type A = Leaf;"),
+            parsed_module(
+                "a",
+                "import leaf::Leaf; import top::Top; pub type A = Leaf;",
+            ),
         );
         cache.insert(
             "b".to_string(),
-            parsed_module("b", "import leaf; type B = Leaf;"),
+            parsed_module("b", "import leaf::Leaf; pub type B = Leaf;"),
         );
         cache.insert(
             "top".to_string(),
-            parsed_module("top", "import a; import b; type Top = A | B;"),
+            parsed_module("top", "import a::A; import b::B; pub type Top = A | B;"),
         );
 
         assert_eq!(
@@ -1216,7 +1462,7 @@ mod tests {
         let mut cache = HashMap::new();
         cache.insert(
             "test".to_string(),
-            parsed_module("test", "type Test = string;"),
+            parsed_module("test", "pub type Test = string;"),
         );
         let registry = XenoRegistry {
             index: std::sync::RwLock::new(summaries(&cache)),
@@ -1285,7 +1531,7 @@ mod tests {
 
     #[test]
     fn semantic_pass_allows_local_forward_references() {
-        let source = "type Before = Later; type Later = string;";
+        let source = "pub type Before = Later; pub type Later = string;";
         let mut cache = HashMap::new();
         cache.insert("test".to_string(), parsed_module("test", source));
 
@@ -1294,7 +1540,7 @@ mod tests {
 
     #[test]
     fn semantic_pass_exposes_never_as_a_source_type() {
-        let source = "type Impossible = NEVER; type StillImpossible = Impossible;";
+        let source = "pub type Impossible = NEVER; pub type StillImpossible = Impossible;";
         let mut cache = HashMap::new();
         cache.insert("test".to_string(), parsed_module("test", source));
 
@@ -1303,7 +1549,7 @@ mod tests {
 
     #[test]
     fn semantic_pass_rejects_disjoint_intersections_as_never() {
-        let source = "type Impossible = &u8&string;";
+        let source = "pub type Impossible = &u8&string;";
         let mut cache = HashMap::new();
         cache.insert("test".to_string(), parsed_module("test", source));
 
@@ -1317,7 +1563,7 @@ mod tests {
 
     #[test]
     fn intersection_constraints_are_inherited_from_either_member() {
-        let source = "type Text = &uuid&any @match(/^[a-f]+$/);";
+        let source = "pub type Text = &uuid&any @match(/^[a-f]+$/);";
         let mut cache = HashMap::new();
         cache.insert("test".to_string(), parsed_module("test", source));
 
@@ -1326,7 +1572,7 @@ mod tests {
 
     #[test]
     fn sum_constraints_must_be_guaranteed_by_every_member() {
-        let source = "type Text = |uuid|string @match(/^[a-f]+$/); type Mixed = |uuid|u8 @match(/^[a-f]+$/);";
+        let source = "pub type Text = |uuid|string @match(/^[a-f]+$/); pub type Mixed = |uuid|u8 @match(/^[a-f]+$/);";
         let mut cache = HashMap::new();
         cache.insert("test".to_string(), parsed_module("test", source));
 
@@ -1340,7 +1586,7 @@ mod tests {
 
     #[test]
     fn standalone_optional_types_keep_present_value_constraints() {
-        let source = "type MaybeCount = ?u8 @min(0);";
+        let source = "pub type MaybeCount = ?u8 @min(0);";
         let mut cache = HashMap::new();
         cache.insert("test".to_string(), parsed_module("test", source));
 
@@ -1352,11 +1598,11 @@ mod tests {
         let mut cache = HashMap::new();
         cache.insert(
             "base".to_string(),
-            parsed_module("base", "type Text = string;"),
+            parsed_module("base", "pub type Text = string;"),
         );
         cache.insert(
             "test".to_string(),
-            parsed_module("test", "import base; type Impossible = &Text&u8;"),
+            parsed_module("test", "import base::Text; pub type Impossible = &Text&u8;"),
         );
 
         assert_eq!(
@@ -1369,7 +1615,8 @@ mod tests {
 
     #[test]
     fn intersection_validation_uses_generic_type_constraints() {
-        let source = "type Impossible<T: string> = &T&u8; type Possible<T: number> = &T&u8;";
+        let source =
+            "pub type Impossible<T: string> = &T&u8; pub type Possible<T: number> = &T&u8;";
         let mut cache = HashMap::new();
         cache.insert("test".to_string(), parsed_module("test", source));
 
@@ -1384,7 +1631,7 @@ mod tests {
         let mut cache = HashMap::new();
         cache.insert(
             "test".to_string(),
-            parsed_module("test", "type Test = Missing @Lombok;"),
+            parsed_module("test", "pub type Test = Missing @Lombok;"),
         );
         let module = cache.get("test").expect("module should be cached");
 
@@ -1409,7 +1656,7 @@ mod tests {
 
     #[test]
     fn semantic_pass_rejects_duplicate_type_names_in_one_module() {
-        let source = "type Duplicate = string; type Duplicate = u8;";
+        let source = "pub type Duplicate = string; pub type Duplicate = u8;";
         let mut cache = HashMap::new();
         cache.insert("test".to_string(), parsed_module("test", source));
 
@@ -1425,11 +1672,11 @@ mod tests {
         let mut cache = HashMap::new();
         cache.insert(
             "first".to_string(),
-            parsed_module("first", "type Shared = string;"),
+            parsed_module("first", "pub type Shared = string;"),
         );
         cache.insert(
             "second".to_string(),
-            parsed_module("second", "type Shared = u8;"),
+            parsed_module("second", "pub type Shared = u8;"),
         );
 
         let errors = analyze(&cache, "second");
@@ -1442,7 +1689,7 @@ mod tests {
     #[test]
     fn semantic_pass_rejects_duplicate_struct_fields_and_enum_variants() {
         let source =
-            "type User = { id: string, id: u8 }; type State = enum { ready: string, ready: u8 };";
+            "pub type User = { id: string, id: u8 }; pub type State = enum { ready: string, ready: u8 };";
         let mut cache = HashMap::new();
         cache.insert("test".to_string(), parsed_module("test", source));
 
@@ -1458,7 +1705,7 @@ mod tests {
 
     #[test]
     fn semantic_pass_allows_member_names_in_separate_declarations() {
-        let source = "type First = { id: string }; type Second = { id: u8 }; type Left = enum { ready: string }; type Right = enum { ready: u8 };";
+        let source = "pub type First = { id: string }; pub type Second = { id: u8 }; pub type Left = enum { ready: string }; pub type Right = enum { ready: u8 };";
         let mut cache = HashMap::new();
         cache.insert("test".to_string(), parsed_module("test", source));
 
@@ -1467,7 +1714,7 @@ mod tests {
 
     #[test]
     fn semantic_pass_rejects_duplicate_and_shadowing_generic_parameters() {
-        let source = "type Existing = string; type Pair<T, T> = T; type UserGeneric<Existing> = Existing; type BuiltinGeneric<string> = string;";
+        let source = "pub type Existing = string; pub type Pair<T, T> = T; pub type UserGeneric<Existing> = Existing; pub type BuiltinGeneric<string> = string;";
         let mut cache = HashMap::new();
         cache.insert("test".to_string(), parsed_module("test", source));
 
@@ -1487,11 +1734,11 @@ mod tests {
         let mut cache = HashMap::new();
         cache.insert(
             "shared".to_string(),
-            parsed_module("shared", "type Existing = string;"),
+            parsed_module("shared", "pub type Existing = string;"),
         );
         cache.insert(
             "test".to_string(),
-            parsed_module("test", "type UserGeneric<Existing> = Existing;"),
+            parsed_module("test", "pub type UserGeneric<Existing> = Existing;"),
         );
 
         let errors = analyze(&cache, "test");
@@ -1503,7 +1750,7 @@ mod tests {
 
     #[test]
     fn semantic_pass_allows_generic_names_to_repeat_in_separate_declarations() {
-        let source = "type First<T> = T; type Second<T> = T;";
+        let source = "pub type First<T> = T; pub type Second<T> = T;";
         let mut cache = HashMap::new();
         cache.insert("test".to_string(), parsed_module("test", source));
 
@@ -1517,11 +1764,11 @@ mod tests {
         let mut cache = HashMap::new();
         cache.insert(
             "early".to_string(),
-            parsed_module("early", "type Wrapper<Late> = Late;"),
+            parsed_module("early", "pub type Wrapper<Late> = Late;"),
         );
         cache.insert(
             "late".to_string(),
-            parsed_module("late", "type Late = string;"),
+            parsed_module("late", "pub type Late = string;"),
         );
         let registry = XenoRegistry {
             index: std::sync::RwLock::new(summaries(&cache)),
@@ -1556,11 +1803,11 @@ mod tests {
         let mut cache = HashMap::new();
         cache.insert(
             "first".to_string(),
-            parsed_module("first", "type Shared = string;"),
+            parsed_module("first", "pub type Shared = string;"),
         );
         cache.insert(
             "second".to_string(),
-            parsed_module("second", "type Shared = u8;"),
+            parsed_module("second", "pub type Shared = u8;"),
         );
         let registry = XenoRegistry {
             index: std::sync::RwLock::new(summaries(&cache)),
@@ -1597,15 +1844,15 @@ mod tests {
         let mut cache = HashMap::new();
         cache.insert(
             "leaf".to_string(),
-            parsed_module("leaf", "type Leaf = string;"),
+            parsed_module("leaf", "pub type Leaf = string;"),
         );
         cache.insert(
             "middle".to_string(),
-            parsed_module("middle", "import leaf; type Middle = Leaf;"),
+            parsed_module("middle", "import leaf::Leaf; pub type Middle = Leaf;"),
         );
         cache.insert(
             "entry".to_string(),
-            parsed_module("entry", "import middle; type Entry = Middle;"),
+            parsed_module("entry", "import middle::Middle; pub type Entry = Middle;"),
         );
 
         assert_eq!(
@@ -1634,13 +1881,13 @@ mod tests {
         let mut cache = HashMap::new();
         cache.insert(
             "base".to_string(),
-            parsed_module("base", "type Imported = string;"),
+            parsed_module("base", "pub type Imported = string;"),
         );
         cache.insert(
             "test".to_string(),
             parsed_module(
                 "test",
-                "import base; type UsesImported = Imported @minlen(1);",
+                "import base::Imported; pub type UsesImported = Imported @minlen(1);",
             ),
         );
 
@@ -1649,7 +1896,7 @@ mod tests {
 
     #[test]
     fn generic_constraints_accept_trait_names_and_follow_parentage() {
-        let source = "type Before = Box<u8>; type Box<T: NumberLiteral> = T; type Identity<T> = T; type Forward<T: NumberLiteral> = Box<T>; type Nested<T: NumberLiteral> = Box<Identity<T>>; type Float = Box<f32>; type Bad = Box<string>;";
+        let source = "pub type Before = Box<u8>; pub type Box<T: NumberLiteral> = T; pub type Identity<T> = T; pub type Forward<T: NumberLiteral> = Box<T>; pub type Nested<T: NumberLiteral> = Box<Identity<T>>; pub type Float = Box<f32>; pub type Bad = Box<string>;";
         let mut cache = HashMap::new();
         cache.insert("test".to_string(), parsed_module("test", source));
 
@@ -1661,7 +1908,7 @@ mod tests {
 
     #[test]
     fn dictionary_keys_must_implement_key_trait() {
-        let source = "type TextKey = Dict<string, bool>; type NumberKey = Dict<u8, string>; type Alias = string; type AliasKey = Dict<Alias, u8>; type Bad = Dict<bool, string>;";
+        let source = "pub type TextKey = Dict<string, bool>; pub type NumberKey = Dict<u8, string>; pub type Alias = string; pub type AliasKey = Dict<Alias, u8>; pub type Bad = Dict<bool, string>;";
         let mut cache = HashMap::new();
         cache.insert("test".to_string(), parsed_module("test", source));
 
@@ -1677,15 +1924,18 @@ mod tests {
         let mut cache = HashMap::new();
         cache.insert(
             "text".to_string(),
-            parsed_module("text", "type Shared = string;"),
+            parsed_module("text", "pub type Shared = string;"),
         );
         cache.insert(
             "numeric".to_string(),
-            parsed_module("numeric", "type Shared = u8;"),
+            parsed_module("numeric", "pub type Shared = u8;"),
         );
         cache.insert(
             "test".to_string(),
-            parsed_module("test", "import text; type Local = Shared @minlen(1);"),
+            parsed_module(
+                "test",
+                "import text::Shared; pub type Local = Shared @minlen(1);",
+            ),
         );
 
         assert!(analyze(&cache, "test").is_empty());
@@ -1696,17 +1946,17 @@ mod tests {
         let mut cache = HashMap::new();
         cache.insert(
             "base".to_string(),
-            parsed_module("base", "type Text = string;"),
+            parsed_module("base", "pub type Text = string;"),
         );
         cache.insert(
             "middle".to_string(),
-            parsed_module("middle", "import base; type Imported = Text;"),
+            parsed_module("middle", "import base::Text; pub type Imported = Text;"),
         );
         cache.insert(
             "test".to_string(),
             parsed_module(
                 "test",
-                "import middle; type UsesImported = Imported @minlen(1);",
+                "import middle::Imported; pub type UsesImported = Imported @minlen(1);",
             ),
         );
 
@@ -1718,13 +1968,13 @@ mod tests {
         let mut cache = HashMap::new();
         cache.insert(
             "containers".to_string(),
-            parsed_module("containers", "type Box<T: NumberLiteral> = T;"),
+            parsed_module("containers", "pub type Box<T: NumberLiteral> = T;"),
         );
         cache.insert(
             "test".to_string(),
             parsed_module(
                 "test",
-                "import containers; type Local = u8; type Good = Box<Local>;",
+                "import containers::Box; pub type Local = u8; pub type Good = Box<Local>;",
             ),
         );
 
@@ -1733,7 +1983,7 @@ mod tests {
 
     #[test]
     fn match_accepts_string_and_string_descendants() {
-        let source = "type Email = string @match(/.*@.*\\.com/) @minlen(10); type BuiltinDescendant = uuid @match(/^[0-9a-f-]+$/); type UserDescendant = Email @match(/^alias$/);";
+        let source = "pub type Email = string @match(/.*@.*\\.com/) @minlen(10); pub type BuiltinDescendant = uuid @match(/^[0-9a-f-]+$/); pub type UserDescendant = Email @match(/^alias$/);";
         let mut cache = HashMap::new();
         cache.insert("test".to_string(), parsed_module("test", source));
 
@@ -1742,7 +1992,7 @@ mod tests {
 
     #[test]
     fn match_rejects_types_that_do_not_descend_from_string() {
-        let source = "type Number = u8 @match(/^[0-9]+$/); type Bytes = binary @match(/.*/); type Date = date @match(/^2026-/);";
+        let source = "pub type Number = u8 @match(/^[0-9]+$/); pub type Bytes = binary @match(/.*/); pub type Date = date @match(/^2026-/);";
         let mut cache = HashMap::new();
         cache.insert("test".to_string(), parsed_module("test", source));
 
@@ -1758,7 +2008,7 @@ mod tests {
 
     #[test]
     fn match_requires_exactly_one_regex_literal() {
-        let source = "type Missing = string @match(); type StringArg = string @match(\"pattern\"); type Multiple = string @match(/a/, /b/);";
+        let source = "pub type Missing = string @match(); pub type StringArg = string @match(\"pattern\"); pub type Multiple = string @match(/a/, /b/);";
         let mut cache = HashMap::new();
         cache.insert("test".to_string(), parsed_module("test", source));
 
@@ -1789,7 +2039,7 @@ mod update_tests {
                 .as_nanos()
         ));
         fs::create_dir(&root).unwrap();
-        fs::write(root.join("index.xen"), "type Root = string;").unwrap();
+        fs::write(root.join("index.xen"), "pub type Root = string;").unwrap();
         let mut config = Config::default_with_workdir(root);
         config.parser.entry = "index".into();
         XenoRegistry::with_config(config, false).unwrap()
@@ -1797,11 +2047,15 @@ mod update_tests {
     #[test]
     fn cycles_defer_scans_and_recover_without_blocking_recursive_types() {
         let registry = registry();
-        fs::write(registry.root.join("a.xen"), "import b; type A = B;").unwrap();
-        fs::write(registry.root.join("b.xen"), "import a; type B = number;").unwrap();
+        fs::write(registry.root.join("a.xen"), "import b::B; pub type A = B;").unwrap();
+        fs::write(
+            registry.root.join("b.xen"),
+            "import a::A; pub type B = number;",
+        )
+        .unwrap();
         registry.load_module_from_source(
             &registry.root.join("index.xen"),
-            "import a; type Root = A;".into(),
+            "import a::A; pub type Root = A;".into(),
         );
         for path in ["a", "b", "index"] {
             assert!(registry
@@ -1811,7 +2065,7 @@ mod update_tests {
         }
         let errors = registry.load_module_from_source(
             &registry.root.join("b.xen"),
-            "type B = number; type TreeNode = { children: Tree[] }; type Tree = |TreeNode|number;"
+            "pub type B = number; pub type TreeNode = { children: Tree[] }; pub type Tree = |TreeNode|number;"
                 .into(),
         );
         assert!(
@@ -1823,10 +2077,10 @@ mod update_tests {
     #[test]
     fn invalid_source_clears_old_indexes_and_updates_dependents() {
         let registry = registry();
-        fs::write(registry.root.join("a.xen"), "type A = number;").unwrap();
+        fs::write(registry.root.join("a.xen"), "pub type A = number;").unwrap();
         registry.load_module_from_source(
             &registry.root.join("index.xen"),
-            "import a; type Root = A;".into(),
+            "import a::A; pub type Root = A;".into(),
         );
         let handle = registry.module_cache.read().unwrap()["a"].clone();
         registry.load_module_from_source(&registry.root.join("a.xen"), "\u{e9}".into());
@@ -1836,7 +2090,8 @@ mod update_tests {
             .iter()
             .any(|d| d.message.contains("Unknown type 'A'")));
         assert_eq!(handle.read().unwrap().borrow_source(), "\u{e9}");
-        registry.load_module_from_source(&registry.root.join("a.xen"), "type A = string;".into());
+        registry
+            .load_module_from_source(&registry.root.join("a.xen"), "pub type A = string;".into());
         assert!(!registry
             .get_all_errors_for("index")
             .iter()
@@ -1849,7 +2104,7 @@ mod update_tests {
         let registry = registry();
         registry.load_module_from_source(
             &registry.root.join("index.xen"),
-            "type First = string; type Second = number;".into(),
+            "pub type First = string; pub type Second = number;".into(),
         );
         let first = registry
             .find_declaration("index", "First")
@@ -1861,7 +2116,7 @@ mod update_tests {
             .semantic;
         registry.load_module_from_source(
             &registry.root.join("index.xen"),
-            "\n\ntype First = string; type Second = bool;".into(),
+            "\n\npub type First = string; pub type Second = bool;".into(),
         );
         let updated = registry.find_declaration("index", "First").unwrap();
         assert!(Arc::ptr_eq(&first, &updated.semantic));
@@ -1876,7 +2131,7 @@ mod update_tests {
 
         fs::write(
             registry.root.join("consumer.xen"),
-            "import index; type Consumer = Missing;",
+            "import index::Missing; pub type Consumer = Missing;",
         )
         .unwrap();
         registry.load_module(&["consumer"], true, None);
@@ -1886,7 +2141,7 @@ mod update_tests {
             .any(|d| d.message.contains("Unknown type 'Missing'")));
         registry.load_module_from_source(
             &registry.root.join("index.xen"),
-            "type Missing = string;".into(),
+            "pub type Missing = string;".into(),
         );
         assert!(!registry
             .get_all_errors_for("consumer")
@@ -1899,14 +2154,15 @@ mod update_tests {
     fn self_import_is_deferred_and_an_unchanged_document_preserves_metadata() {
         let registry = registry();
         let path = registry.root.join("index.xen");
-        registry.load_module_from_source(&path, "import index; type Root = string;".into());
+        registry
+            .load_module_from_source(&path, "import index::First; pub type Root = string;".into());
         assert!(registry
             .get_all_errors_for("index")
             .iter()
             .any(|d| d.message.contains("cycle")));
-        registry.load_module_from_source(&path, "type Root = string;".into());
+        registry.load_module_from_source(&path, "pub type Root = string;".into());
         let root = registry.find_declaration("index", "Root").unwrap().semantic;
-        registry.load_module_from_source(&path, "type Root = string;".into());
+        registry.load_module_from_source(&path, "pub type Root = string;".into());
         assert!(Arc::ptr_eq(
             &root,
             &registry.find_declaration("index", "Root").unwrap().semantic
@@ -1921,15 +2177,205 @@ mod update_tests {
         let path = registry.root.join("index.xen");
         registry.load_module_from_source(
             &path,
-            "type Duplicate = string; type Duplicate = number;".into(),
+            "pub type Duplicate = string; pub type Duplicate = number;".into(),
         );
-        registry.load_module_from_source(&path, "type Duplicate = string;".into());
+        registry.load_module_from_source(&path, "pub type Duplicate = string;".into());
         let declaration = registry.find_declaration("index", "Duplicate").unwrap();
         assert_eq!(
             declaration.semantic.body,
             crate::semantic::OwnedType::named("string")
         );
         assert!(registry.get_all_errors_for("index").is_empty());
+        fs::remove_dir_all(&registry.root).unwrap();
+    }
+
+    #[test]
+    fn selected_imports_only_expose_public_names_and_reexports_resolve_to_the_owner() {
+        let registry = registry();
+        fs::create_dir(registry.root.join("models")).unwrap();
+        fs::write(
+            registry.root.join("models/api.xen"),
+            "type Helper = string; pub type Api = Helper; pub type Unselected = number;",
+        )
+        .unwrap();
+        fs::write(
+            registry.root.join("barrel.xen"),
+            "pub import models::api::{Api}; type Private = string;",
+        )
+        .unwrap();
+        let errors = registry.load_module_from_source(
+            &registry.root.join("index.xen"),
+            "pub import barrel::Api; type Unused = string;".into(),
+        );
+        assert!(
+            !errors.iter().any(|d| d.severity == XenoDiagSeverity::Err),
+            "{errors:?}"
+        );
+        assert_eq!(
+            registry
+                .find_declaration("index", "Api")
+                .unwrap()
+                .module_path,
+            "models/api"
+        );
+        for name in ["Helper", "Unselected", "Private"] {
+            assert!(registry.find_declaration("index", name).is_none());
+        }
+        assert_eq!(
+            registry.reachable_declarations(),
+            HashSet::from([
+                ("models/api".into(), "Api".into()),
+                ("models/api".into(), "Helper".into())
+            ])
+        );
+        fs::remove_dir_all(&registry.root).unwrap();
+    }
+
+    #[test]
+    fn core_usage_diagnostics_follow_entry_export_changes_without_rescanning_dependencies() {
+        let registry = registry();
+        fs::write(
+            registry.root.join("other.xen"),
+            "type Helper = string; pub type Api = Helper; pub type Spare = string;",
+        )
+        .unwrap();
+        let path = registry.root.join("index.xen");
+        registry
+            .load_module_from_source(&path, "pub import other::Api; type Unused = string;".into());
+        let api = registry.find_declaration("other", "Api").unwrap().semantic;
+        let unused_types = || {
+            registry
+                .get_all_errors_for("other")
+                .into_iter()
+                .filter(|d| d.tags.contains(&crate::XenoDiagnosticTag::Unnecessary))
+                .collect::<Vec<_>>()
+        };
+        let diagnostics = unused_types();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].phase, ErrorPhase::Analyzer);
+        assert_eq!(diagnostics[0].severity, XenoDiagSeverity::Info);
+        assert_eq!(diagnostics[0].location, Some((0, 45, 23)));
+
+        registry.load_module_from_source(&path, "import other::Api; type Unused = string;".into());
+        assert_eq!(unused_types().len(), 3);
+        let errors = registry.get_all_errors_for("index");
+        let import = errors
+            .iter()
+            .find(|d| d.message == "Unused import 'Api'.")
+            .unwrap();
+        assert_eq!(import.phase, ErrorPhase::Analyzer);
+        assert_eq!(import.severity, XenoDiagSeverity::Warn);
+        assert_eq!(import.tags, [crate::XenoDiagnosticTag::Unnecessary]);
+        assert_eq!(import.location, Some((0, 14, 3)));
+        assert!(Arc::ptr_eq(
+            &api,
+            &registry.find_declaration("other", "Api").unwrap().semantic
+        ));
+
+        registry.load_module_from_source(&path, "import other::Api; pub type Root = Api;".into());
+        assert_eq!(unused_types().len(), 1);
+        assert!(registry.get_all_errors_for("index").is_empty());
+        registry.load_module_from_source(&path, "pub import other::Api;".into());
+        assert_eq!(unused_types().len(), 1);
+        assert!(registry.get_all_errors_for("index").is_empty());
+        fs::remove_dir_all(&registry.root).unwrap();
+    }
+
+    #[test]
+    fn entry_exports_keep_transitive_dependencies_but_discard_unused_imports_and_exports() {
+        let registry = registry();
+        fs::write(
+            registry.root.join("other.xen"),
+            "pub type Used = string; pub type Spare = string; pub type Unselected = string;",
+        )
+        .unwrap();
+        let errors = registry.load_module_from_source(&registry.root.join("index.xen"), "import other::{Used, Spare}; type Helper = { Spare: Used }; pub type Root = ?Helper[]; type Dead = Spare;".into());
+        assert!(
+            !errors.iter().any(|d| d.severity == XenoDiagSeverity::Err),
+            "{errors:?}"
+        );
+        assert_eq!(
+            registry.reachable_declarations(),
+            HashSet::from([
+                ("index".into(), "Root".into()),
+                ("index".into(), "Helper".into()),
+                ("other".into(), "Used".into())
+            ])
+        );
+        fs::remove_dir_all(&registry.root).unwrap();
+    }
+
+    #[test]
+    fn reachability_follows_generic_constraints_annotations_and_recursive_types() {
+        let registry = registry();
+        registry.load_module_from_source(&registry.root.join("index.xen"), "type Bound = string; type Argument = string; type Annotated = string; type Recursive = { next: ?Recursive }; pub type Root<T: Bound> = [Argument, Recursive] @custom(Annotated); type Dead = number;".into());
+        let names: HashSet<_> = registry
+            .reachable_declarations()
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect();
+        assert_eq!(
+            names,
+            HashSet::from(
+                ["Root", "Bound", "Argument", "Annotated", "Recursive"].map(str::to_string)
+            )
+        );
+        fs::remove_dir_all(&registry.root).unwrap();
+    }
+
+    #[test]
+    fn private_missing_and_ambiguous_imports_are_reported_at_the_selected_name() {
+        let registry = registry();
+        fs::write(
+            registry.root.join("other.xen"),
+            "type Private = string; pub type Public = number;",
+        )
+        .unwrap();
+        registry.load_module_from_source(
+            &registry.root.join("index.xen"),
+            "import other::{Private, Missing, Public, Public}; type Public = string;".into(),
+        );
+        let errors = registry.get_all_errors_for("index");
+        for text in [
+            "does not export 'Private'",
+            "does not export 'Missing'",
+            "Duplicate import of 'Public'",
+            "conflicts with another declaration",
+        ] {
+            assert!(
+                errors.iter().any(|d| d.message.contains(text)),
+                "{errors:?}"
+            );
+        }
+        fs::remove_dir_all(&registry.root).unwrap();
+    }
+
+    #[test]
+    fn changing_pub_and_selections_updates_reachability_and_import_scopes() {
+        let registry = registry();
+        let entry = registry.root.join("index.xen");
+        let other = registry.root.join("other.xen");
+        fs::write(&other, "pub type First = string; pub type Second = number;").unwrap();
+        registry.load_module_from_source(&entry, "pub import other::First;".into());
+        assert!(registry
+            .reachable_declarations()
+            .contains(&("other".into(), "First".into())));
+        registry.load_module_from_source(&entry, "pub import other::Second;".into());
+        assert!(registry.find_declaration("index", "First").is_none());
+        assert_eq!(
+            registry.reachable_declarations(),
+            HashSet::from([("other".into(), "Second".into())])
+        );
+        registry.load_module_from_source(
+            &other,
+            "pub type First = string; type Second = number;".into(),
+        );
+        assert!(registry.find_declaration("index", "Second").is_none());
+        assert!(registry.reachable_declarations().is_empty());
+        assert!(registry
+            .get_all_errors_for("index")
+            .iter()
+            .any(|d| d.message.contains("does not export 'Second'")));
         fs::remove_dir_all(&registry.root).unwrap();
     }
 }

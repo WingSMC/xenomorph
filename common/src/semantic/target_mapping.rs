@@ -20,6 +20,7 @@ pub fn unsupported_target_type_diagnostic(
     let type_name = first_unmapped_target_type(&evaluated, hierarchy, has_native_mapping)?;
 
     Some(XenoDiagnostic {
+        tags: vec![],
         location: *identifier,
         message: format!(
             "{target} cannot represent type '{type_name}' because it has no native mapping."

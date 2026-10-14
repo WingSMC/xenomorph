@@ -314,6 +314,7 @@ impl<'src> AnalyzerListener<'src> for JavaGenerator {
         };
         if unrepresentable {
             errors.push(XenoDiagnostic {
+                tags: vec![],
                 location: literal.get_last_token(),
                 message: format!(
                     "Java cannot represent numeric literal '{}' using its requested representation.",
@@ -1369,6 +1370,7 @@ fn report_java_keyword(
 ) {
     if is_java_keyword(identifier.text(source)) {
         errors.push(XenoDiagnostic {
+            tags: vec![],
             location: *identifier,
             message: format!(
                 "Java {kind} identifier '{}' conflicts with a reserved keyword.",
@@ -1410,6 +1412,7 @@ fn validate_java_member_names(
     for (key, _, _) in members {
         if is_java_keyword(key.text(source)) {
             errors.push(XenoDiagnostic {
+                tags: vec![],
                 location: *key,
                 message: format!(
                     "Java {member_kind} identifier '{}' conflicts with a reserved keyword.",
@@ -1422,6 +1425,7 @@ fn validate_java_member_names(
         if let Some(previous) = seen.insert(java_name.clone(), key.text(source)) {
             if previous != key.text(source) {
                 errors.push(XenoDiagnostic {
+                    tags: vec![],
                     location: *key,
                     message: format!(
                         "Java {member_kind} names '{}' and '{}' both normalize to '{java_name}'.",

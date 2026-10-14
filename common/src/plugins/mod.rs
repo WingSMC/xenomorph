@@ -152,6 +152,7 @@ impl LoadedPlugin {
                                 .to_string()
                         })?;
                     Ok(crate::XenoDiagnostic {
+                        tags: vec![],
                         location: diagnostic.location,
                         message: diagnostic.message,
                         severity,

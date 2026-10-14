@@ -28,6 +28,7 @@ impl<'context> NameValidator<'context> {
             true
         } else {
             errors.push(XenoDiagnostic {
+                tags: vec![],
                 location: (*name),
                 message: format!("Unknown type '{}'", name.text(self.source)),
                 severity: crate::XenoDiagSeverity::Err,
@@ -45,6 +46,7 @@ impl<'context> NameValidator<'context> {
             true
         } else {
             errors.push(XenoDiagnostic {
+                tags: vec![],
                 location: (*name),
                 message: format!("Unknown type or trait '{}'", name.text(self.source)),
                 severity: crate::XenoDiagSeverity::Err,
@@ -157,6 +159,7 @@ impl<'context> NameValidator<'context> {
         let arguments = arguments.unwrap_or(&[]);
         if parameters.len() != arguments.len() {
             errors.push(XenoDiagnostic {
+                tags: vec![],
                 location: (*name),
                 message: format!(
                     "Type '{}' expects {} generic argument(s), got {}.",
@@ -182,6 +185,7 @@ impl<'context> NameValidator<'context> {
             ) {
                 constraints_are_valid = false;
                 errors.push(XenoDiagnostic {
+                    tags: vec![],
                     location: argument.get_last_token(),
                     message: format!(
                         "Generic argument '{}' for '{}.{}' does not satisfy constraint '{}'.",
@@ -205,6 +209,7 @@ impl<'context> NameValidator<'context> {
             };
             if let Err(error) = self.scope.type_hierarchy.evaluate_type(&candidate) {
                 errors.push(XenoDiagnostic {
+                    tags: vec![],
                     location: (*name),
                     message: error.to_string(),
                     severity: crate::XenoDiagSeverity::Err,
@@ -244,6 +249,7 @@ impl<'src, 'context> AnalyzerListener<'src> for NameValidator<'context> {
                 if self.generic_params.contains_key(id.text(self.source)) {
                     if arguments.is_some() {
                         errors.push(XenoDiagnostic {
+                            tags: vec![],
                             location: (*id),
                             message: format!(
                                 "Generic parameter '{}' cannot take arguments.",
@@ -280,6 +286,7 @@ impl<'src, 'context> AnalyzerListener<'src> for NameValidator<'context> {
                 previous.same_constant_value(&value)
             }) {
                 errors.push(XenoDiagnostic {
+                    tags: vec![],
                     location: literal.token(),
                     message: format!(
                         "Duplicate set value '{}'. Set values must be unique.",
@@ -300,6 +307,7 @@ impl<'src, 'context> AnalyzerListener<'src> for NameValidator<'context> {
                 && !hierarchy.is_assignable_to(&narrowest, target)
             {
                 errors.push(XenoDiagnostic {
+                    tags: vec![],
                     location: literal.get_last_token(),
                     message: format!(
                         "Set value '{}' is not compatible with element type '{}'.",
@@ -320,6 +328,7 @@ impl<'src, 'context> AnalyzerListener<'src> for NameValidator<'context> {
     ) {
         if !self.scope.has_annotation(name.text(self.source)) {
             errors.push(XenoDiagnostic {
+                tags: vec![],
                 location: (*name),
                 message: format!("Unknown annotation '@{}'", name.text(self.source)),
                 severity: crate::XenoDiagSeverity::Warn,

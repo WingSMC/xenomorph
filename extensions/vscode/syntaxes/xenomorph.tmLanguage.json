@@ -66,7 +66,7 @@
             "patterns": [
                 {
                     "name": "keyword.control.declaration.xenomorph",
-                    "match": "\\b(type|set|enum|validator)\\b"
+                    "match": "\\b(pub|type|set|enum|validator)\\b"
                 },
                 {
                     "name": "keyword.control.import.xenomorph",
@@ -96,7 +96,15 @@
                     "patterns": [
                         {
                             "name": "entity.name.namespace.xenomorph",
-                            "match": "[A-Za-z0-9_]+(?:/[A-Za-z0-9_]+)*"
+                            "match": "[A-Za-z_][A-Za-z0-9_]*(?=\\s*::)"
+                        },
+                        {
+                            "name": "entity.name.type.xenomorph",
+                            "match": "[A-Za-z_][A-Za-z0-9_]*"
+                        },
+                        {
+                            "name": "punctuation.separator.namespace.xenomorph",
+                            "match": "::"
                         }
                     ]
                 }

@@ -373,6 +373,7 @@ mod tests {
     #[test]
     fn cli_diagnostic_format_includes_severity_and_module() {
         let diagnostic = ModuleDiagnostic {
+            tags: vec![],
             module_path: "models/user".to_string(),
             message: "Unknown annotation '@example'".to_string(),
             location: None,
@@ -389,6 +390,7 @@ mod tests {
     #[test]
     fn cli_diagnostic_format_has_a_module_fallback() {
         let diagnostic = ModuleDiagnostic {
+            tags: vec![],
             module_path: String::new(),
             message: "diagnostic".to_string(),
             location: None,

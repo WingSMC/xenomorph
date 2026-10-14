@@ -51,6 +51,7 @@ impl<'src> Parser<'src> {
 
     pub fn recover_to(&mut self, variant: TokenVariant) {
         self.diagnostics.push(XenoDiagnostic {
+            tags: vec![],
             message: format!("Recovering to {:?} at {}.", variant, self.current),
             severity: XenoDiagSeverity::Info,
             location: self
@@ -84,6 +85,7 @@ impl<'src> Parser<'src> {
         let tok_opt = self.tokens.get(ind);
         if tok_opt.is_none() {
             self.diagnostics.push(XenoDiagnostic {
+                tags: vec![],
                 severity: XenoDiagSeverity::Err,
                 location: self
                     .tokens
@@ -128,6 +130,7 @@ impl<'src> Parser<'src> {
         let (var, d) = self.need_next()?;
         if *var != expected {
             self.diagnostics.push(XenoDiagnostic {
+                tags: vec![],
                 location: *d,
                 message: format!("Expected {:?} at {} instead got {:?}.", expected, d, var),
                 severity: XenoDiagSeverity::Err,
@@ -150,6 +153,7 @@ impl<'src> Parser<'src> {
 
         if *actual != expected {
             self.diagnostics.push(XenoDiagnostic {
+                tags: vec![],
                 location: *data,
                 message: format!(
                     "Expected {:?} at {} instead got {:?}.",

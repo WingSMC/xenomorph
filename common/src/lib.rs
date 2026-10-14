@@ -26,4 +26,11 @@ pub struct XenoDiagnostic {
     pub location: TokenData,
     pub message: String,
     pub severity: XenoDiagSeverity,
+    pub tags: Vec<XenoDiagnosticTag>,
+}
+
+/// Presentation hints attached to core diagnostics, independent of an editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XenoDiagnosticTag {
+    Unnecessary,
 }

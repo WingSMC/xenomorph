@@ -61,6 +61,7 @@ impl<'src, 'context> AnalyzerListener<'src> for IfChainValidator<'context> {
                     IfChainState::AfterIf => {}
                     _ => {
                         errors.push(XenoDiagnostic {
+                            tags: vec![],
                             location: (*name),
                             message: "'@elseif' must follow an '@if' or another '@elseif'."
                                 .to_string(),
@@ -73,6 +74,7 @@ impl<'src, 'context> AnalyzerListener<'src> for IfChainValidator<'context> {
                     IfChainState::AfterIf => self.set(IfChainState::AfterElse),
                     _ => {
                         errors.push(XenoDiagnostic {
+                            tags: vec![],
                             location: (*name),
                             message: "'@else' must follow an '@if' or '@elseif'.".to_string(),
                             severity: crate::XenoDiagSeverity::Err,

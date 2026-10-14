@@ -69,11 +69,23 @@ impl<'src> DeclarationMethods<'src> for Declaration {
             token
         };
 
-        let dec = match var {
+        let public = if *var == TokenVariant::Pub {
+            Some(*d)
+        } else {
+            None
+        };
+        let (var, d) = if public.is_some() {
+            let (var, d) = parser.need_next()?;
+            (var, d)
+        } else {
+            (var, d)
+        };
+        let mut dec = match var {
             TokenVariant::Type => Declaration::parse_type_declaration(parser, *d, docs),
             TokenVariant::Import => Declaration::parse_import_declaration(parser, *d, docs),
             _ => {
                 parser.diagnostics.push(XenoDiagnostic {
+                    tags: vec![],
                     location: *d,
                     message: format!("Unknown declaration at {}, ({:?}).", d, var),
                     severity: XenoDiagSeverity::Err,
@@ -81,6 +93,8 @@ impl<'src> DeclarationMethods<'src> for Declaration {
                 return None;
             }
         }?;
+
+        dec.set_public(public);
 
         parser.expect(TokenVariant::Semicolon)?;
 
@@ -129,6 +143,7 @@ impl<'src> DeclarationMethods<'src> for Declaration {
                 .or_else(|| t.0.get_last_token())
                 .unwrap_or(from);
         Some(Declaration::Type {
+            public: None,
             docs,
             name,
             generics,
@@ -144,21 +159,60 @@ impl<'src> DeclarationMethods<'src> for Declaration {
     ) -> Option<Declaration> {
         if docs.is_some() {
             parser.diagnostics.push(XenoDiagnostic {
+                tags: vec![],
                 location,
                 message: "Import declarations cannot have documentation comments.".to_string(),
                 severity: XenoDiagSeverity::Info,
             });
         }
 
-        // TODO can this be used with LSP for path recommendations?
-        let path_tok = parser.expect(TokenVariant::Path)?;
-        let path = path_tok
-            .text(parser.source)
-            .split('/')
-            .map(str::to_string)
-            .collect::<Vec<_>>();
-
-        Some(Declaration::Import { path, location })
+        let mut path_tokens = vec![parser.expect(TokenVariant::Identifier)?];
+        let names;
+        loop {
+            parser.expect(TokenVariant::PathSeparator)?;
+            if matches!(parser.peek(), Some((TokenVariant::LCurly, _))) {
+                names = parser.parse_list(
+                    TokenVariant::LCurly,
+                    TokenVariant::Comma,
+                    Some(TokenVariant::RCurly),
+                    |p| p.expect(TokenVariant::Identifier),
+                )?;
+                if names.is_empty() {
+                    parser.diagnostics.push(XenoDiagnostic {
+                        tags: vec![],
+                        location,
+                        message: "An import must select at least one declaration".into(),
+                        severity: XenoDiagSeverity::Err,
+                    });
+                }
+                break;
+            }
+            let ident = parser.expect(TokenVariant::Identifier)?;
+            if matches!(parser.peek(), Some((TokenVariant::PathSeparator, _))) {
+                path_tokens.push(ident);
+            } else {
+                names = vec![ident];
+                break;
+            }
+        }
+        let path = path_tokens
+            .iter()
+            .map(|token| token.text(parser.source).to_string())
+            .collect();
+        let end = parser
+            .peek()
+            .map(|(_, token)| token.start)
+            .unwrap_or(location.end);
+        Some(Declaration::Import {
+            public: None,
+            path,
+            path_tokens,
+            names,
+            location: TokenData {
+                start: location.start,
+                end,
+            },
+        })
     }
 }
 pub trait TypeMethods<'src>: Sized {
@@ -221,6 +275,7 @@ impl<'src> TypeMethods<'src> for Type {
 
         if element_type.is_none() && values.is_none() {
             parser.diagnostics.push(XenoDiagnostic {
+                tags: vec![],
                 location: keyword,
                 message: "A set requires an element type, a literal prefill, or both.".to_string(),
                 severity: XenoDiagSeverity::Err,
@@ -248,6 +303,7 @@ impl<'src> TypeMethods<'src> for Type {
             )
         {
             parser.diagnostics.push(XenoDiagnostic {
+                tags: vec![],
                 location: token.1,
                 message: "Set prefills can contain only literals.".to_string(),
                 severity: XenoDiagSeverity::Err,
@@ -284,6 +340,7 @@ impl<'src> TypeMethods<'src> for Type {
             if parser.peek_is(TokenVariant::RCurly) {
                 if let Some(docs) = docs {
                     parser.diagnostics.push(XenoDiagnostic {
+                        tags: vec![],
                         location: docs,
                         message: "Documentation comment without a field.".to_string(),
                         severity: XenoDiagSeverity::Warn,
@@ -386,6 +443,7 @@ impl<'src> SimpleTypeMethods<'src> for SimpleType {
                 .map(SimpleType::Literal)
                 .or_else(|| {
                     parser.diagnostics.push(XenoDiagnostic {
+                        tags: vec![],
                         location: t.1,
                         message: format!("Unexpected token {:?} in simple type expression.", t.0),
                         severity: XenoDiagSeverity::Err,
@@ -512,6 +570,7 @@ impl<'src> LiteralMethods<'src> for Literal {
                 })
         }
         .map_err(|e| XenoDiagnostic {
+            tags: vec![],
             location: cast.unwrap_or(d),
             message: format!("Error parsing number: {}", e),
             severity: XenoDiagSeverity::Err,

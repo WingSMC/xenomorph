@@ -145,11 +145,38 @@ impl<'src> AnalyzerListener<'src> for TsGenerator {
     ) {
         // Generate type declarations
         for decl in ast {
+            if let Declaration::Import {
+                public: Some(_),
+                names,
+                ..
+            } = decl
+            {
+                let mut exports: std::collections::BTreeMap<String, Vec<&str>> =
+                    std::collections::BTreeMap::new();
+                for name in names {
+                    let text = name.text(&self.source);
+                    if let Some(path) = self
+                        .type_hierarchy
+                        .get_type(text)
+                        .and_then(|d| d.module_path.clone())
+                    {
+                        exports.entry(path).or_default().push(text);
+                    }
+                }
+                for (path, names) in exports {
+                    self.out.push_str(&format!(
+                        "export type {{ {} }} from \"{}\";\n",
+                        names.join(", "),
+                        ts_import_specifier(&self.module_path, &path)
+                    ));
+                }
+            }
             if let Declaration::Type {
                 docs,
                 name,
                 generics,
                 ty: t,
+                public,
                 ..
             } = decl
             {
@@ -160,6 +187,7 @@ impl<'src> AnalyzerListener<'src> for TsGenerator {
                     generics.as_deref(),
                     t,
                     &self.source,
+                    public.is_some(),
                 );
             }
         }
@@ -194,6 +222,7 @@ impl<'src> AnalyzerListener<'src> for TsGenerator {
         if let Literal::Float(float) = literal {
             if !xenomorph_common::parser::decimal_roundtrips_as(&float.value, FloatSize::F64) {
                 errors.push(XenoDiagnostic {
+                    tags: vec![],
                     location: float.cast.unwrap_or(float.token),
                     message: format!(
                         "TypeScript cannot represent floating-point literal '{}' exactly with its built-in number type.",
@@ -256,7 +285,9 @@ fn generate_type_decl(
     generics: Option<&[(TokenData, Option<TokenData>)]>,
     t: &XenoType,
     source: &str,
+    public: bool,
 ) {
+    let export = if public { "export " } else { "" };
     let annotations: Vec<String> =
         t.1.iter()
             .map(|value| format_annotation(value, source))
@@ -278,12 +309,12 @@ fn generate_type_decl(
     }
 
     if let Type::Struct(fields) = &t.0 {
-        generate_interface(out, name, &generic_params, fields, source);
+        generate_interface(out, name, &generic_params, fields, source, export);
         return;
     }
 
     if let Type::Enum(variants) = &t.0 {
-        generate_enum(out, name, variants, source);
+        generate_enum(out, name, variants, source, export);
         return;
     }
 
@@ -303,11 +334,11 @@ fn generate_type_decl(
                     )
                 });
             out.push_str(&format!(
-                "export const {name}_TYPE_VALUES = [{}] as const{constraint};\n",
+                "{export}const {name}_TYPE_VALUES = [{}] as const{constraint};\n",
                 elems.join(", ")
             ));
             out.push_str(&format!(
-                "export type {name} = (typeof {name}_TYPE_VALUES)[number];\n\n"
+                "{export}type {name} = (typeof {name}_TYPE_VALUES)[number];\n\n"
             ));
             return;
         }
@@ -320,18 +351,18 @@ fn generate_type_decl(
                 .map(|value| simple_type_to_ts(value, source))
                 .collect::<Vec<_>>();
             out.push_str(&format!(
-                "export const {name}_TYPE_VALUES = [{}] as const;\n",
+                "{export}const {name}_TYPE_VALUES = [{}] as const;\n",
                 values.join(", ")
             ));
             out.push_str(&format!(
-                "export type {name} = typeof {name}_TYPE_VALUES;\n\n"
+                "{export}type {name} = typeof {name}_TYPE_VALUES;\n\n"
             ));
             return;
         }
     }
 
     let ts = type_to_ts(&t.0, source);
-    out.push_str(&format!("export type {name}{generic_params} = {ts};\n\n"));
+    out.push_str(&format!("{export}type {name}{generic_params} = {ts};\n\n"));
 }
 
 // ── Interface (struct) generation ───────────────────────────────────
@@ -342,8 +373,9 @@ fn generate_interface(
     generic_params: &str,
     fields: &[KeyValExpr],
     source: &str,
+    export: &str,
 ) {
-    out.push_str(&format!("export interface {name}{generic_params} {{\n"));
+    out.push_str(&format!("{export}interface {name}{generic_params} {{\n"));
     for (key, value, docs) in fields {
         let ts_type = simple_type_to_ts(value, source);
         let optional = is_optional(value);
@@ -362,7 +394,13 @@ fn generate_interface(
 
 // ── Enum generation ─────────────────────────────────────────────────
 
-fn generate_enum(out: &mut String, name: &str, variants: &[KeyValExpr], source: &str) {
+fn generate_enum(
+    out: &mut String,
+    name: &str,
+    variants: &[KeyValExpr],
+    source: &str,
+    export: &str,
+) {
     let all_numeric = variants.iter().all(|(_, value, _)| match value {
         SimpleType::Literal(Literal::Float(_)) => true,
         SimpleType::Literal(Literal::Int(integer)) => !integer_uses_bigint(integer, source),
@@ -370,7 +408,7 @@ fn generate_enum(out: &mut String, name: &str, variants: &[KeyValExpr], source: 
     });
 
     if all_numeric {
-        out.push_str(&format!("export enum {name} {{\n"));
+        out.push_str(&format!("{export}enum {name} {{\n"));
         for (key, value, docs) in variants {
             if let Some(docs) = docs {
                 push_jsdoc(out, extract_documentation(docs, source), "  ");
@@ -383,7 +421,7 @@ fn generate_enum(out: &mut String, name: &str, variants: &[KeyValExpr], source: 
         }
         out.push_str("}\n\n");
     } else {
-        out.push_str(&format!("export type {name} =\n"));
+        out.push_str(&format!("{export}type {name} =\n"));
         for (index, (key, value, docs)) in variants.iter().enumerate() {
             let payload_ts = simple_type_to_ts(value, source);
             if let Some(docs) = docs {
@@ -789,6 +827,7 @@ fn report_typescript_keyword(
 ) {
     if is_typescript_keyword(identifier.text(source)) {
         errors.push(XenoDiagnostic {
+            tags: vec![],
             location: *identifier,
             message: format!(
                 "TypeScript {kind} identifier '{}' conflicts with a reserved keyword.",
@@ -837,6 +876,7 @@ mod tests {
             None,
             &ty,
             FIXTURE_SOURCE,
+            true,
         );
 
         assert!(out.contains(" * A user-facing profile."));
@@ -863,6 +903,7 @@ mod tests {
             Some(&generics),
             &ty,
             FIXTURE_SOURCE,
+            true,
         );
 
         assert_eq!(out, "export type UserName<T> = T;\n\n");
@@ -892,6 +933,7 @@ mod tests {
             Some(&generics),
             &ty,
             FIXTURE_SOURCE,
+            true,
         );
 
         assert_eq!(
@@ -910,7 +952,7 @@ mod tests {
         );
         let mut out = String::new();
 
-        generate_type_decl(&mut out, &None, "Payload", None, &ty, FIXTURE_SOURCE);
+        generate_type_decl(&mut out, &None, "Payload", None, &ty, FIXTURE_SOURCE, true);
 
         assert!(out.contains("  \"ecu.test\": string;"));
     }
@@ -921,6 +963,7 @@ mod tests {
         let from = token("type");
         let value = token("string");
         let declaration = Declaration::Type {
+            public: None,
             docs: None,
             name,
             generics: None,
@@ -953,7 +996,15 @@ mod tests {
         );
         let mut out = String::new();
 
-        generate_type_decl(&mut out, &None, "Uppercase", None, &ty, FIXTURE_SOURCE);
+        generate_type_decl(
+            &mut out,
+            &None,
+            "Uppercase",
+            None,
+            &ty,
+            FIXTURE_SOURCE,
+            true,
+        );
 
         assert_eq!(
             out,
@@ -986,7 +1037,7 @@ mod tests {
         );
         let mut out = String::new();
 
-        generate_type_decl(&mut out, &None, "A", None, &ty, FIXTURE_SOURCE);
+        generate_type_decl(&mut out, &None, "A", None, &ty, FIXTURE_SOURCE, true);
 
         assert_eq!(
             out,
@@ -1015,7 +1066,7 @@ mod tests {
         );
         let mut out = String::new();
 
-        generate_type_decl(&mut out, &None, "A", None, &ty, FIXTURE_SOURCE);
+        generate_type_decl(&mut out, &None, "A", None, &ty, FIXTURE_SOURCE, true);
 
         assert_eq!(
             out,
@@ -1039,7 +1090,7 @@ mod tests {
         );
         let mut out = String::new();
 
-        generate_type_decl(&mut out, &None, "A", None, &ty, FIXTURE_SOURCE);
+        generate_type_decl(&mut out, &None, "A", None, &ty, FIXTURE_SOURCE, true);
 
         assert_eq!(out, "export type A = Set<string>;\n\n");
     }
@@ -1057,7 +1108,7 @@ mod tests {
         );
         let mut out = String::new();
 
-        generate_type_decl(&mut out, &None, "P", None, &ty, FIXTURE_SOURCE);
+        generate_type_decl(&mut out, &None, "P", None, &ty, FIXTURE_SOURCE, true);
 
         assert_eq!(
             out,

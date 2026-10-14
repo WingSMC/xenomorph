@@ -36,6 +36,7 @@ impl<'scope> NameCollisionValidator<'scope> {
 
     fn error(errors: &mut Vec<XenoDiagnostic>, location: &TokenData, message: String) {
         errors.push(XenoDiagnostic {
+            tags: vec![],
             location: *location,
             message,
             severity: XenoDiagSeverity::Err,

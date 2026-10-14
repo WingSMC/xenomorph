@@ -20,6 +20,7 @@ pub struct ModuleDiagnostic {
     pub location: Option<(u32, u32, u32)>, // line, column, length
     pub phase: ErrorPhase,
     pub severity: crate::XenoDiagSeverity,
+    pub tags: Vec<crate::XenoDiagnosticTag>,
 }
 
 impl fmt::Display for ModuleDiagnostic {
@@ -36,6 +37,7 @@ pub type ModulePath = String;
 /// Records which module the declaration lives in.
 #[derive(Debug, Clone)]
 pub struct DeclarationInfo {
+    pub public: bool,
     /// The name of the declared type.
     pub name: String,
     /// Which module (ModulePath) this declaration comes from.

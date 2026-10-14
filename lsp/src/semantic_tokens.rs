@@ -114,6 +114,7 @@ fn lexical_style(variant: TokenVariant) -> Option<TokenStyle> {
         TokenVariant::Identifier => TokenKind::Type,
         TokenVariant::Type
         | TokenVariant::Import
+        | TokenVariant::Pub
         | TokenVariant::Validator
         | TokenVariant::Set
         | TokenVariant::Enum
@@ -134,6 +135,7 @@ fn lexical_style(variant: TokenVariant) -> Option<TokenStyle> {
         | TokenVariant::Neq
         | TokenVariant::Gt
         | TokenVariant::Lt => TokenKind::Operator,
+        TokenVariant::PathSeparator => TokenKind::Operator,
         TokenVariant::Documentation => {
             return Some(TokenStyle {
                 kind: TokenKind::Comment,
@@ -160,7 +162,14 @@ fn ast_roles(ast: &[Declaration], source: &str) -> HashMap<TokenPosition, TokenS
 
     for declaration in ast {
         match declaration {
-            Declaration::Import { .. } => {}
+            Declaration::Import { path_tokens, .. } => {
+                for token in path_tokens {
+                    roles.insert(
+                        TokenPosition::from(*token),
+                        TokenStyle::new(TokenKind::Namespace),
+                    );
+                }
+            }
             Declaration::Type {
                 name, generics, ty, ..
             } => {
@@ -414,7 +423,7 @@ mod tests {
     #[test]
     fn syntax_roles_come_from_the_rust_tokens_and_ast() {
         let source = r#"/** docs */
-import shared/types;
+pub import shared::types::{Shared};
 type Box<T: number> = {
     value: T,
 };
@@ -432,7 +441,10 @@ type Cast = 1 as u64;
 
         assert!(contains("/** docs */", TokenKind::Comment, DOCUMENTATION));
         assert!(contains("import", TokenKind::Keyword, 0));
-        assert!(contains("shared/types", TokenKind::Namespace, 0));
+        assert!(contains("pub", TokenKind::Keyword, 0));
+        assert!(contains("shared", TokenKind::Namespace, 0));
+        assert!(contains("types", TokenKind::Namespace, 0));
+        assert!(contains("Shared", TokenKind::Type, 0));
         assert!(contains("Box", TokenKind::Type, DECLARATION));
         assert!(contains("T", TokenKind::TypeParameter, DECLARATION));
         assert!(contains("T", TokenKind::TypeParameter, 0));

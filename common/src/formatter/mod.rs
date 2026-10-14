@@ -68,6 +68,32 @@ pub fn format_xenomorph_with_syntax(
         max_line_length,
         indent_width,
     ));
+    for declaration in ast {
+        if let Declaration::Import {
+            location, public, ..
+        } = declaration
+        {
+            let start = fmt_tokens
+                .partition_point(|t| t.original_start < public.unwrap_or(*location).start);
+            let end = fmt_tokens.partition_point(|t| t.original_start < location.end);
+            if let Some(open) =
+                (start..end).find(|i| fmt_tokens[*i].variant == TokenVariant::LCurly)
+            {
+                if let Some(close) = matching_delimiter(&fmt_tokens, open, end) {
+                    if source_range_exceeds_margin(
+                        &source,
+                        fmt_tokens[start].start,
+                        fmt_tokens[close].end + 1,
+                        0,
+                        max_line_length,
+                        indent_width,
+                    ) {
+                        add_delimited_list_breaks(&fmt_tokens, open, close, &mut breaks);
+                    }
+                }
+            }
+        }
+    }
     let trailing_commas = trailing_comma_insertions(&source, &fmt_tokens, &breaks);
     let wrapped = apply_insertions(&source, &breaks, &trailing_commas);
     let remapped_tokens = remap_token_lines(&source, &fmt_tokens, &breaks);
@@ -397,11 +423,14 @@ fn annotation_breaks(
 fn type_declaration_ranges(tokens: &[FormatToken], ast: &[Declaration]) -> Vec<(usize, usize)> {
     ast.iter()
         .filter_map(|declaration| {
-            let Declaration::Type { from, to, .. } = declaration else {
+            let Declaration::Type {
+                from, to, public, ..
+            } = declaration
+            else {
                 return None;
             };
             let start = tokens
-                .binary_search_by_key(&from.start, |token| token.original_start)
+                .binary_search_by_key(&public.unwrap_or(*from).start, |token| token.original_start)
                 .ok()?;
             let last_syntax_token = tokens
                 .binary_search_by_key(&to.start, |token| token.original_start)
@@ -802,6 +831,27 @@ mod tests {
             max_line_length,
             ..FormatterConfig::default()
         }
+    }
+
+    #[test]
+    fn wraps_public_import_lists_and_preserves_comments_and_line_endings() {
+        let config = FormatterConfig {
+            line_ending: LineEnding::Auto,
+            ..formatter(40)
+        };
+        let source = "pub import folder::models::{ConcreteDeclaration1, ConcreteDeclaration2};";
+        let expected = "pub import folder::models::{\n    ConcreteDeclaration1,\n    ConcreteDeclaration2,\n};";
+        assert_eq!(format_xenomorph(source, &config), expected);
+        assert_eq!(format_xenomorph(expected, &config), expected);
+        assert_eq!(
+            format_xenomorph("pub import folder::models::{A};", &formatter(30)),
+            "pub import folder::models::{\n    A,\n};"
+        );
+        let source = "import folder::models::{\r\n// reason\r\nConcreteDeclaration1,\r\nConcreteDeclaration2\r\n};";
+        let output = format_xenomorph(source, &config);
+        assert!(output.contains("\r\n    // reason\r\n"));
+        assert!(output.contains("ConcreteDeclaration2,\r\n};"));
+        assert_eq!(format_xenomorph(&output, &config), output);
     }
 
     #[test]

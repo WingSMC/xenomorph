@@ -61,6 +61,48 @@ fn parses_imports_and_keeps_non_fatal_information() {
 }
 
 #[test]
+fn parses_visibility_and_single_or_grouped_declaration_imports() {
+    let source = "pub type Api = string; pub import folder::models::{Api, Other,}; import folder::models::Api;";
+    let tokens = Lexer::tokenize(source).unwrap();
+    let (ast, diagnostics) = Parser::parse(&tokens, source);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(ast.len(), 3);
+    assert!(ast[0].public().is_some());
+    let Declaration::Import {
+        path,
+        names,
+        public,
+        ..
+    } = &ast[1]
+    else {
+        panic!("Expected import");
+    };
+    assert_eq!(path, &["folder", "models"]);
+    assert_eq!(
+        names.iter().map(|n| n.text(source)).collect::<Vec<_>>(),
+        ["Api", "Other"]
+    );
+    assert!(public.is_some());
+    assert!(ast[2].public().is_none());
+    for invalid in [
+        "import models;",
+        "import models::{};",
+        "import models::{Api Other};",
+        "pub pub type Api = string;",
+        "import models::::Api;",
+    ] {
+        let tokens = Lexer::tokenize(invalid).unwrap();
+        let (_, diagnostics) = Parser::parse(&tokens, invalid);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.severity == XenoDiagSeverity::Err),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
 fn parses_documentation_and_generics() {
     let generic = source::generic_type_decl(
         source::TYPE_NAME,
@@ -520,15 +562,15 @@ fn missing_semicolon_reports_unexpected_eof() {
 
 #[test]
 fn repeated_import_toggles_and_edits_match_fresh_parsing_and_formatting() {
-    let initial = "// \u{1f600} header\r\nimport other;\r\ntype Root = { value: string };\r\ntype Tail = number;";
+    let initial = "// \u{1f600} header\r\nimport other::Other;\r\ntype Root = { value: string };\r\ntype Tail = number;";
     let mut source = initial.to_string();
     let mut lexed = Lexer::lex(&source);
     let mut parsed = Parser::parse_incremental(&lexed.tokens, &source, None);
     for edit in 0..100 {
         let changed = if edit % 2 == 0 {
-            source.replace("\r\nimport other;", "\r\n// import other;")
+            source.replace("\r\nimport other::Other;", "\r\n// import other::Other;")
         } else {
-            source.replace("\r\n// import other;", "\r\nimport other;")
+            source.replace("\r\n// import other::Other;", "\r\nimport other::Other;")
         };
         let changed = if edit % 3 == 0 {
             changed.replace("value: string", "value: number")
