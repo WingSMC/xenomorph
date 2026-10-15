@@ -11,10 +11,12 @@ use crate::{
         annotation_validator::AnnotationValidator, if_validator::IfChainValidator,
         intersection_validator::IntersectionValidator, name_validator::NameValidator,
         GenericParameterInfo, MetadataGraph, OwnedAnnotation, OwnedType, TypeHierarchy,
-        BUILTIN_ANNOTATIONS, BUILTIN_TRAITS, BUILTIN_TYPES,
     },
     TokenData, XenoDiagnostic,
 };
+
+#[cfg(test)]
+use crate::semantic::BUILTIN_TYPES;
 
 /// Scope information built by the analyzer and passed to listeners.
 /// Contains all known types/annotations with their provenance.
@@ -58,37 +60,7 @@ impl ScopeInfo {
             }
             _ => {}
         }
-        for (key, annotation) in &self.annotations {
-            super::metadata::validate_identity(key, &annotation.name)?;
-            super::metadata::validate_parameter_names(
-                annotation
-                    .params
-                    .iter()
-                    .map(|parameter| parameter.name.as_str()),
-                &annotation.name,
-            )?;
-            for parameter in &annotation.params {
-                super::metadata::validate_constraint(
-                    &parameter.constraint,
-                    |name| self.type_hierarchy.get_type_in(None, name).is_some(),
-                    |name| self.type_hierarchy.has_trait(name),
-                )?;
-            }
-            if annotation.variadic && annotation.explicit_parameters().is_empty() {
-                return Err(format!(
-                    "Variadic annotation '{}' has no explicit parameter to repeat",
-                    annotation.name
-                ));
-            }
-        }
-        if self.known_annotations.len() != self.annotations.len()
-            || self
-                .known_annotations
-                .iter()
-                .any(|name| !self.annotations.contains_key(name))
-        {
-            return Err("Annotation scope index does not match metadata definitions".into());
-        }
+        self.validate_annotation_metadata()?;
         for name in &self.builtin_types {
             if self.type_hierarchy.get_type_in(None, name).is_none() {
                 return Err(format!("Scope references missing global type '{name}'"));
@@ -148,12 +120,63 @@ impl ScopeInfo {
         self.annotations.get(name)
     }
 
-    pub fn insert_metadata(&mut self, metadata: &MetadataGraph) {
-        self.type_hierarchy.insert_metadata(metadata);
-        self.builtin_types.extend(metadata.types.keys().cloned());
-        self.known_annotations
+    fn validate_annotation_metadata(&self) -> Result<(), String> {
+        for (key, annotation) in &self.annotations {
+            super::metadata::validate_identity(key, &annotation.name)?;
+            super::metadata::validate_parameter_names(
+                annotation
+                    .params
+                    .iter()
+                    .map(|parameter| parameter.name.as_str()),
+                &annotation.name,
+            )?;
+            for parameter in &annotation.params {
+                super::metadata::validate_constraint(
+                    &parameter.constraint,
+                    |name| self.type_hierarchy.get_type_in(None, name).is_some(),
+                    |name| self.type_hierarchy.has_trait(name),
+                )?;
+            }
+            if annotation.variadic && annotation.explicit_parameters().is_empty() {
+                return Err(format!(
+                    "Variadic annotation '{}' has no explicit parameter to repeat",
+                    annotation.name
+                ));
+            }
+        }
+        if self.known_annotations.len() != self.annotations.len()
+            || self
+                .known_annotations
+                .iter()
+                .any(|name| !self.annotations.contains_key(name))
+        {
+            return Err("Annotation scope index does not match metadata definitions".into());
+        }
+        Ok(())
+    }
+
+    pub fn insert_metadata(&mut self, metadata: &MetadataGraph) -> Result<(), String> {
+        for (key, annotation) in &metadata.annotations {
+            if self
+                .annotations
+                .get(key)
+                .is_some_and(|existing| existing != annotation)
+            {
+                return Err(format!("Duplicate metadata annotation '{key}'"));
+            }
+        }
+        let mut candidate = self.clone();
+        candidate.type_hierarchy.insert_metadata(metadata)?;
+        candidate
+            .builtin_types
+            .extend(metadata.types.keys().cloned());
+        candidate
+            .known_annotations
             .extend(metadata.annotations.keys().cloned());
-        self.annotations.extend(metadata.annotations.clone());
+        candidate.annotations.extend(metadata.annotations.clone());
+        candidate.validate_annotation_metadata()?;
+        *self = candidate;
+        Ok(())
     }
 
     pub fn implements_trait(&self, candidate: &OwnedType, required: &str) -> bool {
@@ -304,28 +327,25 @@ pub struct Analyzer {
 }
 
 impl Analyzer {
-    pub fn new(generation_mode: bool, plugins: &[LoadedPlugin]) -> Self {
-        let mut analyzer = Self::with_metadata(generation_mode, MetadataGraph::default());
+    pub fn new(generation_mode: bool, plugins: &[LoadedPlugin]) -> Result<Self, String> {
+        let mut analyzer = Self::with_metadata(generation_mode, MetadataGraph::builtins())?;
         for plugin in plugins {
-            analyzer.add_metadata(&plugin.description.metadata);
+            analyzer.add_metadata(&plugin.description.metadata)?;
         }
-        analyzer
+        Ok(analyzer)
     }
 
     /// Constructs an analyzer without native plugin listener factories.
-    pub fn with_metadata(generation_mode: bool, metadata: MetadataGraph) -> Self {
-        Self {
+    pub fn with_metadata(generation_mode: bool, metadata: MetadataGraph) -> Result<Self, String> {
+        metadata.validate()?;
+        Ok(Self {
             generation_mode,
             metadata,
-        }
+        })
     }
 
-    pub fn add_metadata(&mut self, metadata: &MetadataGraph) {
-        self.metadata.types.extend(metadata.types.clone());
-        self.metadata.traits.extend(metadata.traits.clone());
-        self.metadata
-            .annotations
-            .extend(metadata.annotations.clone());
+    pub fn add_metadata(&mut self, metadata: &MetadataGraph) -> Result<(), String> {
+        self.metadata.merge(metadata)
     }
 
     /// Analyze a module's AST with full scope from the cache.
@@ -346,17 +366,12 @@ impl Analyzer {
         let mut type_hierarchy = TypeHierarchy::default();
         let mut annotations = HashMap::new();
 
-        let builtin_metadata =
-            MetadataGraph::from_all_descriptors(BUILTIN_TYPES, BUILTIN_TRAITS, BUILTIN_ANNOTATIONS);
-        for metadata in std::iter::once(&builtin_metadata)
-            .chain(std::iter::once(&self.metadata))
-            .chain(plugins.iter().map(|plugin| &plugin.description.metadata))
-        {
-            type_hierarchy.insert_metadata(metadata);
-            builtin_types.extend(metadata.types.keys().cloned());
-            known_annotations.extend(metadata.annotations.keys().cloned());
-            annotations.extend(metadata.annotations.clone());
-        }
+        type_hierarchy
+            .insert_metadata(&self.metadata)
+            .expect("validated analyzer metadata");
+        builtin_types.extend(self.metadata.types.keys().cloned());
+        known_annotations.extend(self.metadata.annotations.keys().cloned());
+        annotations.extend(self.metadata.annotations.clone());
 
         // Module declarations were indexed when each ModuleData was created.
         // Qualified keys let the hierarchy retain every cached declaration,

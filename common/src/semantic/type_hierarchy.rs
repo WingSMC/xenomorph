@@ -328,7 +328,7 @@ impl OwnedType {
 
 /// One node in the runtime hierarchy. Static builtin/plugin types and loaded
 /// source declarations use the same representation after pass one.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TypeDefinition {
     pub name: String,
     /// `None` for builtin/plugin types, otherwise the declaring module path.
@@ -564,16 +564,39 @@ impl TypeHierarchy {
             &[],
             &[xeno_trait],
             &[],
-        ));
+        ))
+        .expect("consistent trait descriptors");
     }
 
     pub fn insert_semantic_type(&mut self, semantic_type: &XenoType) {
-        self.insert_metadata(&MetadataGraph::from_descriptors(&[semantic_type], &[]));
+        self.insert_metadata(&MetadataGraph::from_descriptors(&[semantic_type], &[]))
+            .expect("consistent type descriptors");
     }
 
     /// Copies a complete, name-linked graph. No descriptor or DLL memory is retained.
-    pub fn insert_metadata(&mut self, metadata: &MetadataGraph) {
+    pub fn insert_metadata(&mut self, metadata: &MetadataGraph) -> Result<(), String> {
+        let mut candidate = self.clone();
+        candidate.copy_metadata(metadata)?;
+        candidate.validate_metadata()?;
+        *self = candidate;
+        Ok(())
+    }
+
+    fn copy_metadata(&mut self, metadata: &MetadataGraph) -> Result<(), String> {
+        for (key, descriptor) in &metadata.traits {
+            super::metadata::validate_identity(key, &descriptor.name)?;
+            if self
+                .traits
+                .get(key)
+                .is_some_and(|existing| existing != descriptor)
+            {
+                return Err(format!("Duplicate metadata trait '{key}'"));
+            }
+        }
         Arc::make_mut(&mut self.traits).extend(metadata.traits.clone());
+        for (key, descriptor) in &metadata.types {
+            super::metadata::validate_identity(key, &descriptor.name)?;
+        }
         for semantic_type in metadata.types.values() {
             let parents = semantic_type
                 .parents
@@ -603,23 +626,30 @@ impl TypeHierarchy {
                     constraint_scope: None,
                 })
                 .collect();
-            Arc::make_mut(&mut self.types).insert(
-                TypeKey {
-                    module_path: None,
-                    name: semantic_type.name.to_string(),
-                },
-                Arc::new(TypeDefinition {
-                    name: semantic_type.name.to_string(),
-                    module_path: None,
-                    generic_params,
-                    parents,
-                    body: None,
-                    traits,
-                    documentation: semantic_type.documentation.clone(),
-                    transparent_alias: false,
-                }),
-            );
+            let key = TypeKey {
+                module_path: None,
+                name: semantic_type.name.to_string(),
+            };
+            let definition = Arc::new(TypeDefinition {
+                name: semantic_type.name.to_string(),
+                module_path: None,
+                generic_params,
+                parents,
+                body: None,
+                traits,
+                documentation: semantic_type.documentation.clone(),
+                transparent_alias: false,
+            });
+            if self
+                .types
+                .get(&key)
+                .is_some_and(|existing| existing != &definition)
+            {
+                return Err(format!("Duplicate metadata type '{}'", key.name));
+            }
+            Arc::make_mut(&mut self.types).insert(key, definition);
         }
+        Ok(())
     }
 
     pub fn insert_declaration(

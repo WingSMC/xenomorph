@@ -23,6 +23,7 @@ static NAME: &str = "java";
 static VERSION: &str = env!("CARGO_PKG_VERSION");
 static PLUGIN: XenoPlugin = XenoPlugin {
     name: NAME,
+    namespace: "java",
     version: VERSION,
     initialize: None,
     shutdown: None,
@@ -93,7 +94,7 @@ static LOMBOK_PARAM: XenoParam = XenoParam {
 static LOMBOK_ANNOTATION: XenoAnnotation = XenoAnnotation {
     name: "Lombok",
     documentation: Some(
-        "Attaches one or more supported Lombok decorators to the generated Java DTO, e.g. `@Lombok(Data, Builder)`.",
+        "Attaches one or more supported Lombok decorators to the generated Java DTO, e.g. `@java::Lombok(java::Data, java::Builder)`.",
     ),
     kind: XenoAnnotationKind::Meta,
     params: &[&ANY_TARGET_PARAM, &LOMBOK_PARAM],
@@ -1052,7 +1053,7 @@ fn has_native_java_mapping(name: &str) -> bool {
 fn collect_lombok_decorators(annotations: &[Annotation], source: &str) -> Vec<String> {
     let mut decorators = Vec::new();
     for annotation in annotations {
-        if annotation.ident.text(source) != "Lombok" {
+        if annotation.ident.text(source) != "java::Lombok" {
             continue;
         }
         for arg in &annotation.params {
@@ -1067,9 +1068,10 @@ fn collect_lombok_decorators(annotations: &[Annotation], source: &str) -> Vec<St
 /// Renders a single `@Lombok(...)` argument as a Java decorator name.
 fn decorator_name(arg: &Expr, source: &str) -> Option<String> {
     match arg {
-        Expr::Type(Type::Simple(SimpleType::Identifier(identifier, _))) => {
-            Some(identifier.text(source).to_string())
-        }
+        Expr::Type(Type::Simple(SimpleType::Identifier(identifier, _))) => identifier
+            .text(source)
+            .strip_prefix("java::")
+            .map(str::to_string),
         _ => None,
     }
 }
@@ -2479,6 +2481,31 @@ mod tests {
             generator.class_annotations(&decorators),
             vec!["Value".to_string()]
         );
+    }
+
+    #[test]
+    fn qualified_lombok_annotations_emit_java_decorator_names() {
+        let source = "type Example = { value: string } @java::Lombok(java::Value, java::Builder);";
+        let ast = parse(source);
+        let Declaration::Type { ty, .. } = &ast[0] else {
+            panic!("type declaration")
+        };
+        assert_eq!(
+            collect_lombok_decorators(&ty.1, source),
+            vec!["Value", "Builder"]
+        );
+        let mut generator = generator_with_declarations(&ast, source);
+        generator.on_before_ast(&ast, &mut Vec::new());
+        let (_, class) = generator
+            .files
+            .iter()
+            .find(|(name, _)| name == "Example")
+            .unwrap();
+        assert!(
+            class.contains("@Value") && class.contains("@Builder"),
+            "{class}"
+        );
+        assert!(!class.contains("java::"));
     }
 
     #[test]

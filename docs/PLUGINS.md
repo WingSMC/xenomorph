@@ -9,7 +9,6 @@ Plugins are `cdylib` libraries. Their exported entry point is
 `xenomorph_plugin_v1`, using the C calling convention. The host checks the ABI
 magic, major version, function-table size, and payload protocol version before
 using callbacks. ABI major 1 and payload protocol 1 are required.
-
 `rust-toolchain.toml` selects a pinned nightly compiler.
 
 The plugin and the host must use the same operating system and architecture,
@@ -38,6 +37,33 @@ only C-compatible function tables, opaque handles, and byte buffers to the host.
 
 Keep metadata providers side-effect-free. Metadata and schema discovery does not
 initialize generator state.
+
+## Declaration namespaces
+
+Every `XenoPlugin` descriptor must declare a `namespace: &str`, for example
+`namespace: "java"`. The namespace must be a nonempty identifier. Plugin names
+and namespaces are independent; the loader rejects duplicate namespaces even
+when the plugins have different names or provide no declarations.
+
+Providers use unqualified descriptor names. The SDK qualifies plugin types,
+traits, annotations, and their internal references as `namespace::Name`. Actual
+core descriptors referenced as dependencies retain their unqualified names.
+The loader rejects declarations outside the plugin's namespace and validates
+the combined core and plugin metadata before publishing it. Duplicate graph
+definitions produce a load error.
+
+Source references require the namespace, including annotation arguments and
+generic constraints. Core declarations remain unqualified:
+
+```xen
+pub type Key = TS::symbol;
+pub type User = { name: string }
+    @java::Lombok(java::Value, java::Builder);
+```
+
+Migrate existing plugin references such as `symbol` and `@Lombok(Data)` to
+`TS::symbol` and `@java::Lombok(java::Data)`. Rebuild plugins with the
+updated SDK; the description payload now includes the required namespace.
 
 ## Configuration
 
@@ -106,7 +132,7 @@ host cannot recover from abort-mode panics or memory corruption in process.
 | Configuration schema | None                             |
 
 The host copies semantic metadata and configuration schemas before releasing
-library handles. This preserves TypeScript's `symbol` and Java's Lombok
+library handles. This preserves TypeScript's `TS::symbol` and Java's Lombok
 definitions in the LSP without retaining their generator code.
 
 The host loads libraries from unique temporary shadow copies. This allows
@@ -147,6 +173,7 @@ tests. On Windows, from the repository root:
 cargo build --workspace
 cargo +stable build -p xenomorph_test_plugin --features alternate-version --target-dir target\plugin-fixture-stable
 cargo build -p xenomorph_test_plugin --features bad-abi --target-dir target\plugin-fixture-bad
+cargo build -p xenomorph_test_plugin --features namespace-collision --target-dir target\plugin-fixture-collision
 cargo test --workspace
 cargo test -p xenomorph_common plugins::tests -- --ignored
 cargo test -p xenomorph_lsp --test reload -- --ignored

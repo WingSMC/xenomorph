@@ -81,7 +81,7 @@ public class SomethingTuple {
 }
 ```
 
-The exact Lombok annotations and accessors depend on the plugin configuration and any Xenomorph `@Lombok(...)` annotations.
+The exact Lombok annotations and accessors depend on the plugin configuration and any Xenomorph `@java::Lombok(java::Value, ...)` annotations.
 
 ## Plugin lifecycle
 

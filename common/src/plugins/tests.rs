@@ -64,6 +64,320 @@ fn wait_for_event(path: &Path, event: &str) {
 }
 
 #[test]
+fn sdk_namespaces_declarations_that_share_builtin_names() {
+    use crate::semantic::{XenoAnnotationKind, XenoType};
+    static TYPE: XenoType = XenoType {
+        name: "string",
+        documentation: Some("Plugin string"),
+        generic_params: None,
+        parents: None,
+    };
+    static ANNOTATION: XenoAnnotation = XenoAnnotation {
+        name: "min",
+        documentation: None,
+        kind: XenoAnnotationKind::Meta,
+        params: &[&crate::semantic::ANY_TARGET_PARAM],
+        variadic: false,
+    };
+    static TYPES: &[&XenoType] = &[&TYPE];
+    static ANNOTATIONS: &[&XenoAnnotation] = &[&ANNOTATION];
+    static PLUGIN: XenoPlugin = XenoPlugin {
+        name: "fixture",
+        namespace: "fixture",
+        version: "1",
+        initialize: None,
+        shutdown: None,
+        provide_types: Some(|| TYPES),
+        provide_annotations: Some(|| ANNOTATIONS),
+        provide_config_schema: None,
+        register_generator: None,
+        register_analyzer: None,
+    };
+    let output = sdk::describe(&PLUGIN);
+    assert_eq!(output.status, 0);
+    let bytes = unsafe { std::slice::from_raw_parts(output.ptr, output.len) }.to_vec();
+    unsafe { sdk::release(output) };
+    let description: sdk::Description = abi::codec::decode(&bytes).unwrap();
+    assert!(description.metadata.types.contains_key("fixture::string"));
+    assert!(description
+        .metadata
+        .annotations
+        .contains_key("fixture::min"));
+    assert!(!description.metadata.types.contains_key("string"));
+    assert_eq!(
+        description.metadata.annotations["fixture::min"].params[0]
+            .constraint
+            .name(),
+        "any"
+    );
+}
+
+#[test]
+fn plugin_graphs_keep_core_and_other_plugin_declarations_distinct() {
+    use crate::semantic::*;
+    static TRAIT: XenoTrait = XenoTrait {
+        name: "KeyTrait",
+        documentation: None,
+        kind: XenoTraitKind::Sum(&KEY_TRAIT),
+        parents: None,
+    };
+    static TYPE: XenoType = XenoType {
+        name: "string",
+        documentation: Some("Plugin string"),
+        generic_params: Some(&[&GenericParam {
+            name: "T",
+            constraint: Some(XenoConstraint::Trait(&TRAIT)),
+        }]),
+        parents: Some(&[XenoParent::Trait(&TRAIT)]),
+    };
+    static ANNOTATION: XenoAnnotation = XenoAnnotation {
+        name: "min",
+        documentation: None,
+        kind: XenoAnnotationKind::Meta,
+        params: &[
+            &crate::semantic::ANY_TARGET_PARAM,
+            &XenoParam {
+                name: "value",
+                constraint: XenoConstraint::Type(&TYPE),
+            },
+        ],
+        variadic: false,
+    };
+    let core = MetadataGraph::builtins();
+    let mut merged = core.clone();
+    let mut namespaces = std::collections::HashSet::new();
+    for namespace in ["first", "second"] {
+        let graph = metadata::from_descriptors(namespace, &[&TYPE], &[&ANNOTATION]).unwrap();
+        assert_eq!(graph.types.len(), 1);
+        assert_eq!(graph.traits.len(), 1);
+        assert_eq!(graph.annotations.len(), 1);
+        let name = format!("{namespace}::string");
+        let tr = format!("{namespace}::KeyTrait");
+        assert_eq!(
+            graph.types[&name].parents,
+            vec![OwnedConstraint::Trait(tr.clone())]
+        );
+        assert_eq!(
+            graph.types[&name].generic_params[0].constraint,
+            Some(OwnedConstraint::Trait(tr.clone()))
+        );
+        assert_eq!(
+            graph.traits[&tr].kind,
+            OwnedTraitKind::Sum("KeyTrait".into())
+        );
+        assert_eq!(
+            graph.annotations[&format!("{namespace}::min")].params[1].constraint,
+            OwnedConstraint::Type(name)
+        );
+        validate_description(
+            &sdk::Description {
+                name: namespace.into(),
+                namespace: namespace.into(),
+                version: "1".into(),
+                metadata: graph,
+                config_schema: None,
+            },
+            &mut namespaces,
+            &mut merged,
+        )
+        .unwrap();
+    }
+    merged.validate().unwrap();
+    assert_eq!(merged.types["string"], core.types["string"]);
+    assert_eq!(merged.traits["KeyTrait"], core.traits["KeyTrait"]);
+    assert_eq!(merged.annotations["min"], core.annotations["min"]);
+    let mut hierarchy = TypeHierarchy::default();
+    hierarchy.insert_metadata(&merged).unwrap();
+    assert!(hierarchy.has_type("first::string"));
+    assert!(hierarchy.has_type("second::string"));
+    assert!(hierarchy.has_trait("first::KeyTrait"));
+}
+
+#[test]
+fn loader_rejects_duplicate_namespaces_even_without_declarations() {
+    let mut namespaces = std::collections::HashSet::new();
+    let mut merged = crate::semantic::MetadataGraph::builtins();
+    let mut description = sdk::Description {
+        name: "first".into(),
+        namespace: "shared".into(),
+        version: "1".into(),
+        metadata: crate::semantic::MetadataGraph::default(),
+        config_schema: None,
+    };
+    validate_description(&description, &mut namespaces, &mut merged).unwrap();
+    description.name = "second".into();
+    assert_eq!(
+        validate_description(&description, &mut namespaces, &mut merged).unwrap_err(),
+        "Duplicate plugin namespace 'shared'"
+    );
+}
+
+#[test]
+#[ignore = "Build workspace cdylibs and the namespace-collision fixture first"]
+fn dynamic_loader_reports_namespace_collisions_before_initializing_the_plugin() {
+    let workspace = Workspace::new();
+    let directory = plugin_directory();
+    fs::copy(
+        directory.join(lib_filename!("xenomorph_typescript")),
+        workspace.0.join(lib_filename!("xenomorph_typescript")),
+    )
+    .unwrap();
+    fs::copy(
+        directory
+            .join("../plugin-fixture-collision/debug")
+            .join(lib_filename!("xenomorph_test_plugin")),
+        workspace.0.join(lib_filename!("xenomorph_test_plugin")),
+    )
+    .unwrap();
+    let config = workspace.config(
+        &workspace.0,
+        &["xenomorph_typescript", "xenomorph_test_plugin"],
+    );
+    let error = match load_plugins(&config, PluginMode::Analysis) {
+        Ok(_) => panic!("namespace collision was accepted"),
+        Err(error) => error,
+    };
+    assert!(
+        error.contains("Duplicate plugin namespace 'typescript'"),
+        "{error}"
+    );
+    assert!(
+        !workspace.0.join("events").exists(),
+        "colliding plugin initialized"
+    );
+    assert!(XenoRegistry::with_config(config, false)
+        .err()
+        .unwrap()
+        .message
+        .contains("Duplicate plugin namespace 'typescript'"));
+}
+
+#[test]
+fn loader_rejects_invalid_namespaces_and_declarations_outside_the_namespace() {
+    let core = crate::semantic::MetadataGraph::builtins();
+    for namespace in ["", " ", "with spaces", "nested::namespace", "type"] {
+        let description = sdk::Description {
+            name: "plugin".into(),
+            namespace: namespace.into(),
+            version: "1".into(),
+            metadata: crate::semantic::MetadataGraph::default(),
+            config_schema: None,
+        };
+        assert!(
+            validate_description(&description, &mut Default::default(), &mut core.clone()).is_err()
+        );
+    }
+    for kind in ["type", "trait", "annotation"] {
+        let mut graph = crate::semantic::MetadataGraph::default();
+        match kind {
+            "type" => {
+                graph
+                    .types
+                    .insert("string".into(), core.types["string"].clone());
+            }
+            "trait" => {
+                graph
+                    .traits
+                    .insert("KeyTrait".into(), core.traits["KeyTrait"].clone());
+            }
+            _ => {
+                graph
+                    .annotations
+                    .insert("min".into(), core.annotations["min"].clone());
+            }
+        }
+        let description = sdk::Description {
+            name: "plugin".into(),
+            namespace: "plugin".into(),
+            version: "1".into(),
+            metadata: graph,
+            config_schema: None,
+        };
+        let error = validate_description(&description, &mut Default::default(), &mut core.clone())
+            .unwrap_err();
+        assert!(
+            error.contains("outside plugin namespace 'plugin'"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn metadata_merge_and_consumers_reject_overwrites_without_mutating_state() {
+    use crate::semantic::*;
+    let core = MetadataGraph::builtins();
+    let mut analyzer = Analyzer::new(false, &[]).unwrap();
+    let mut scope = ScopeInfo {
+        module_path: "test".into(),
+        abs_path: PathBuf::new(),
+        own_types: vec![],
+        imported_types: Default::default(),
+        builtin_types: Default::default(),
+        known_annotations: Default::default(),
+        type_hierarchy: TypeHierarchy::default(),
+        annotations: Default::default(),
+    };
+    scope.insert_metadata(&core).unwrap();
+    for kind in ["type", "trait", "annotation"] {
+        let mut graph = MetadataGraph::default();
+        match kind {
+            "type" => {
+                let mut ty = core.types["string"].clone();
+                ty.documentation = Some("Overwrite".into());
+                graph.types.insert(ty.name.clone(), ty);
+            }
+            "trait" => {
+                let mut tr = core.traits["KeyTrait"].clone();
+                tr.documentation = Some("Overwrite".into());
+                graph.traits.insert(tr.name.clone(), tr);
+            }
+            _ => {
+                let mut annotation = core.annotations["min"].clone();
+                annotation.documentation = Some("Overwrite".into());
+                graph
+                    .annotations
+                    .insert(annotation.name.clone(), annotation);
+            }
+        }
+        let mut merged = core.clone();
+        assert!(merged
+            .merge(&graph)
+            .unwrap_err()
+            .contains("Duplicate metadata"));
+        assert_eq!(merged, core);
+        assert!(analyzer
+            .add_metadata(&graph)
+            .unwrap_err()
+            .contains("Duplicate metadata"));
+        assert!(scope
+            .insert_metadata(&graph)
+            .unwrap_err()
+            .contains("Duplicate metadata"));
+        assert_eq!(scope.annotations, core.annotations);
+        assert_eq!(
+            scope
+                .type_hierarchy
+                .get_type_in(None, "string")
+                .unwrap()
+                .documentation,
+            core.types["string"].documentation
+        );
+        scope.validate_metadata().unwrap();
+    }
+    let mut invalid = MetadataGraph::default();
+    let mut ty = core.types["string"].clone();
+    ty.name = "plugin::Invalid".into();
+    ty.parents = vec![OwnedConstraint::Type("Missing".into())];
+    invalid.types.insert(ty.name.clone(), ty);
+    let mut merged = core.clone();
+    assert!(merged
+        .merge(&invalid)
+        .unwrap_err()
+        .contains("missing type 'Missing'"));
+    assert_eq!(merged, core);
+}
+
+#[test]
 #[ignore = "Build workspace cdylibs first: cargo build --workspace"]
 fn authoritative_config_drives_all_generator_output_paths() {
     let workspace = Workspace::new();
@@ -204,16 +518,20 @@ fn lsp_metadata_survives_generator_library_release() {
     );
     let plugins = load_plugins(&config, PluginMode::Analysis).unwrap();
     assert!(plugins.iter().all(|plugin| !plugin.is_loaded()));
-    assert!(plugins[0].description.metadata.types.contains_key("symbol"));
+    assert!(plugins[0]
+        .description
+        .metadata
+        .types
+        .contains_key("TS::symbol"));
     assert!(plugins[1]
         .description
         .metadata
         .annotations
-        .contains_key("Lombok"));
+        .contains_key("java::Lombok"));
     let registry = XenoRegistry::with_config(config, false).unwrap();
     let diagnostics = registry.load_module_from_source(
         &workspace.0.join("index.xen"),
-        "type Example = symbol @Lombok(Data);".into(),
+        "type Example = TS::symbol @java::Lombok(java::Data);".into(),
     );
     assert!(
         !diagnostics

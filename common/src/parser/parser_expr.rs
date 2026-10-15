@@ -8,6 +8,30 @@ use crate::{
 
 pub use xenomorph_plugin_api::syntax::*;
 
+fn parse_reference(parser: &mut Parser<'_>) -> Option<TokenData> {
+    let mut name = parser.expect(TokenVariant::Identifier)?;
+    if parser.skip_if(TokenVariant::PathSeparator) {
+        let local = parser.expect(TokenVariant::Identifier)?;
+        // Keep the whole qualified spelling in one source range. Whitespace
+        // inside the spelling would make semantic lookup ambiguous.
+        if name.end + 2 != local.start {
+            parser.diagnostics.push(XenoDiagnostic {
+                tags: vec![],
+                location: TokenData {
+                    start: name.start,
+                    end: local.end,
+                },
+                message: "Namespace references must use 'namespace::name' without whitespace."
+                    .into(),
+                severity: XenoDiagSeverity::Err,
+            });
+            return None;
+        }
+        name.end = local.end;
+    }
+    Some(name)
+}
+
 pub trait AnnotationMethods<'src>: Sized {
     fn parse_annotations(parser: &mut Parser<'src>) -> Vec<Annotation>;
     fn parse_annotation(parser: &mut Parser<'src>) -> Option<Annotation>;
@@ -24,7 +48,7 @@ impl<'src> AnnotationMethods<'src> for Annotation {
     }
     fn parse_annotation(parser: &mut Parser<'src>) -> Option<Annotation> {
         parser.expect(TokenVariant::At)?;
-        let ident = parser.expect(TokenVariant::Identifier)?;
+        let ident = parse_reference(parser)?;
 
         let params = if let Some((TokenVariant::LParen, _)) = parser.peek() {
             parser.parse_list(
@@ -116,7 +140,7 @@ impl<'src> DeclarationMethods<'src> for Declaration {
 
                 let constraint = if let Some((TokenVariant::Colon, _)) = parser.peek() {
                     parser.step_forward();
-                    let ident = parser.expect(TokenVariant::Identifier)?;
+                    let ident = parse_reference(parser)?;
                     Some(ident)
                 } else {
                     None
@@ -412,7 +436,7 @@ impl<'src> SimpleTypeMethods<'src> for SimpleType {
         let t = parser.peek()?;
         match t.0 {
             TokenVariant::Identifier => {
-                parser.step_forward();
+                let name = parse_reference(parser)?;
 
                 let arguments = if parser.peek_is(TokenVariant::Lt) {
                     Some(parser.parse_list(
@@ -433,9 +457,9 @@ impl<'src> SimpleTypeMethods<'src> for SimpleType {
                 };
 
                 if is_array {
-                    Some(SimpleType::Array(t.1, arguments))
+                    Some(SimpleType::Array(name, arguments))
                 } else {
-                    Some(SimpleType::Identifier(t.1, arguments))
+                    Some(SimpleType::Identifier(name, arguments))
                 }
             }
 

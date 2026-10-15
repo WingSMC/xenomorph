@@ -549,7 +549,7 @@ fn reload_preserves_unsaved_documents_metadata_and_last_valid_runtime() {
     server.notification("initialized", json!({}));
     server.wait_for_log("Language Server initialized");
     server.notification("textDocument/didOpen", json!({
-        "textDocument": { "uri": uri, "languageId": "xenomorph", "version": 1, "text": "type Draft = symbol;" }
+        "textDocument": { "uri": uri, "languageId": "xenomorph", "version": 1, "text": "type Draft = TS::symbol;" }
     }));
     let symbols = server.request(
         2,

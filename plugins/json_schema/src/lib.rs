@@ -22,6 +22,7 @@ static NAME: &str = "json_schema";
 static VERSION: &str = env!("CARGO_PKG_VERSION");
 static PLUGIN: XenoPlugin = XenoPlugin {
     name: NAME,
+    namespace: "json_schema",
     version: VERSION,
     initialize: None,
     shutdown: None,

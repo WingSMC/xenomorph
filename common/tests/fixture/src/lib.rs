@@ -14,6 +14,11 @@ use xenomorph_common::{
 
 static PLUGIN: XenoPlugin = XenoPlugin {
     name: "fixture",
+    namespace: if cfg!(feature = "namespace-collision") {
+        "TS"
+    } else {
+        "fixture"
+    },
     version: if cfg!(feature = "alternate-version") {
         "2"
     } else {

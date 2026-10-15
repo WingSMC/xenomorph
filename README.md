@@ -65,7 +65,7 @@ file beside that config instead.
 
 The host reports unknown annotations in the selected plugin visibility scope
 as warnings. A TypeScript-only view can therefore tolerate Java-only
-annotations such as `@Lombok`. Unknown types remain errors.
+annotations such as `@java::Lombok`. Unknown types remain errors.
 
 Use `xeno config --inspect` to print the deeply merged TOML configuration to
 standard output. The output omits the consumed `abstract` and `extends` keys.

@@ -2,6 +2,7 @@ use crate::{
     config::Config,
     semantic::{AnalyzerListener, XenoAnnotation, XenoType},
 };
+mod metadata;
 pub mod protocol;
 pub mod sdk;
 pub mod syntax;
@@ -22,6 +23,8 @@ pub type LifecycleCallback = fn(&Config) -> Result<(), String>;
 #[derive(Debug)]
 pub struct XenoPlugin<'a> {
     pub name: &'a str,
+    /// Prefix for all types, traits, and annotations provided by this plugin.
+    pub namespace: &'a str,
     pub version: &'a str,
 
     pub initialize: Option<LifecycleCallback>,
@@ -199,6 +202,8 @@ pub fn encode_request(
 pub fn load_plugins(config: &Config, mode: PluginMode) -> Result<Vec<LoadedPlugin>, String> {
     let mut plugins = Vec::new();
     let mut names = std::collections::HashSet::new();
+    let mut namespaces = std::collections::HashSet::new();
+    let mut merged = crate::semantic::MetadataGraph::builtins();
     for library_name in &config.plugins.plugins {
         let path = config
             .workdir
@@ -212,15 +217,15 @@ pub fn load_plugins(config: &Config, mode: PluginMode) -> Result<Vec<LoadedPlugi
             .map_err(|error| {
                 format!("Plugin '{library_name}' provided invalid metadata: {error}")
             })?;
-        description.metadata.validate().map_err(|error| {
-            format!("Plugin '{library_name}' provided invalid metadata: {error}")
-        })?;
         if description.name.is_empty() || !names.insert(description.name.clone()) {
             return Err(format!(
                 "Plugin '{library_name}' has an empty or duplicate name '{}'",
                 description.name
             ));
         }
+        validate_description(&description, &mut namespaces, &mut merged).map_err(|error| {
+            format!("Plugin '{library_name}' provided invalid metadata: {error}")
+        })?;
         let required = match mode {
             PluginMode::Analysis => abi::ANALYZER,
             PluginMode::Generation => abi::GENERATOR | abi::ANALYZER,
@@ -252,6 +257,39 @@ pub fn load_plugins(config: &Config, mode: PluginMode) -> Result<Vec<LoadedPlugi
         });
     }
     Ok(plugins)
+}
+
+fn validate_description(
+    description: &sdk::Description,
+    namespaces: &mut std::collections::HashSet<String>,
+    merged: &mut crate::semantic::MetadataGraph,
+) -> Result<(), String> {
+    metadata::validate_namespace(&description.namespace)?;
+    if namespaces.contains(&description.namespace) {
+        return Err(format!(
+            "Duplicate plugin namespace '{}'",
+            description.namespace
+        ));
+    }
+    let prefix = format!("{}::", description.namespace);
+    for name in description
+        .metadata
+        .types
+        .keys()
+        .chain(description.metadata.traits.keys())
+        .chain(description.metadata.annotations.keys())
+    {
+        let local = name.strip_prefix(&prefix).ok_or_else(|| {
+            format!(
+                "Declaration '{name}' is outside plugin namespace '{}'",
+                description.namespace
+            )
+        })?;
+        metadata::validate_namespace(local)?;
+    }
+    merged.merge(&description.metadata)?;
+    namespaces.insert(description.namespace.clone());
+    Ok(())
 }
 
 static NEXT_COPY: AtomicU64 = AtomicU64::new(0);

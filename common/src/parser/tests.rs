@@ -21,6 +21,53 @@ fn assert_no_errors(diagnostics: &[XenoDiagnostic]) {
     );
 }
 
+#[test]
+fn parses_plugin_references_in_types_constraints_and_nested_annotations() {
+    let text = "type Example<T: plugin::Trait> = plugin::Container<plugin::Value>[] @plugin::Annotation(@plugin::Nested, plugin::Value);";
+    let tokens = Lexer::tokenize(text).unwrap();
+    let (ast, diagnostics) = parse(&tokens, text);
+    assert_no_errors(&diagnostics);
+    let Declaration::Type { generics, ty, .. } = &ast[0] else {
+        panic!("type declaration")
+    };
+    assert_eq!(
+        generics.as_ref().unwrap()[0].1.unwrap().text(text),
+        "plugin::Trait"
+    );
+    let Type::Simple(SimpleType::Array(name, Some(arguments))) = &ty.0 else {
+        panic!("generic array")
+    };
+    assert_eq!(name.text(text), "plugin::Container");
+    let SimpleType::Identifier(argument, _) = &arguments[0] else {
+        panic!("type argument")
+    };
+    assert_eq!(argument.text(text), "plugin::Value");
+    assert_eq!(ty.1[0].ident.text(text), "plugin::Annotation");
+    let Expr::Annotation(nested) = &ty.1[0].params[0] else {
+        panic!("nested annotation")
+    };
+    assert_eq!(nested.ident.text(text), "plugin::Nested");
+}
+
+#[test]
+fn rejects_incomplete_or_malformed_namespace_references() {
+    for text in [
+        "type A = plugin::;",
+        "type A = string @plugin::;",
+        "type A = plugin :: Value;",
+        "type A = plugin::other::Value;",
+    ] {
+        let tokens = Lexer::tokenize(text).unwrap();
+        let (_, diagnostics) = parse(&tokens, text);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.severity == XenoDiagSeverity::Err),
+            "{text}"
+        );
+    }
+}
+
 fn type_declaration<'src>(
     declaration: &'src Declaration,
     text: &'src str,

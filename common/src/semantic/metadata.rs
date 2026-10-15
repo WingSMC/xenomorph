@@ -1,5 +1,5 @@
 //! Lifetime-free metadata exchanged with plugins and retained by semantic consumers.
-//! Names are stable graph IDs in the global builtin/plugin namespace. Source
+//! Names are stable graph IDs: core names are bare, plugin names use `namespace::name`. Source
 //! declarations retain their separate module-qualified hierarchy identity.
 use std::collections::{HashMap, HashSet};
 
@@ -137,6 +137,52 @@ pub struct MetadataGraph {
 }
 
 impl MetadataGraph {
+    pub fn builtins() -> Self {
+        Self::from_all_descriptors(
+            super::BUILTIN_TYPES,
+            super::BUILTIN_TRAITS,
+            super::BUILTIN_ANNOTATIONS,
+        )
+    }
+
+    /// Rejects duplicate declarations and invalid edges without changing this graph.
+    pub fn merge(&mut self, metadata: &Self) -> Result<(), String> {
+        for (kind, collision) in [
+            (
+                "type",
+                metadata
+                    .types
+                    .keys()
+                    .find(|key| self.types.contains_key(*key)),
+            ),
+            (
+                "trait",
+                metadata
+                    .traits
+                    .keys()
+                    .find(|key| self.traits.contains_key(*key)),
+            ),
+            (
+                "annotation",
+                metadata
+                    .annotations
+                    .keys()
+                    .find(|key| self.annotations.contains_key(*key)),
+            ),
+        ] {
+            if let Some(name) = collision {
+                return Err(format!("Duplicate metadata {kind} '{name}'"));
+            }
+        }
+        let mut merged = self.clone();
+        merged.types.extend(metadata.types.clone());
+        merged.traits.extend(metadata.traits.clone());
+        merged.annotations.extend(metadata.annotations.clone());
+        merged.validate()?;
+        *self = merged;
+        Ok(())
+    }
+
     /// Checks all identities and typed edges before publishing decoded metadata.
     /// Cyclic edges are permitted: runtime traversal uses visited identities.
     pub fn validate(&self) -> Result<(), String> {
@@ -517,7 +563,7 @@ mod tests {
         decoded.validate().unwrap();
         assert_eq!(decoded, graph);
         let mut hierarchy = TypeHierarchy::default();
-        hierarchy.insert_metadata(&decoded);
+        hierarchy.insert_metadata(&decoded).unwrap();
         drop(decoded);
         drop(graph);
         assert!(hierarchy.trait_is_or_inherits("PluginFirst", "PluginSecond"));
@@ -541,7 +587,7 @@ mod tests {
         );
         let mut hierarchy = TypeHierarchy::default();
         graph.validate().unwrap();
-        hierarchy.insert_metadata(&graph);
+        hierarchy.insert_metadata(&graph).unwrap();
         assert!(!hierarchy.implements_trait(
             &OwnedType::Literal(OwnedLiteral::String("value".into())),
             "RecursiveSum",
@@ -560,11 +606,13 @@ mod tests {
             type_hierarchy: TypeHierarchy::default(),
             annotations: HashMap::new(),
         };
-        scope.insert_metadata(&MetadataGraph::from_all_descriptors(
-            BUILTIN_TYPES,
-            BUILTIN_TRAITS,
-            BUILTIN_ANNOTATIONS,
-        ));
+        scope
+            .insert_metadata(&MetadataGraph::from_all_descriptors(
+                BUILTIN_TYPES,
+                BUILTIN_TRAITS,
+                BUILTIN_ANNOTATIONS,
+            ))
+            .unwrap();
         scope.type_hierarchy.set_current_module("local");
         scope
             .type_hierarchy

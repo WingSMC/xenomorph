@@ -42,6 +42,11 @@ receive warnings.
 
 ## Types
 
+Plugin types use `namespace::Type`, plugin annotations use
+`@namespace::Annotation`, and plugin trait constraints use `namespace::Trait`.
+Each reference has one namespace segment and contains no whitespace around
+`::`. Core names such as `string`, `Numeric`, and `@min` remain unqualified.
+
 - Bool: `bool`
     - literals: `true`, `false`
 - Number `number`:

@@ -176,17 +176,24 @@ fn annotation_argument_context<'src>(
 
         match token.0 {
             TokenVariant::LParen => {
-                let annotation_name = index
-                    .checked_sub(1)
-                    .and_then(|index| tokens.get(index))
-                    .filter(|token| token.0 == TokenVariant::Identifier)
-                    .and_then(|name| {
-                        index
-                            .checked_sub(2)
-                            .and_then(|index| tokens.get(index))
-                            .filter(|token| token.0 == TokenVariant::At)
-                            .map(|_| name.1.text(source))
-                    });
+                let annotation_name = index.checked_sub(1).and_then(|local_index| {
+                    let local = tokens.get(local_index)?;
+                    if local.0 != TokenVariant::Identifier {
+                        return None;
+                    }
+                    let (name_index, start) = if local_index >= 2
+                        && tokens[local_index - 1].0 == TokenVariant::PathSeparator
+                        && tokens[local_index - 2].0 == TokenVariant::Identifier
+                        && tokens[local_index - 2].1.end + 2 == local.1.start
+                    {
+                        (local_index - 2, tokens[local_index - 2].1.start)
+                    } else {
+                        (local_index, local.1.start)
+                    };
+                    let at = tokens.get(name_index.checked_sub(1)?)?;
+                    (at.0 == TokenVariant::At)
+                        .then(|| &source[start as usize..local.1.end as usize])
+                });
                 frames.push(match annotation_name {
                     Some(name) => CompletionFrame::Annotation {
                         name,
@@ -704,7 +711,9 @@ impl Backend {
 
     fn literal_completions(&self, required: &OwnedTrait) -> Vec<CompletionItem> {
         let mut hierarchy = TypeHierarchy::default();
-        hierarchy.insert_metadata(&self.registry.metadata);
+        hierarchy
+            .insert_metadata(&self.registry.metadata)
+            .expect("validated registry metadata");
         let accepts = |name: &str| {
             matches!(required.kind, OwnedTraitKind::Literal)
                 || self
@@ -786,7 +795,9 @@ impl Backend {
             return Vec::new();
         };
         let mut hierarchy = TypeHierarchy::default();
-        hierarchy.insert_metadata(&self.registry.metadata);
+        hierarchy
+            .insert_metadata(&self.registry.metadata)
+            .expect("validated registry metadata");
 
         match &required.kind {
             OwnedTraitKind::Semantic => {
@@ -1262,15 +1273,23 @@ impl Backend {
     ) -> Option<HoverTarget> {
         let token = Self::find_token_at_position(source, tokens, position)?;
 
-        if token.0 != TokenVariant::Identifier {
+        if !matches!(
+            token.0,
+            TokenVariant::Identifier | TokenVariant::PathSeparator
+        ) {
             return None;
         }
 
+        let range = xenomorph_common::plugins::syntax::source_tokens(ast)
+            .into_iter()
+            .filter(|range| range.start <= token.1.start && range.end >= token.1.end)
+            .min_by_key(|range| range.end - range.start)
+            .unwrap_or(token.1);
+
         Some(HoverTarget {
-            name: token.1.text(source).to_string(),
-            type_arguments: hover::type_arguments_at_token(ast, &token.1, source)
-                .unwrap_or_default(),
-            range: token_to_editor_range(source, &token.1),
+            name: range.text(source).to_string(),
+            type_arguments: hover::type_arguments_at_token(ast, &range, source).unwrap_or_default(),
+            range: token_to_editor_range(source, &range),
         })
     }
 
@@ -1488,7 +1507,7 @@ impl LanguageServer for Backend {
                 config: Arc::clone(&self.registry.config),
                 metadata: self.registry.metadata.clone(),
                 plugins: Vec::new(),
-                analyzer: xenomorph_common::semantic::Analyzer::new(false, &[]),
+                analyzer: xenomorph_common::semantic::Analyzer::new(false, &[]).unwrap(),
             };
             *self.runtime.registry.write().unwrap() = Arc::new(empty);
         }
@@ -2108,7 +2127,8 @@ mod tests {
                 .hierarchy
                 .write()
                 .unwrap()
-                .insert_metadata(&registry.metadata);
+                .insert_metadata(&registry.metadata)
+                .unwrap();
             for (name, _) in sources {
                 registry.load_module(&[name], true, None);
                 registry.with_module(name, |_, _, module| {
@@ -2689,6 +2709,22 @@ mod tests {
         assert_eq!(
             context_at_end("@Lombok(Data, "),
             Some(("Lombok".to_string(), 1))
+        );
+    }
+
+    #[test]
+    fn qualified_annotation_context_tracks_names_and_nested_parameters() {
+        assert_eq!(
+            context_at_end("@java::Lombok(java::Data, "),
+            Some(("java::Lombok".into(), 1))
+        );
+        assert_eq!(
+            context_at_end("@plugin::Outer(@plugin::Inner(string, "),
+            Some(("plugin::Inner".into(), 1))
+        );
+        assert_eq!(
+            context_at_end("@plugin::Outer(@plugin::Inner(string), "),
+            Some(("plugin::Outer".into(), 1))
         );
     }
 

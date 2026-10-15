@@ -220,11 +220,13 @@ mod tests {
         let (ast, errors) = crate::parser::Parser::parse(&tokens, source);
         assert!(errors.is_empty());
         let mut hierarchy = crate::semantic::TypeHierarchy::default();
-        hierarchy.insert_metadata(&crate::semantic::MetadataGraph::from_all_descriptors(
-            crate::semantic::BUILTIN_TYPES,
-            crate::semantic::BUILTIN_TRAITS,
-            crate::semantic::BUILTIN_ANNOTATIONS,
-        ));
+        hierarchy
+            .insert_metadata(&crate::semantic::MetadataGraph::from_all_descriptors(
+                crate::semantic::BUILTIN_TYPES,
+                crate::semantic::BUILTIN_TRAITS,
+                crate::semantic::BUILTIN_ANNOTATIONS,
+            ))
+            .unwrap();
         let metadata = crate::semantic::MetadataGraph::from_all_descriptors(
             crate::semantic::BUILTIN_TYPES,
             crate::semantic::BUILTIN_TRAITS,

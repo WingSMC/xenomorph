@@ -16,6 +16,7 @@ use xenomorph_plugin_api::{Buffer, Bytes};
 #[derive(Serialize, Deserialize)]
 pub struct Description {
     pub name: String,
+    pub namespace: String,
     pub version: String,
     pub metadata: MetadataGraph,
     #[serde(with = "super::protocol::json_schema")]
@@ -74,8 +75,9 @@ pub fn describe(plugin: &'static XenoPlugin<'static>) -> Buffer {
             .unwrap_or(&[]);
         let description = Description {
             name: plugin.name.to_string(),
+            namespace: plugin.namespace.to_string(),
             version: plugin.version.to_string(),
-            metadata: MetadataGraph::from_descriptors(types, annotations),
+            metadata: super::metadata::from_descriptors(plugin.namespace, types, annotations)?,
             config_schema: plugin
                 .provide_config_schema
                 .map(|provide| {

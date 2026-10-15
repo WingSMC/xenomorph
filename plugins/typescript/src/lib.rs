@@ -21,6 +21,7 @@ static NAME: &str = "typescript";
 static VERSION: &str = env!("CARGO_PKG_VERSION");
 static PLUGIN: XenoPlugin = XenoPlugin {
     name: NAME,
+    namespace: "TS",
     version: VERSION,
     initialize: None,
     shutdown: None,
@@ -601,7 +602,7 @@ fn native_type_to_ts(name: &str) -> Option<&'static str> {
         "NEVER" => "never",
         "any" => "any",
         "null" => "null",
-        "symbol" => "symbol",
+        "TS::symbol" => "symbol",
         _ => return None,
     })
 }
@@ -1128,6 +1129,7 @@ mod tests {
         assert_eq!(native_type_to_ts("null"), Some("null"));
         assert_eq!(native_type_to_ts("NEVER"), Some("never"));
         assert_eq!(native_type_to_ts("symbol"), Some("symbol"));
+        assert_eq!(native_type_to_ts("TS::symbol"), Some("symbol"));
         assert_eq!(native_type_to_ts("Dict"), None);
         assert!(has_native_typescript_mapping("Dict"));
         assert!(!has_native_typescript_mapping("dict"));

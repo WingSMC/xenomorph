@@ -339,18 +339,15 @@ impl XenoRegistry {
             MetadataGraph::from_all_descriptors(BUILTIN_TYPES, BUILTIN_TRAITS, BUILTIN_ANNOTATIONS);
         for plugin in &plugins {
             metadata
-                .types
-                .extend(plugin.description.metadata.types.clone());
-            metadata
-                .traits
-                .extend(plugin.description.metadata.traits.clone());
-            metadata
-                .annotations
-                .extend(plugin.description.metadata.annotations.clone());
+                .merge(&plugin.description.metadata)
+                .map_err(Self::runtime_error)?;
         }
-        let analyzer = Analyzer::new(generation_mode, &plugins);
+        let analyzer = Analyzer::with_metadata(generation_mode, metadata.clone())
+            .map_err(Self::runtime_error)?;
         let mut hierarchy = crate::semantic::TypeHierarchy::default();
-        hierarchy.insert_metadata(&metadata);
+        hierarchy
+            .insert_metadata(&metadata)
+            .map_err(Self::runtime_error)?;
         Ok(XenoRegistry {
             module_cache: RwLock::new(HashMap::default()),
             index: RwLock::new(HashMap::new()),
@@ -933,7 +930,8 @@ impl XenoRegistry {
                 .imports
                 .iter()
                 .all(|p| !Self::has_fatal_diagnostics(&self.get_all_errors_for(p)));
-        let analysis_only = Analyzer::new(false, &self.plugins);
+        let analysis_only = Analyzer::with_metadata(false, self.metadata.clone())
+            .expect("validated registry metadata");
         let analyzer = if generation_allowed {
             &self.analyzer
         } else {
@@ -1168,7 +1166,9 @@ impl XenoRegistry {
         modules.clear();
         self.index.write().unwrap().clear();
         let mut hierarchy = crate::semantic::TypeHierarchy::default();
-        hierarchy.insert_metadata(&self.metadata);
+        hierarchy
+            .insert_metadata(&self.metadata)
+            .expect("validated registry metadata");
         *self.hierarchy.write().unwrap() = hierarchy;
         len
     }
@@ -1476,7 +1476,7 @@ mod tests {
             ),
             root: PathBuf::new(),
             entry: "test".to_string(),
-            analyzer: Analyzer::new(false, &empty_plugins),
+            analyzer: Analyzer::new(false, &empty_plugins).unwrap(),
             plugins: empty_plugins,
             config: Arc::new(Config::default()),
             metadata: MetadataGraph::default(),
@@ -1490,6 +1490,7 @@ mod tests {
         let module = cache.get(module_path).expect("module should be cached");
         let imports = module.borrow_imports().to_vec();
         let mut errors = Analyzer::new(false, &[])
+            .unwrap()
             .run(
                 module.borrow_ast(),
                 module,
@@ -1635,7 +1636,7 @@ mod tests {
         );
         let module = cache.get("test").expect("module should be cached");
 
-        let diagnostics = Analyzer::new(false, &[]).run(
+        let diagnostics = Analyzer::new(false, &[]).unwrap().run(
             module.borrow_ast(),
             module,
             module.borrow_imports(),
@@ -1782,7 +1783,7 @@ mod tests {
             ),
             root: PathBuf::new(),
             entry: "early".to_string(),
-            analyzer: Analyzer::new(false, &empty_plugins),
+            analyzer: Analyzer::new(false, &empty_plugins).unwrap(),
             plugins: empty_plugins,
             config: Arc::new(Config::default()),
             metadata: MetadataGraph::default(),
@@ -1821,7 +1822,7 @@ mod tests {
             ),
             root: PathBuf::new(),
             entry: "first".to_string(),
-            analyzer: Analyzer::new(false, &empty_plugins),
+            analyzer: Analyzer::new(false, &empty_plugins).unwrap(),
             plugins: empty_plugins,
             config: Arc::new(Config::default()),
             metadata: MetadataGraph::default(),

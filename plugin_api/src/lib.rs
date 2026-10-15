@@ -102,6 +102,12 @@ mod tests {
         header = Header::new(ANALYZER);
         header.major += 1;
         assert!(header.validate().is_err());
+        header = Header::new(ANALYZER);
+        header.protocol += 1;
+        assert!(header
+            .validate()
+            .unwrap_err()
+            .contains(&format!("protocol {PROTOCOL_VERSION}")));
     }
 
     #[test]
