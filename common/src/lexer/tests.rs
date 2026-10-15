@@ -37,6 +37,57 @@ mod tests {
     }
 
     #[test]
+    fn custom_blocks_preserve_opaque_contents_and_matching_hash_fences() {
+        let src = "##java @Thing(\"#\");\r\n$invalid \\ text 😀 ### ##; type Next = string;";
+        let tokens = Lexer::tokenize(src).unwrap();
+        assert_eq!(tokens[0].0, TokenVariant::CustomBlock);
+        assert_eq!(
+            tokens[0].1.text(src),
+            "##java @Thing(\"#\");\r\n$invalid \\ text 😀 ### ##"
+        );
+        assert_eq!(tokens[1].0, TokenVariant::Semicolon);
+        assert_eq!(tokens[2].0, TokenVariant::Type);
+        assert_eq!(tokens[2].1.line(src), 1);
+        assert_eq!(
+            tok("#sql SELECT * FROM users#"),
+            vec![(TokenVariant::CustomBlock, "#sql SELECT * FROM users#")]
+        );
+    }
+
+    #[test]
+    fn custom_blocks_require_a_closing_hash_run_of_the_same_length() {
+        for src in [
+            "#java unfinished",
+            "##java only a single #",
+            "##java longer ###",
+        ] {
+            let error = Lexer::tokenize(src).unwrap_err();
+            assert!(error.message.contains("Unterminated custom block"));
+            assert_eq!(error.location.text(src), src);
+        }
+    }
+
+    #[test]
+    fn custom_block_edits_relex_from_the_block_boundary() {
+        let old_source = "type Before = string; ##sql SELECT # old ##; type After = number;";
+        let new_source = old_source.replace("# old", "# new 😀 ###");
+        let old = Lexer::lex(old_source);
+        let edited = Lexer::relex(old_source, &old, &new_source);
+        let fresh = Lexer::lex(&new_source);
+        assert!(edited.error.is_none());
+        assert_eq!(edited.tokens, fresh.tokens);
+        let (_, block) = edited
+            .tokens
+            .iter()
+            .find(|(kind, _)| *kind == TokenVariant::CustomBlock)
+            .unwrap();
+        assert!(!edited
+            .checkpoints
+            .iter()
+            .any(|(offset, _)| *offset > block.start as usize && *offset < block.end as usize));
+    }
+
+    #[test]
     fn current_single_character_tokens() {
         let variants = [
             TokenVariant::Colon,
@@ -250,7 +301,7 @@ mod incremental {
     use crate::lexer::Lexer;
     #[test]
     fn edits_match_full_lexing_across_all_lexical_boundaries() {
-        let source="/** docs\nmore */ import models::user::User; type A = { key: \"hello\nworld\", value: number } @match(/a+/); /* ignored */ type B = |A|number;";
+        let source="/** docs\nmore */ import models::user::User; type A = { key: \"hello\nworld\", value: number } @match(/a+/); /* ignored */ ##java raw #\nextra##; type B = |A|number;";
         let old = Lexer::lex(source);
         assert!(old.error.is_none());
         for offset in source

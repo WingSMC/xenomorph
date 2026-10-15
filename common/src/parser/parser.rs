@@ -231,6 +231,7 @@ impl<'src> Parser<'src> {
                 &tokens
                     .iter()
                     .take(3)
+                    .take_while(|(kind, _)| *kind != TokenVariant::Semicolon)
                     .map(|(kind, r)| (*kind as u8, r.text(source)))
                     .collect::<Vec<_>>(),
             )

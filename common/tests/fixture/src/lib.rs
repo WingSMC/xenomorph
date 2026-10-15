@@ -7,7 +7,10 @@ use std::{
 use xenomorph_common::{
     config::{Config, ConfigValue},
     parser::Declaration,
-    plugins::XenoPlugin,
+    plugins::{
+        protocol::CustomDeclarationRequest, CustomDeclarationMatcher, CustomDeclarationResult,
+        XenoPlugin,
+    },
     semantic::{AnalyzerListener, ScopeInfo},
     XenoDiagSeverity, XenoDiagnostic,
 };
@@ -28,11 +31,72 @@ static PLUGIN: XenoPlugin = XenoPlugin {
     shutdown: Some(shutdown),
     provide_types: None,
     provide_annotations: None,
+    provide_custom_declarations: Some(|| MATCHERS),
     provide_config_schema: None,
-    register_generator: Some(listener),
-    register_analyzer: Some(listener),
+    register_generator: if cfg!(feature = "custom-only") {
+        None
+    } else {
+        Some(generator_listener)
+    },
+    register_analyzer: if cfg!(feature = "custom-only") {
+        None
+    } else {
+        Some(listener)
+    },
 };
 
+static MATCHERS: &[CustomDeclarationMatcher] = &[
+    CustomDeclarationMatcher {
+        identifier: "fixture_consume",
+        parse: parse_custom,
+    },
+    CustomDeclarationMatcher {
+        identifier: "fixture_error",
+        parse: parse_custom,
+    },
+    CustomDeclarationMatcher {
+        identifier: "fixture_invalid",
+        parse: parse_custom,
+    },
+];
+
+fn parse_custom(config: &Config, request: &CustomDeclarationRequest) -> CustomDeclarationResult {
+    if request.identifier == "fixture_error" {
+        return Err(XenoDiagnostic {
+            tags: vec![],
+            location: request.content,
+            severity: XenoDiagSeverity::Err,
+            message: "Fixture custom syntax error".into(),
+        });
+    }
+    if request.identifier == "fixture_invalid" {
+        return Err(XenoDiagnostic {
+            tags: vec![],
+            location: xenomorph_common::TextRange::new(0, 1),
+            severity: XenoDiagSeverity::Err,
+            message: "Invalid diagnostic anchor".into(),
+        });
+    }
+    let failure = |message| XenoDiagnostic {
+        tags: vec![],
+        location: request.location,
+        severity: XenoDiagSeverity::Err,
+        message,
+    };
+    event(&config.workdir, &format!("consume:{}", request.content())).map_err(failure)?;
+    event(
+        &config.workdir,
+        if request.public {
+            "custom-public"
+        } else {
+            "custom-private"
+        },
+    )
+    .map_err(failure)?;
+    fs::write(config.workdir.join("custom-state"), request.content())
+        .map_err(|error| failure(error.to_string()))?;
+    Ok(())
+}
 #[cfg(not(feature = "bad-abi"))]
 xenomorph_common::export_plugin!(PLUGIN);
 
@@ -73,11 +137,20 @@ fn shutdown(config: &Config) -> Result<(), String> {
 
 struct Listener {
     workdir: PathBuf,
+    generation: bool,
 }
 
 fn listener(config: &Config) -> Box<dyn for<'a> AnalyzerListener<'a>> {
     Box::new(Listener {
         workdir: config.workdir.clone(),
+        generation: false,
+    })
+}
+
+fn generator_listener(config: &Config) -> Box<dyn for<'a> AnalyzerListener<'a>> {
+    Box::new(Listener {
+        workdir: config.workdir.clone(),
+        generation: true,
     })
 }
 
@@ -107,7 +180,7 @@ impl<'src> AnalyzerListener<'src> for Listener {
         if let Declaration::Type { name, .. } = declaration {
             errors.push(XenoDiagnostic {
                 tags: vec![],
-                location: (*name),
+                location: *name,
                 severity: XenoDiagSeverity::Info,
                 message: format!("fixture initialized for {}", self.workdir.display()),
             });
@@ -115,6 +188,12 @@ impl<'src> AnalyzerListener<'src> for Listener {
     }
 
     fn on_after_module(&mut self, _: &ScopeInfo) {
+        if self.generation {
+            if let Ok(state) = fs::read(self.workdir.join("custom-state")) {
+                fs::write(self.workdir.join("custom-output"), state)
+                    .expect("fixture custom output");
+            }
+        }
         event(&self.workdir, "callback-end").expect("fixture lifecycle event");
     }
 }

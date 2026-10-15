@@ -22,6 +22,78 @@ fn assert_no_errors(diagnostics: &[XenoDiagnostic]) {
 }
 
 #[test]
+fn custom_declarations_keep_the_identifier_and_unparsed_body() {
+    let text =
+        "/** Custom docs */ pub ##java\n  @Example(# value); $raw \\ code\n##; type Next = string;";
+    let tokens = Lexer::tokenize(text).unwrap();
+    let (ast, diagnostics) = parse(&tokens, text);
+    assert_no_errors(&diagnostics);
+    assert_eq!(ast.len(), 2);
+    let Declaration::Custom {
+        public,
+        docs,
+        name,
+        decl_id,
+        content,
+        location,
+        value,
+        ..
+    } = &ast[0]
+    else {
+        panic!("custom declaration")
+    };
+    assert!(public.is_some());
+    assert_eq!(docs.as_deref(), Some("Custom docs"));
+    assert_eq!(decl_id, "java");
+    assert_eq!(name.as_ref().unwrap().text(text), "java");
+    assert_eq!(content.text(text), "\n  @Example(# value); $raw \\ code\n");
+    assert_eq!(value, content.text(text).as_bytes());
+    assert!(location.text(text).starts_with("##java"));
+    assert!(matches!(&ast[1], Declaration::Type { name, .. } if name.text(text) == "Next"));
+}
+
+#[test]
+fn custom_declarations_require_an_identifier_and_a_semicolon() {
+    for text in [
+        "# sql #",
+        "# 123 code #;",
+        "# type code #;",
+        "# #;",
+        "#java code#",
+    ] {
+        let tokens = Lexer::tokenize(text).unwrap();
+        let (_, diagnostics) = parse(&tokens, text);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.severity == XenoDiagSeverity::Err),
+            "{text}"
+        );
+    }
+    let text = "#java#;";
+    let tokens = Lexer::tokenize(text).unwrap();
+    let (ast, diagnostics) = parse(&tokens, text);
+    assert_no_errors(&diagnostics);
+    assert!(matches!(&ast[0], Declaration::Custom { content, .. } if content.is_empty()));
+}
+
+#[test]
+fn custom_declarations_relocate_all_ranges_during_incremental_reuse() {
+    let source = "type Before = string; ##sql SELECT # code##; type After = number;";
+    let old_tokens = Lexer::tokenize(source).unwrap();
+    let old = Parser::parse_incremental(&old_tokens, source, None);
+    let changed = source.replace("Before", "LongerBefore");
+    let tokens = Lexer::tokenize(&changed).unwrap();
+    let edited = Parser::parse_incremental(&tokens, &changed, Some((&old_tokens, source, &old)));
+    let fresh = Parser::parse_incremental(&tokens, &changed, None);
+    assert!(edited.reused_declarations >= 2);
+    assert_eq!(
+        serde_json::to_value(edited.ast).unwrap(),
+        serde_json::to_value(fresh.ast).unwrap()
+    );
+}
+
+#[test]
 fn parses_plugin_references_in_types_constraints_and_nested_annotations() {
     let text = "type Example<T: plugin::Trait> = plugin::Container<plugin::Value>[] @plugin::Annotation(@plugin::Nested, plugin::Value);";
     let tokens = Lexer::tokenize(text).unwrap();

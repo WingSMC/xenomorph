@@ -11,6 +11,7 @@ crate-type = ["cdylib"]
 bad-abi = []
 alternate-version = []
 namespace-collision = []
+custom-only = []
 
 [dependencies]
 xenomorph_common = { path = "../.." }

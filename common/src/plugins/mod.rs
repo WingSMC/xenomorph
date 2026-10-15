@@ -20,6 +20,18 @@ pub use xenomorph_plugin_api as abi;
 pub type ListenerFactory = fn(config: &Config) -> Box<dyn for<'a> AnalyzerListener<'a>>;
 pub type LifecycleCallback = fn(&Config) -> Result<(), String>;
 
+/// Matchers are selected by identifier before their callback is invoked.
+#[derive(Debug)]
+pub struct CustomDeclarationMatcher {
+    pub identifier: &'static str,
+    pub parse: CustomDeclarationParser,
+}
+
+pub type CustomDeclarationParser =
+    fn(&Config, &protocol::CustomDeclarationRequest) -> CustomDeclarationResult;
+
+pub type CustomDeclarationResult = Result<(), crate::XenoDiagnostic>;
+
 #[derive(Debug)]
 pub struct XenoPlugin<'a> {
     pub name: &'a str,
@@ -31,15 +43,13 @@ pub struct XenoPlugin<'a> {
     pub shutdown: Option<LifecycleCallback>,
     pub provide_types: Option<fn() -> &'static [&'static XenoType]>,
     pub provide_annotations: Option<fn() -> &'static [&'static XenoAnnotation]>,
+    pub provide_custom_declarations: Option<fn() -> &'static [CustomDeclarationMatcher]>,
     /// Returns a JSON Schema (as a string) describing this plugin's
     /// `[plugins.<name>]` configuration section in `xenomorph.toml`.
     pub provide_config_schema: Option<fn() -> &'static str>,
     pub register_generator: Option<ListenerFactory>,
     pub register_analyzer: Option<ListenerFactory>,
     // execute: fn(&[&str]),
-
-    // parse_custom_declaration
-    // parse_custom_expression
 }
 
 macro_rules! lib_filename {
@@ -76,6 +86,73 @@ pub struct LoadedPlugin {
 impl LoadedPlugin {
     pub fn is_loaded(&self) -> bool {
         self.runtime.is_some()
+    }
+
+    pub fn parse_custom(
+        &self,
+        request: &protocol::CustomDeclarationRequest,
+    ) -> CustomDeclarationResult {
+        let failure = |message: String| crate::XenoDiagnostic {
+            tags: vec![],
+            location: request.location,
+            severity: crate::XenoDiagSeverity::Err,
+            message: format!(
+                "Plugin '{}' custom declaration failed: {message}",
+                self.description.name
+            ),
+        };
+        let input = abi::codec::encode(request).map_err(failure)?;
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| failure("Plugin is not loaded".into()))?;
+        let mut runtime = runtime
+            .lock()
+            .map_err(|_| failure("Plugin instance lock is poisoned".into()))?;
+        if runtime.failed {
+            return Err(failure("Plugin instance is failed; reload it".into()));
+        }
+        let output =
+            unsafe { (runtime.api().parse_custom)(runtime.instance, abi::Bytes::borrowed(&input)) };
+        let decoded = runtime.read_output(output).and_then(|bytes| {
+            abi::codec::decode::<protocol::CustomDeclarationResponse>(&bytes)
+                .map_err(|error| format!("Invalid custom declaration response: {error}"))
+        });
+        let response = match decoded {
+            Ok(response) => response,
+            Err(error) => {
+                runtime.failed = true;
+                return Err(failure(error));
+            }
+        };
+        let valid_range = |range: crate::TextRange| {
+            range.start >= request.location.start
+                && range.end <= request.location.end
+                && range.start <= range.end
+                && request
+                    .source
+                    .get(range.start as usize..range.end as usize)
+                    .is_some()
+        };
+        response.map_err(|diagnostic| {
+            let severity = match diagnostic.get_as_xeno_severity() {
+                Ok(severity) => severity,
+                Err(error) => {
+                    runtime.failed = true;
+                    return failure(error);
+                }
+            };
+            if !valid_range(diagnostic.location) {
+                runtime.failed = true;
+                return failure("Invalid custom declaration diagnostic source range".into());
+            }
+            crate::XenoDiagnostic {
+                tags: vec![],
+                location: diagnostic.location,
+                message: diagnostic.message,
+                severity,
+            }
+        })
     }
 
     pub fn run(
@@ -203,6 +280,7 @@ pub fn load_plugins(config: &Config, mode: PluginMode) -> Result<Vec<LoadedPlugi
     let mut plugins = Vec::new();
     let mut names = std::collections::HashSet::new();
     let mut namespaces = std::collections::HashSet::new();
+    let mut custom_identifiers = std::collections::HashSet::new();
     let mut merged = crate::semantic::MetadataGraph::builtins();
     for library_name in &config.plugins.plugins {
         let path = config
@@ -226,9 +304,11 @@ pub fn load_plugins(config: &Config, mode: PluginMode) -> Result<Vec<LoadedPlugi
         validate_description(&description, &mut namespaces, &mut merged).map_err(|error| {
             format!("Plugin '{library_name}' provided invalid metadata: {error}")
         })?;
+        validate_custom_declarations(&description, capabilities, &mut custom_identifiers)
+            .map_err(|error| format!("Plugin '{library_name}': {error}"))?;
         let required = match mode {
-            PluginMode::Analysis => abi::ANALYZER,
-            PluginMode::Generation => abi::GENERATOR | abi::ANALYZER,
+            PluginMode::Analysis => abi::ANALYZER | abi::CUSTOM_DECLARATIONS,
+            PluginMode::Generation => abi::GENERATOR | abi::ANALYZER | abi::CUSTOM_DECLARATIONS,
             PluginMode::Schema => 0,
         };
         let runtime = if capabilities & required != 0 {
@@ -289,6 +369,29 @@ fn validate_description(
     }
     merged.merge(&description.metadata)?;
     namespaces.insert(description.namespace.clone());
+    Ok(())
+}
+
+fn validate_custom_declarations(
+    description: &sdk::Description,
+    capabilities: u64,
+    identifiers: &mut std::collections::HashSet<String>,
+) -> Result<(), String> {
+    if !description.custom_declarations.is_empty() && capabilities & abi::CUSTOM_DECLARATIONS == 0 {
+        return Err(
+            "Custom matchers were declared without the custom declaration capability".into(),
+        );
+    }
+    let mut additions = std::collections::HashSet::new();
+    for identifier in &description.custom_declarations {
+        metadata::validate_namespace(identifier)?;
+        if identifiers.contains(identifier) || !additions.insert(identifier.clone()) {
+            return Err(format!(
+                "Duplicate custom declaration identifier '{identifier}'"
+            ));
+        }
+    }
+    identifiers.extend(additions);
     Ok(())
 }
 

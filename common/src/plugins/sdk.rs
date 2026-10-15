@@ -8,6 +8,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     ffi::c_void,
     panic::{catch_unwind, AssertUnwindSafe},
 };
@@ -21,11 +22,33 @@ pub struct Description {
     pub metadata: MetadataGraph,
     #[serde(with = "super::protocol::json_schema")]
     pub config_schema: Option<serde_json::Value>,
+    pub custom_declarations: Vec<String>,
 }
 
 struct Instance {
     config: Config,
+    custom_matchers: HashMap<&'static str, super::CustomDeclarationParser>,
     failed: bool,
+}
+
+fn load_custom_matchers(
+    plugin: &'static XenoPlugin<'static>,
+) -> Result<HashMap<&'static str, super::CustomDeclarationParser>, String> {
+    let mut matchers = HashMap::new();
+    for matcher in plugin
+        .provide_custom_declarations
+        .map(|provide| provide())
+        .unwrap_or(&[])
+    {
+        super::metadata::validate_namespace(matcher.identifier)?;
+        if matchers.insert(matcher.identifier, matcher.parse).is_some() {
+            return Err(format!(
+                "Duplicate custom declaration identifier '{}'",
+                matcher.identifier
+            ));
+        }
+    }
+    Ok(matchers)
 }
 
 fn buffer(status: u32, bytes: Vec<u8>) -> Buffer {
@@ -78,6 +101,13 @@ pub fn describe(plugin: &'static XenoPlugin<'static>) -> Buffer {
             namespace: plugin.namespace.to_string(),
             version: plugin.version.to_string(),
             metadata: super::metadata::from_descriptors(plugin.namespace, types, annotations)?,
+            custom_declarations: plugin
+                .provide_custom_declarations
+                .map(|provide| provide())
+                .unwrap_or(&[])
+                .iter()
+                .map(|matcher| matcher.identifier.to_string())
+                .collect(),
             config_schema: plugin
                 .provide_config_schema
                 .map(|provide| {
@@ -88,6 +118,53 @@ pub fn describe(plugin: &'static XenoPlugin<'static>) -> Buffer {
         };
         xenomorph_plugin_api::codec::encode(&description)
     })
+}
+
+/// # Safety
+/// Handle must be a live initialized instance; calls must be serialized.
+pub unsafe fn parse_custom(handle: *mut c_void, bytes: Bytes) -> Buffer {
+    if handle.is_null() {
+        return buffer(1, b"Missing plugin instance".to_vec());
+    }
+    let instance = unsafe { &mut *handle.cast::<Instance>() };
+    let result = invoke(|| {
+        if instance.failed {
+            return Err("Plugin instance is failed; reload it before calling again".into());
+        }
+        let request: super::protocol::CustomDeclarationRequest =
+            xenomorph_plugin_api::codec::decode(unsafe { input(bytes)? })
+                .map_err(|error| format!("Invalid custom declaration request: {error}"))?;
+        if request.location.start > request.content.start
+            || request.content.start > request.content.end
+            || request.content.end > request.location.end
+            || request
+                .source
+                .get(request.location.start as usize..request.location.end as usize)
+                .is_none()
+            || request
+                .source
+                .get(request.content.start as usize..request.content.end as usize)
+                .is_none()
+        {
+            return Err("Invalid custom declaration source range".into());
+        }
+        let parse = instance
+            .custom_matchers
+            .get(request.identifier.as_str())
+            .ok_or_else(|| {
+                format!(
+                    "Unknown custom declaration identifier '{}'",
+                    request.identifier
+                )
+            })?;
+        let response: super::protocol::CustomDeclarationResponse =
+            parse(&instance.config, &request).map_err(|diagnostic| Diagnostic::from(&diagnostic));
+        xenomorph_plugin_api::codec::encode(&response)
+    });
+    if result.status != 0 {
+        instance.failed = true;
+    }
+    result
 }
 
 /// # Safety
@@ -108,11 +185,13 @@ pub unsafe fn initialize(
             xenomorph_plugin_api::codec::decode::<Initialization>(unsafe { input(bytes)? })
                 .map_err(|error| format!("Invalid plugin initialization: {error}"))?
                 .into_config()?;
+        let custom_matchers = load_custom_matchers(plugin)?;
         if let Some(initialize) = plugin.initialize {
             initialize(&config)?;
         }
         let instance = Box::new(Instance {
             config,
+            custom_matchers,
             failed: false,
         });
         unsafe {
@@ -217,6 +296,12 @@ macro_rules! export_plugin {
             unsafe extern "C" fn release(output: $crate::plugins::abi::Buffer) {
                 unsafe { $crate::plugins::sdk::release(output) }
             }
+            unsafe extern "C" fn parse_custom(
+                handle: *mut std::ffi::c_void,
+                input: $crate::plugins::abi::Bytes,
+            ) -> $crate::plugins::abi::Buffer {
+                unsafe { $crate::plugins::sdk::parse_custom(handle, input) }
+            }
             static API: $crate::plugins::abi::Api = $crate::plugins::abi::Api {
                 header: $crate::plugins::abi::Header::new(
                     if $plugin.register_generator.is_some() {
@@ -227,6 +312,10 @@ macro_rules! export_plugin {
                         $crate::plugins::abi::ANALYZER
                     } else {
                         0
+                    } | if $plugin.provide_custom_declarations.is_some() {
+                        $crate::plugins::abi::CUSTOM_DECLARATIONS
+                    } else {
+                        0
                     },
                 ),
                 describe,
@@ -234,8 +323,73 @@ macro_rules! export_plugin {
                 run,
                 destroy,
                 release,
+                parse_custom,
             };
             &API.header
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn custom_matchers_are_loaded_once_per_instance() {
+        static PROVIDER_CALLS: AtomicUsize = AtomicUsize::new(0);
+        static MATCHERS: &[super::super::CustomDeclarationMatcher] =
+            &[super::super::CustomDeclarationMatcher {
+                identifier: "cached",
+                parse: |_, _| Ok(()),
+            }];
+        static PLUGIN: XenoPlugin = XenoPlugin {
+            name: "cached",
+            namespace: "cached",
+            version: "1",
+            initialize: None,
+            shutdown: None,
+            provide_types: None,
+            provide_annotations: None,
+            provide_custom_declarations: Some(|| {
+                PROVIDER_CALLS.fetch_add(1, Ordering::Relaxed);
+                MATCHERS
+            }),
+            provide_config_schema: None,
+            register_generator: None,
+            register_analyzer: None,
+        };
+        let config = Config::default_with_workdir(std::env::temp_dir());
+        let input = xenomorph_plugin_api::codec::encode(&Initialization::new(&config)).unwrap();
+        let mut handle = std::ptr::null_mut();
+        let initialized = unsafe { initialize(&PLUGIN, Bytes::borrowed(&input), &mut handle) };
+        assert_eq!(initialized.status, 0);
+        unsafe { release(initialized) };
+        let source = "#cached body#";
+        let request = super::super::protocol::CustomDeclarationRequest {
+            source: source.into(),
+            module_path: "index".into(),
+            abs_path: config.workdir.join("index.xen"),
+            identifier: "cached".into(),
+            public: false,
+            location: crate::TextRange::new(0, source.len()),
+            content: crate::TextRange::new(7, source.len() - 1),
+        };
+        let input = xenomorph_plugin_api::codec::encode(&request).unwrap();
+        for _ in 0..2 {
+            let output = unsafe { parse_custom(handle, Bytes::borrowed(&input)) };
+            assert_eq!(output.status, 0);
+            let response: super::super::protocol::CustomDeclarationResponse =
+                xenomorph_plugin_api::codec::decode(unsafe {
+                    std::slice::from_raw_parts(output.ptr, output.len)
+                })
+                .unwrap();
+            unsafe { release(output) };
+            assert!(response.is_ok());
+        }
+        assert_eq!(PROVIDER_CALLS.load(Ordering::Relaxed), 1);
+        let destroyed = unsafe { destroy(&PLUGIN, handle) };
+        assert_eq!(destroyed.status, 0);
+        unsafe { release(destroyed) };
+    }
 }

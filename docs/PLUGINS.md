@@ -31,6 +31,7 @@ only C-compatible function tables, opaque handles, and byte buffers to the host.
 | `shutdown`              | Release initialized plugin resources before the instance and library are destroyed.                      |
 | `provide_types`         | Describe semantic types and their dependencies.                                                          |
 | `provide_annotations`   | Describe annotations, parameters, and constraints.                                                       |
+| `provide_custom_declarations` | Register identifiers and callbacks for opaque custom code blocks.                                  |
 | `provide_config_schema` | Describe the plugin's configuration section as JSON Schema.                                              |
 | `register_generator`    | Create a fresh local generator listener for a module.                                                    |
 | `register_analyzer`     | Create a fresh local analysis listener for a module.                                                     |
@@ -65,6 +66,60 @@ Migrate existing plugin references such as `symbol` and `@Lombok(Data)` to
 `TS::symbol` and `@java::Lombok(java::Data)`. Rebuild plugins with the
 updated SDK; the description payload now includes the required namespace.
 
+## Custom declaration matchers
+
+Register matchers through `provide_custom_declarations`, which returns a static
+slice of `CustomDeclarationMatcher`. Each matcher has an `identifier: &str` and
+a callback with this signature:
+
+```rust
+fn parse_custom(
+    config: &Config,
+    request: &CustomDeclarationRequest,
+) -> Result<(), XenoDiagnostic>
+```
+
+These types are available from `xenomorph_common::plugins` and
+`xenomorph_common::plugins::protocol`.
+
+```rust
+static MATCHERS: &[CustomDeclarationMatcher] = &[
+    CustomDeclarationMatcher { identifier: "java", parse: parse_custom },
+];
+// In XenoPlugin:
+// provide_custom_declarations: Some(|| MATCHERS),
+```
+
+For `#java raw code#;`, the lexer emits one opaque block token. The parser
+requires a valid identifier and the semicolon. The host selects the registered
+matcher before indexing declarations or resolving imports. The request includes
+the original source, module path, absolute file path, and byte ranges for the
+whole fenced block and its body, plus a `public` flag for a `pub` prefix.
+`request.content()` returns everything after
+the identifier and before the closing fence, including whitespace.
+
+`Ok(())` consumes the block. The callback can keep parsed data in its
+initialized state and use it during generation.
+`Err(diagnostic)` reports a source diagnostic; an ordinary syntax error allows
+later calls on the same instance. The plugin decides what the `public` flag
+means for its own data. The raw block remains in the source AST.
+
+Handler identifiers are unqualified language identifiers and independent of the
+plugin's namespace. The loader rejects duplicate registrations within a plugin
+or across plugins. The host caches the identifier-to-plugin lookup, and the SDK
+loads callback pointers into a hash map when each instance initializes.
+An unregistered identifier produces a warning.
+
+Callback diagnostics must point inside the block. Custom parsing does not add
+declarations to the compiler AST. Plugins provide types and annotations through
+their static metadata providers.
+
+Use matching hash runs as fences, for example `##java body containing # signs##;`.
+The lexer preserves foreign contents without parsing them. Formatting retains
+the original fenced bytes, and incremental lexing restarts outside the block.
+An edit inside a block rescans the whole block. Each module update invokes the
+callbacks for all of its custom blocks, including blocks reused by the parser.
+
 ## Configuration
 
 The host resolves `xenomorph.toml`, its inheritance chain, and the authoritative
@@ -83,12 +138,13 @@ configuration underneath existing calls.
 ## Wire representation
 
 `xenomorph_plugin_api` defines the C-compatible ABI declarations and syntax
-payload. The function table provides describe, initialize, run, destroy, and
-buffer-release operations.
+payload. The function table provides describe, initialize, run, custom parsing,
+destroy, and buffer-release operations.
 
 Payloads use Postcard binary serialization. The ABI header uses protocol 1.
-Module requests contain the current source, the shared owned AST, and the host's semantic scope.
-AST tokens contain half-open UTF-8 byte ranges into that source. The host
+Module requests contain the current source, the shared AST, and the host's semantic scope.
+AST tokens are copyable half-open UTF-8 byte ranges into that source.
+`TokenData::text(source)` resolves their spelling. The host
 serializes borrowed syntax directly, without constructing another AST.
 Integers use a sign and little-endian magnitude; decimals use an integer
 coefficient and signed scale. Configuration uses typed binary values. JSON
@@ -97,7 +153,10 @@ Native paths use Windows UTF-16 units or Unix bytes. They do not need a lossy UT
 
 The SDK deserializes the shared AST and runs local listener callbacks
 in their normal order. It does not reparse source or rerun workspace resolution.
-Protocol 1 does not support custom opaque Rust declaration values.
+Custom parsing has a separate request and returns a unit result or diagnostic.
+Opaque native Rust values cannot cross the interface. ABI major and payload
+protocol remain 1 while this interface is unreleased; rebuild existing plugins
+with the updated SDK and function table.
 
 Diagnostic severity values are `0` for errors, `1` for warnings, and `2` for
 information. Diagnostic byte ranges must fit within a token in the submitted AST. The host
@@ -127,8 +186,8 @@ host cannot recover from abort-mode panics or memory corruption in process.
 
 | Host operation       | Executable capabilities retained |
 | -------------------- | -------------------------------- |
-| Generation           | Generation and analysis          |
-| LSP / analysis       | Analysis only                    |
+| Generation           | Generation, analysis, and custom parsing |
+| LSP / analysis       | Analysis and custom parsing      |
 | Configuration schema | None                             |
 
 The host copies semantic metadata and configuration schemas before releasing
@@ -174,6 +233,7 @@ cargo build --workspace
 cargo +stable build -p xenomorph_test_plugin --features alternate-version --target-dir target\plugin-fixture-stable
 cargo build -p xenomorph_test_plugin --features bad-abi --target-dir target\plugin-fixture-bad
 cargo build -p xenomorph_test_plugin --features namespace-collision --target-dir target\plugin-fixture-collision
+cargo build -p xenomorph_test_plugin --features custom-only --target-dir target\plugin-fixture-custom
 cargo test --workspace
 cargo test -p xenomorph_common plugins::tests -- --ignored
 cargo test -p xenomorph_lsp --test reload -- --ignored
@@ -189,5 +249,7 @@ The integration tests cover:
 - Panic handling
 - Independently compiled stable/nightly compatibility
 - Incompatible DLL rejection
+- Custom block consumption, plugin state, diagnostics, and generation
+- Matcher collisions, unknown handler warnings, and callback diagnostics
 
 The `plugin-abi` workflow runs these checks on Windows, Linux, and macOS.

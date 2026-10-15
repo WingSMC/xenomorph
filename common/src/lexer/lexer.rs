@@ -143,6 +143,7 @@ impl<'src> Lexer<'src> {
                 ',' => (TokenVariant::Comma, self.single_char_token_next()),
                 ';' => (TokenVariant::Semicolon, self.single_char_token_next()),
                 '@' => (TokenVariant::At, self.single_char_token_next()),
+                '#' => self.consume_custom_block()?,
                 // '+' => (TokenVariant::Plus, self.single_char_token_next()),
                 '0'..='9' => self.consume_number(None),
                 '-' => self.consume_minus_or_number(),
@@ -204,7 +205,7 @@ impl<'src> Lexer<'src> {
     }
 
     /// Restart only at a neutral scanner checkpoint. A whole string, regex,
-    /// comment, or import/path pair is consumed between checkpoints.
+    /// comment, custom block, or import/path pair is consumed between checkpoints.
     pub fn relex(old_source: &str, old: &Lexed, source: &'src str) -> Lexed {
         if old.error.is_some() {
             return Self::lex(source);
@@ -355,6 +356,36 @@ impl<'src> Lexer<'src> {
             tags: vec![],
             message: STRING_TERMINATION_ERROR.to_string(),
             location: self.token_from(&initial_loc),
+            severity: crate::XenoDiagSeverity::Err,
+        })
+    }
+
+    fn consume_custom_block(&mut self) -> Result<Token, XenoDiagnostic> {
+        let start = self.location_snapshot();
+        let mut fence_len = 0;
+        while self.peek() == Some(&'#') {
+            self.next();
+            fence_len += 1;
+        }
+        while let Some(c) = self.next() {
+            if c != '#' {
+                continue;
+            }
+            let mut run_len = 1;
+            while self.peek() == Some(&'#') {
+                self.next();
+                run_len += 1;
+            }
+            if run_len == fence_len {
+                return Ok((TokenVariant::CustomBlock, self.token_from(&start)));
+            }
+        }
+        Err(XenoDiagnostic {
+            tags: vec![],
+            location: self.token_from(&start),
+            message: format!(
+                "Unterminated custom block: expected a closing fence of {fence_len} '#'."
+            ),
             severity: crate::XenoDiagSeverity::Err,
         })
     }

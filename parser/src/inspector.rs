@@ -287,10 +287,10 @@ fn declaration_node(declaration: &Declaration, tokens: &[Token], source: &str) -
             )
         }
         Declaration::Custom {
-            plugin_id,
             decl_id,
             docs,
-            name,
+            location,
+            content,
             ..
         } => {
             let mut children = Vec::new();
@@ -302,13 +302,16 @@ fn declaration_node(declaration: &Declaration, tokens: &[Token], source: &str) -
                     Vec::new(),
                 ));
             }
+            children.push(node(
+                "Content",
+                Some(content.text(source).to_string()),
+                Some(token_range(content, source)),
+                Vec::new(),
+            ));
             node(
                 "CustomDeclaration",
-                Some(match name {
-                    Some(name) => format!("{} ({plugin_id}/{decl_id})", name.text(source)),
-                    None => format!("{plugin_id}/{decl_id}"),
-                }),
-                name.map(|name| token_range(&name, source)),
+                Some(decl_id.clone()),
+                Some(token_range(location, source)),
                 children,
             )
         }

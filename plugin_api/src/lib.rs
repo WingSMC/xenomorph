@@ -12,6 +12,7 @@ pub const ABI_MINOR: u32 = 0;
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const GENERATOR: u64 = 1;
 pub const ANALYZER: u64 = 2;
+pub const CUSTOM_DECLARATIONS: u64 = 4;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -55,6 +56,7 @@ pub struct Api {
     pub run: unsafe extern "C" fn(*mut c_void, Bytes) -> Buffer,
     pub destroy: unsafe extern "C" fn(*mut c_void) -> Buffer,
     pub release: unsafe extern "C" fn(Buffer),
+    pub parse_custom: unsafe extern "C" fn(*mut c_void, Bytes) -> Buffer,
 }
 
 impl Header {

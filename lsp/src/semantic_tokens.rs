@@ -94,10 +94,14 @@ pub fn encode(source: &str, tokens: &[Token], ast: &[Declaration]) -> Vec<Semant
     let mut absolute = Vec::new();
 
     for (variant, data) in tokens {
-        let style = roles
-            .get(&TokenPosition::from(data))
-            .copied()
-            .or_else(|| lexical_style(*variant));
+        let style = if *variant == TokenVariant::CustomBlock {
+            lexical_style(*variant)
+        } else {
+            roles
+                .get(&TokenPosition::from(data))
+                .copied()
+                .or_else(|| lexical_style(*variant))
+        };
         let Some(style) = style else {
             continue;
         };
@@ -122,7 +126,7 @@ fn lexical_style(variant: TokenVariant) -> Option<TokenStyle> {
         | TokenVariant::True
         | TokenVariant::False => TokenKind::Keyword,
         TokenVariant::Number => TokenKind::Number,
-        TokenVariant::String => TokenKind::String,
+        TokenVariant::String | TokenVariant::CustomBlock => TokenKind::String,
         TokenVariant::Regex => TokenKind::Regexp,
         TokenVariant::Not
         | TokenVariant::Or
@@ -418,6 +422,21 @@ mod tests {
                     .map(|style| (data.text(source).to_string(), style))
             })
             .collect()
+    }
+
+    #[test]
+    fn opaque_custom_blocks_are_highlighted_as_multiline_strings() {
+        let source = "#java first\nsecond#;";
+        let tokens = Lexer::tokenize(source).unwrap();
+        let (ast, diagnostics) = Parser::parse(&tokens, source);
+        assert!(diagnostics.is_empty());
+        let encoded = encode(source, &tokens, &ast);
+        assert_eq!(encoded.len(), 2);
+        assert!(encoded
+            .iter()
+            .all(|token| token.token_type == TokenKind::String as u32));
+        assert_eq!(encoded[0].length, 11);
+        assert_eq!(encoded[1].length, 7);
     }
 
     #[test]

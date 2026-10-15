@@ -88,6 +88,31 @@ An explicit `as f32` or `as f64` must pass the corresponding round-trip check. `
 - **Java:** literals use the smallest lossless boxed primitive (`Byte`, `Short`, `Integer`, `Long`, `Float`, or `Double`) and fall back to `BigInteger` or `BigDecimal`. Generation reports an error instead of emitting a value that violates its recorded representation.
 - **JSON Schema:** numeric `const`, `minimum`, and `maximum` values are emitted as exact JSON numbers, including 64-bit and 128-bit integer bounds. JSON Schema has no standard integer-width or decimal-precision type, so explicit casts add the available numeric type and range constraints; downstream JSON parsers can still impose their own precision limits.
 
+## Custom code blocks
+
+A custom declaration starts and ends with matching runs of `#` and requires a
+trailing semicolon. Its first word is a handler identifier, using the language's
+usual identifier rules. Whitespace before that identifier is allowed.
+
+```xen
+#java class Example {}#;
+##sql SELECT '#', id FROM examples;##;
+pub #java class Exported {}#;
+```
+
+The lexer treats the entire fenced block as one opaque token. A maximal run of
+`#` closes the block only when its length matches the opening run. Other runs,
+quotes, comments, punctuation, and line breaks remain raw content. Use a longer
+fence when the body contains a run that would close it. There is no escape syntax.
+
+Plugins register handler identifiers such as `java` or `sql`. These identifiers
+are independent of declaration namespaces, and duplicate registrations are load
+errors. Unknown handlers produce warnings. A handler consumes the body and can
+store parsed data in its plugin state for generation. Parsing returns a unit
+result or a diagnostic. A `pub` prefix is passed to the handler as a flag; the
+plugin determines its meaning.
+Formatting preserves the fenced content verbatim.
+
 ## Complex types
 
 - Structs/Enums: `{...}` or with [generics](#Generics) `<Generics>` `{}`

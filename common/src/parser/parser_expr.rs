@@ -8,6 +8,46 @@ use crate::{
 
 pub use xenomorph_plugin_api::syntax::*;
 
+fn parse_custom_declaration(
+    parser: &mut Parser<'_>,
+    block: &TokenData,
+    docs: Option<String>,
+) -> Option<Declaration> {
+    let spelling = block.text(parser.source);
+    let fence_len = spelling.bytes().take_while(|byte| *byte == b'#').count();
+    let interior = &spelling[fence_len..spelling.len() - fence_len];
+    let leading = interior.len() - interior.trim_start().len();
+    let identifier_len = interior[leading..]
+        .bytes()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        .count();
+    let identifier = &interior[leading..leading + identifier_len];
+    let valid = crate::lexer::Lexer::tokenize(identifier)
+        .is_ok_and(|tokens| matches!(tokens.as_slice(), [(TokenVariant::Identifier, _)]));
+    if !valid {
+        parser.diagnostics.push(XenoDiagnostic {
+            tags: vec![],
+            location: *block,
+            message: "A custom block must start with a handler identifier.".into(),
+            severity: XenoDiagSeverity::Err,
+        });
+        return None;
+    }
+    let start = block.start as usize + fence_len + leading;
+    let name = TokenData::new(start, start + identifier_len);
+    let content = crate::TextRange::new(start + identifier_len, block.end as usize - fence_len);
+    Some(Declaration::Custom {
+        public: None,
+        plugin_id: String::new(),
+        decl_id: identifier.into(),
+        docs,
+        name: Some(name),
+        location: *block,
+        content,
+        value: content.text(parser.source).as_bytes().to_vec(),
+    })
+}
+
 fn parse_reference(parser: &mut Parser<'_>) -> Option<TokenData> {
     let mut name = parser.expect(TokenVariant::Identifier)?;
     if parser.skip_if(TokenVariant::PathSeparator) {
@@ -107,6 +147,7 @@ impl<'src> DeclarationMethods<'src> for Declaration {
         let mut dec = match var {
             TokenVariant::Type => Declaration::parse_type_declaration(parser, *d, docs),
             TokenVariant::Import => Declaration::parse_import_declaration(parser, *d, docs),
+            TokenVariant::CustomBlock => parse_custom_declaration(parser, d, docs),
             _ => {
                 parser.diagnostics.push(XenoDiagnostic {
                     tags: vec![],

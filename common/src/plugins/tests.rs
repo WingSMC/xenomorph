@@ -2,6 +2,7 @@ use super::*;
 use crate::{
     config::{ConfigValue, PluginConfigs},
     module::XenoRegistry,
+    parser::Declaration,
 };
 use std::{
     fs,
@@ -64,6 +65,181 @@ fn wait_for_event(path: &Path, event: &str) {
 }
 
 #[test]
+fn custom_matcher_identifiers_are_unique_across_plugins() {
+    let mut description = sdk::Description {
+        name: "first".into(),
+        namespace: "first".into(),
+        version: "1".into(),
+        metadata: crate::semantic::MetadataGraph::default(),
+        config_schema: None,
+        custom_declarations: vec!["sql".into()],
+    };
+    let mut identifiers = Default::default();
+    validate_custom_declarations(&description, abi::CUSTOM_DECLARATIONS, &mut identifiers).unwrap();
+    description.name = "second".into();
+    assert!(
+        validate_custom_declarations(&description, abi::CUSTOM_DECLARATIONS, &mut identifiers)
+            .unwrap_err()
+            .contains("Duplicate custom declaration identifier 'sql'")
+    );
+    description.custom_declarations = vec!["other".into(), "other".into()];
+    assert!(validate_custom_declarations(
+        &description,
+        abi::CUSTOM_DECLARATIONS,
+        &mut Default::default()
+    )
+    .is_err());
+    description.custom_declarations = vec!["sql".into()];
+    assert!(validate_custom_declarations(&description, 0, &mut Default::default()).is_err());
+    description.custom_declarations = vec!["qualified::name".into()];
+    assert!(validate_custom_declarations(
+        &description,
+        abi::CUSTOM_DECLARATIONS,
+        &mut Default::default()
+    )
+    .is_err());
+}
+
+#[test]
+fn unknown_custom_identifiers_warn_and_native_declarations_still_work() {
+    let workspace = Workspace::new();
+    let registry = XenoRegistry::with_config(workspace.config(&workspace.0, &[]), false).unwrap();
+    let diagnostics = registry.load_module_from_source(
+        &workspace.0.join("index.xen"),
+        "#unknown SELECT *; $foreign \\ text#; pub type Example = string;".into(),
+    );
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic.severity
+        == crate::XenoDiagSeverity::Warn
+        && diagnostic.message == "Unknown custom declaration identifier 'unknown'"));
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == crate::XenoDiagSeverity::Err),
+        "{diagnostics:?}"
+    );
+    assert!(registry.find_declaration("index", "Example").is_some());
+}
+
+#[test]
+#[ignore = "Build workspace cdylibs first: cargo build --workspace"]
+fn custom_matchers_consume_state_and_report_errors_without_expanding_the_ast() {
+    let workspace = Workspace::new();
+    let registry = XenoRegistry::with_config(
+        workspace.config(&plugin_directory(), &["xenomorph_test_plugin"]),
+        false,
+    )
+    .unwrap();
+    let source = "pub ##fixture_consume $raw \\ code # inside##; #fixture_consume metadata $value#; pub type Example = string;";
+    let diagnostics =
+        registry.load_module_from_source(&workspace.0.join("index.xen"), source.into());
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| d.severity == crate::XenoDiagSeverity::Err),
+        "{diagnostics:?}"
+    );
+    assert!(registry.find_declaration("index", "Example").is_some());
+    let events = fs::read_to_string(workspace.0.join("events")).unwrap();
+    assert!(events.contains("consume: metadata $value"));
+    assert!(events.contains("custom-public") && events.contains("custom-private"));
+    registry.with_module("index", |_, ast, module| {
+        assert_eq!(ast.len(), 3);
+        assert_eq!(module.borrow_source(), source);
+        assert!(std::ptr::eq(ast, module.parsed.ast.as_slice()));
+        assert!(matches!(&ast[0], Declaration::Custom { .. }));
+        assert!(matches!(&ast[1], Declaration::Custom { .. }));
+    });
+    let diagnostics = registry.load_module_from_source(
+        &workspace.0.join("index.xen"),
+        "#fixture_error invalid code#;".into(),
+    );
+    assert!(diagnostics
+        .iter()
+        .any(|d| d.message == "Fixture custom syntax error"
+            && d.severity == crate::XenoDiagSeverity::Err));
+    let diagnostics = registry.load_module_from_source(
+        &workspace.0.join("index.xen"),
+        "#fixture_consume recovered#; pub type Example = string;".into(),
+    );
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| d.severity == crate::XenoDiagSeverity::Err),
+        "normal syntax errors must not poison the instance: {diagnostics:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.0.join("custom-state")).unwrap(),
+        " recovered"
+    );
+}
+
+#[test]
+#[ignore = "Build workspace cdylibs first: cargo build --workspace"]
+fn plugins_generate_from_custom_state_without_synthesized_declarations() {
+    let workspace = Workspace::new();
+    fs::write(
+        workspace.0.join("index.xen"),
+        "pub ##fixture_consume custom code with # signs##;",
+    )
+    .unwrap();
+    let config = workspace.config(&plugin_directory(), &["xenomorph_test_plugin"]);
+    let registry = XenoRegistry::load_workspace_with_config(config, true).unwrap();
+    assert!(registry
+        .with_module("index", |_, _, module| module.declarations.is_empty())
+        .unwrap());
+    assert_eq!(
+        fs::read_to_string(workspace.0.join("custom-output")).unwrap(),
+        " custom code with # signs"
+    );
+}
+#[test]
+#[ignore = "Build workspace cdylibs first: cargo build --workspace"]
+fn custom_matchers_cannot_return_diagnostics_outside_their_block() {
+    let workspace = Workspace::new();
+    let registry = XenoRegistry::with_config(
+        workspace.config(&plugin_directory(), &["xenomorph_test_plugin"]),
+        false,
+    )
+    .unwrap();
+    let diagnostics = registry.load_module_from_source(
+        &workspace.0.join("index.xen"),
+        "pub type Before = string; pub #fixture_invalid raw code#;".into(),
+    );
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("Invalid custom declaration diagnostic source range")
+            && diagnostic.severity == crate::XenoDiagSeverity::Err),
+        "{diagnostics:?}"
+    );
+    assert!(registry.find_declaration("index", "Generated").is_none());
+}
+
+#[test]
+#[ignore = "Build the custom-only fixture: cargo build -p xenomorph_test_plugin --features custom-only --target-dir target/plugin-fixture-custom"]
+fn parser_only_plugins_are_retained_for_analysis_and_released_for_schema_discovery() {
+    let workspace = Workspace::new();
+    let directory = plugin_directory().join("../plugin-fixture-custom/debug");
+    let config = workspace.config(&directory, &["xenomorph_test_plugin"]);
+    let schema = load_plugins(&config, PluginMode::Schema).unwrap();
+    assert!(!schema[0].is_loaded());
+    assert_eq!(schema[0].capabilities, abi::CUSTOM_DECLARATIONS);
+    assert!(!workspace.0.join("events").exists());
+    let registry = XenoRegistry::with_config(config, false).unwrap();
+    assert!(registry.plugins[0].is_loaded());
+    let diagnostics = registry.load_module_from_source(
+        &workspace.0.join("index.xen"),
+        "#fixture_consume raw#; pub type Use = string;".into(),
+    );
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == crate::XenoDiagSeverity::Err),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
 fn sdk_namespaces_declarations_that_share_builtin_names() {
     use crate::semantic::{XenoAnnotationKind, XenoType};
     static TYPE: XenoType = XenoType {
@@ -89,6 +265,7 @@ fn sdk_namespaces_declarations_that_share_builtin_names() {
         shutdown: None,
         provide_types: Some(|| TYPES),
         provide_annotations: Some(|| ANNOTATIONS),
+        provide_custom_declarations: None,
         provide_config_schema: None,
         register_generator: None,
         register_analyzer: None,
@@ -176,6 +353,7 @@ fn plugin_graphs_keep_core_and_other_plugin_declarations_distinct() {
                 version: "1".into(),
                 metadata: graph,
                 config_schema: None,
+                custom_declarations: vec![],
             },
             &mut namespaces,
             &mut merged,
@@ -203,6 +381,7 @@ fn loader_rejects_duplicate_namespaces_even_without_declarations() {
         version: "1".into(),
         metadata: crate::semantic::MetadataGraph::default(),
         config_schema: None,
+        custom_declarations: vec![],
     };
     validate_description(&description, &mut namespaces, &mut merged).unwrap();
     description.name = "second".into();
@@ -237,10 +416,7 @@ fn dynamic_loader_reports_namespace_collisions_before_initializing_the_plugin() 
         Ok(_) => panic!("namespace collision was accepted"),
         Err(error) => error,
     };
-    assert!(
-        error.contains("Duplicate plugin namespace 'typescript'"),
-        "{error}"
-    );
+    assert!(error.contains("Duplicate plugin namespace 'TS'"), "{error}");
     assert!(
         !workspace.0.join("events").exists(),
         "colliding plugin initialized"
@@ -249,7 +425,7 @@ fn dynamic_loader_reports_namespace_collisions_before_initializing_the_plugin() 
         .err()
         .unwrap()
         .message
-        .contains("Duplicate plugin namespace 'typescript'"));
+        .contains("Duplicate plugin namespace 'TS'"));
 }
 
 #[test]
@@ -262,6 +438,7 @@ fn loader_rejects_invalid_namespaces_and_declarations_outside_the_namespace() {
             version: "1".into(),
             metadata: crate::semantic::MetadataGraph::default(),
             config_schema: None,
+            custom_declarations: vec![],
         };
         assert!(
             validate_description(&description, &mut Default::default(), &mut core.clone()).is_err()
@@ -292,6 +469,7 @@ fn loader_rejects_invalid_namespaces_and_declarations_outside_the_namespace() {
             version: "1".into(),
             metadata: graph,
             config_schema: None,
+            custom_declarations: vec![],
         };
         let error = validate_description(&description, &mut Default::default(), &mut core.clone())
             .unwrap_err();

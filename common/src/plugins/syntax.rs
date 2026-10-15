@@ -157,7 +157,7 @@ pub fn source_tokens(ast: &[Declaration]) -> Vec<TokenData> {
                 ..
             } => {
                 out.push(*location);
-                out.extend(path_tokens.iter().chain(names).copied());
+                out.extend(path_tokens.iter().chain(names).cloned());
             }
             Declaration::Type {
                 name,
@@ -179,7 +179,13 @@ pub fn source_tokens(ast: &[Declaration]) -> Vec<TokenData> {
                     annotation(a, &mut out)
                 }
             }
-            Declaration::Custom { name, .. } => {
+            Declaration::Custom {
+                name,
+                location,
+                content,
+                ..
+            } => {
+                out.extend([*location, *content]);
                 if let Some(name) = name {
                     out.push(*name)
                 }

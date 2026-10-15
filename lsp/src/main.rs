@@ -1507,6 +1507,7 @@ impl LanguageServer for Backend {
                 config: Arc::clone(&self.registry.config),
                 metadata: self.registry.metadata.clone(),
                 plugins: Vec::new(),
+                custom_matchers: HashMap::new(),
                 analyzer: xenomorph_common::semantic::Analyzer::new(false, &[]).unwrap(),
             };
             *self.runtime.registry.write().unwrap() = Arc::new(empty);

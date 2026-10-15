@@ -153,6 +153,26 @@ pub struct Diagnostic {
     pub location: crate::TextRange,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CustomDeclarationRequest<'src> {
+    pub source: std::borrow::Cow<'src, str>,
+    pub module_path: String,
+    #[serde(with = "path")]
+    pub abs_path: PathBuf,
+    pub identifier: String,
+    pub public: bool,
+    pub location: crate::TextRange,
+    pub content: crate::TextRange,
+}
+
+impl CustomDeclarationRequest<'_> {
+    pub fn content(&self) -> &str {
+        self.content.text(&self.source)
+    }
+}
+
+pub type CustomDeclarationResponse = Result<(), Diagnostic>;
+
 impl From<&XenoDiagnostic> for Diagnostic {
     fn from(diagnostic: &XenoDiagnostic) -> Self {
         Self {

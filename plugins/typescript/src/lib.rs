@@ -27,6 +27,7 @@ static PLUGIN: XenoPlugin = XenoPlugin {
     shutdown: None,
     provide_types: Some(provide_types),
     provide_annotations: None,
+    provide_custom_declarations: None,
     provide_config_schema: Some(provide_config_schema),
     register_generator: Some(create_generator),
     register_analyzer: None,
@@ -572,8 +573,8 @@ fn format_generic_params(
         "<{}>",
         generics
             .iter()
-            .map(
-                |(name, constraint)| match constraint.map(|constraint| constraint.text(source)) {
+            .map(|(name, constraint)| {
+                match constraint.map(|constraint| constraint.text(source)) {
                     Some("KeyTrait") => {
                         format!(
                             "{} extends string | number | bigint | symbol",
@@ -581,8 +582,8 @@ fn format_generic_params(
                         )
                     }
                     _ => name.text(source).to_string(),
-                },
-            )
+                }
+            })
             .collect::<Vec<_>>()
             .join(", ")
     )
@@ -1128,7 +1129,7 @@ mod tests {
         assert_eq!(native_type_to_ts("json"), Some("string"));
         assert_eq!(native_type_to_ts("null"), Some("null"));
         assert_eq!(native_type_to_ts("NEVER"), Some("never"));
-        assert_eq!(native_type_to_ts("symbol"), Some("symbol"));
+        assert_eq!(native_type_to_ts("symbol"), None);
         assert_eq!(native_type_to_ts("TS::symbol"), Some("symbol"));
         assert_eq!(native_type_to_ts("Dict"), None);
         assert!(has_native_typescript_mapping("Dict"));

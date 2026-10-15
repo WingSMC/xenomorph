@@ -44,6 +44,7 @@ jobs:
                   cargo +1.94.0 build -p xenomorph_test_plugin --locked --features alternate-version --target-dir target/plugin-fixture-stable
                   cargo build -p xenomorph_test_plugin --locked --features bad-abi --target-dir target/plugin-fixture-bad
                   cargo build -p xenomorph_test_plugin --locked --features namespace-collision --target-dir target/plugin-fixture-collision
+                  cargo build -p xenomorph_test_plugin --locked --features custom-only --target-dir target/plugin-fixture-custom
             - name: Test workspace and plugin lifecycle
               run: |
                   cargo test --workspace --locked

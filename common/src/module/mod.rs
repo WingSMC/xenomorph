@@ -48,6 +48,7 @@ pub struct ModuleData {
     pub lexed: Lexed,
     /// AST of the module
     pub parsed: Parsed,
+    pub custom_diagnostics: Vec<crate::XenoDiagnostic>,
     pub declarations: HashMap<String, DeclarationInfo>,
 }
 
@@ -102,7 +103,13 @@ impl ModuleData {
             tags: error.tags,
         }
     }
-    fn update(&mut self, source: String, hash: u64) {
+    fn update(
+        &mut self,
+        source: String,
+        hash: u64,
+        plugins: &[LoadedPlugin],
+        matchers: &HashMap<String, usize>,
+    ) {
         let lexed = Lexer::relex(self.source.text(), &self.lexed, &source);
         let parsed = if lexed.error.is_none() {
             Parser::parse_incremental(
@@ -128,7 +135,45 @@ impl ModuleData {
         self.hash = hash;
         self.lexed = lexed;
         self.parsed = parsed;
+        self.parse_custom_blocks(plugins, matchers);
         self.index();
+    }
+
+    fn parse_custom_blocks(&mut self, plugins: &[LoadedPlugin], matchers: &HashMap<String, usize>) {
+        self.custom_diagnostics.clear();
+        for declaration in &self.parsed.ast {
+            let Declaration::Custom {
+                decl_id,
+                location,
+                content,
+                public,
+                ..
+            } = declaration
+            else {
+                continue;
+            };
+            let Some(plugin) = matchers.get(decl_id).map(|&index| &plugins[index]) else {
+                self.custom_diagnostics.push(crate::XenoDiagnostic {
+                    tags: vec![],
+                    location: *location,
+                    severity: XenoDiagSeverity::Warn,
+                    message: format!("Unknown custom declaration identifier '{decl_id}'"),
+                });
+                continue;
+            };
+            let request = crate::plugins::protocol::CustomDeclarationRequest {
+                source: std::borrow::Cow::Borrowed(self.source.text()),
+                module_path: self.module_path.clone(),
+                abs_path: self.abs_path.clone(),
+                identifier: decl_id.clone(),
+                public: public.is_some(),
+                location: *location,
+                content: *content,
+            };
+            if let Err(diagnostic) = plugin.parse_custom(&request) {
+                self.custom_diagnostics.push(diagnostic);
+            }
+        }
     }
     fn index(&mut self) {
         self.lexer_errors = self
@@ -142,12 +187,12 @@ impl ModuleData {
             .parsed
             .diagnostics
             .iter()
+            .chain(self.custom_diagnostics.iter())
             .cloned()
             .map(|e| self.diagnostic(e, ErrorPhase::Parser))
             .collect();
         self.imports = self
-            .parsed
-            .ast
+            .borrow_ast()
             .iter()
             .filter_map(|d| match d {
                 Declaration::Import { path, .. } => Some(path.join("/")),
@@ -157,8 +202,7 @@ impl ModuleData {
         let old_declarations = std::mem::take(&mut self.declarations);
         let reused: HashSet<_> = self.parsed.reused_indices.iter().copied().collect();
         self.declarations = self
-            .parsed
-            .ast
+            .borrow_ast()
             .iter()
             .enumerate()
             .filter_map(|(index, d)| match d {
@@ -312,6 +356,7 @@ pub struct XenoRegistry {
     pub config: Arc<Config>,
     pub metadata: MetadataGraph,
     pub plugins: Vec<LoadedPlugin>,
+    pub custom_matchers: HashMap<String, usize>,
     pub analyzer: Analyzer,
 }
 
@@ -335,6 +380,18 @@ impl XenoRegistry {
             PluginMode::Analysis
         };
         let plugins = load_plugins(&config, mode).map_err(Self::runtime_error)?;
+        let custom_matchers = plugins
+            .iter()
+            .enumerate()
+            .flat_map(|(index, plugin)| {
+                plugin
+                    .description
+                    .custom_declarations
+                    .iter()
+                    .cloned()
+                    .map(move |identifier| (identifier, index))
+            })
+            .collect();
         let mut metadata =
             MetadataGraph::from_all_descriptors(BUILTIN_TYPES, BUILTIN_TRAITS, BUILTIN_ANNOTATIONS);
         for plugin in &plugins {
@@ -359,6 +416,7 @@ impl XenoRegistry {
             config: Arc::new(config),
             metadata,
             plugins,
+            custom_matchers,
         })
     }
 
@@ -567,7 +625,7 @@ impl XenoRegistry {
             return None;
         }
         let mut names: HashSet<_> = module.declarations.keys().cloned().collect();
-        module.update(source, hash);
+        module.update(source, hash, &self.plugins, &self.custom_matchers);
         if self.config.debug.tokens {
             eprint!("{:?}", module.borrow_tokens());
         }
@@ -1023,8 +1081,7 @@ impl XenoRegistry {
                                 ))
                             } else if module.declarations.contains_key(text)
                                 || module
-                                    .parsed
-                                    .ast
+                                    .borrow_ast()
                                     .iter()
                                     .filter_map(|d| match d {
                                         Declaration::Import { names, .. } => Some(names),
@@ -1335,6 +1392,7 @@ impl XenoRegistry {
             hash,
             lexed,
             parsed,
+            custom_diagnostics: vec![],
             lexer_errors: vec![],
             parser_errors: vec![],
             analyzer_errors: vec![],
@@ -1478,6 +1536,7 @@ mod tests {
             entry: "test".to_string(),
             analyzer: Analyzer::new(false, &empty_plugins).unwrap(),
             plugins: empty_plugins,
+            custom_matchers: HashMap::new(),
             config: Arc::new(Config::default()),
             metadata: MetadataGraph::default(),
         };
@@ -1785,6 +1844,7 @@ mod tests {
             entry: "early".to_string(),
             analyzer: Analyzer::new(false, &empty_plugins).unwrap(),
             plugins: empty_plugins,
+            custom_matchers: HashMap::new(),
             config: Arc::new(Config::default()),
             metadata: MetadataGraph::default(),
         };
@@ -1824,6 +1884,7 @@ mod tests {
             entry: "first".to_string(),
             analyzer: Analyzer::new(false, &empty_plugins).unwrap(),
             plugins: empty_plugins,
+            custom_matchers: HashMap::new(),
             config: Arc::new(Config::default()),
             metadata: MetadataGraph::default(),
         };

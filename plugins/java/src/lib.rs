@@ -29,6 +29,7 @@ static PLUGIN: XenoPlugin = XenoPlugin {
     shutdown: None,
     provide_types: Some(provide_types),
     provide_annotations: Some(provide_annotations),
+    provide_custom_declarations: None,
     provide_config_schema: Some(provide_config_schema),
     register_generator: Some(create_generator),
     register_analyzer: None,

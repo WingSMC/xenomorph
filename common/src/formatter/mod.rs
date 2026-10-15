@@ -26,10 +26,14 @@ struct Delimiter {
 /// normalizes indentation and adds line breaks where declarations need to be
 /// expanded.
 pub fn format_xenomorph(source: &str, config: &FormatterConfig) -> String {
-    let Ok(tokens) = Lexer::tokenize(source) else {
-        let output_ending = output_line_ending(source, config.line_ending);
-        let source = normalize_line_endings(source);
-        return convert_line_endings(&source, output_ending);
+    let tokens = match Lexer::tokenize(source) {
+        Ok(tokens) => tokens,
+        Err(error) if error.location.text(source).starts_with('#') => return source.into(),
+        Err(_) => {
+            let output_ending = output_line_ending(source, config.line_ending);
+            let source = normalize_line_endings(source);
+            return convert_line_endings(&source, output_ending);
+        }
     };
     let (ast, _) = Parser::parse(&tokens, source);
     format_xenomorph_with_syntax(source, &tokens, &ast, config)
@@ -38,13 +42,14 @@ pub fn format_xenomorph(source: &str, config: &FormatterConfig) -> String {
 /// Formats source using a previously produced token stream and AST.
 ///
 /// This entry point is intended for language servers and other callers that
-/// already retain parser results. It does not lex or parse the source again.
+/// already retain parser results. Custom block contents are restored verbatim after layout.
 pub fn format_xenomorph_with_syntax(
     source: &str,
     tokens: &[Token],
     ast: &[Declaration],
     config: &FormatterConfig,
 ) -> String {
+    let original_source = source;
     let output_ending = output_line_ending(source, config.line_ending);
     let fmt_tokens = format_tokens(source, tokens);
     let source = normalize_line_endings(source);
@@ -74,7 +79,7 @@ pub fn format_xenomorph_with_syntax(
         } = declaration
         {
             let start = fmt_tokens
-                .partition_point(|t| t.original_start < public.unwrap_or(*location).start);
+                .partition_point(|t| t.original_start < (*public).unwrap_or(*location).start);
             let end = fmt_tokens.partition_point(|t| t.original_start < location.end);
             if let Some(open) =
                 (start..end).find(|i| fmt_tokens[*i].variant == TokenVariant::LCurly)
@@ -99,7 +104,38 @@ pub fn format_xenomorph_with_syntax(
     let remapped_tokens = remap_token_lines(&source, &fmt_tokens, &breaks);
     let formatted = reindent(&wrapped, &remapped_tokens, &roots, config);
 
-    convert_line_endings(&formatted, output_ending)
+    let formatted = convert_line_endings(&formatted, output_ending);
+    restore_custom_blocks(original_source, tokens, formatted)
+}
+
+fn restore_custom_blocks(source: &str, tokens: &[Token], formatted: String) -> String {
+    let originals: Vec<_> = tokens
+        .iter()
+        .filter(|(kind, _)| *kind == TokenVariant::CustomBlock)
+        .map(|(_, token)| token.text(source))
+        .collect();
+    if originals.is_empty() {
+        return formatted;
+    }
+    let Ok(tokens) = Lexer::tokenize(&formatted) else {
+        return source.into();
+    };
+    let blocks: Vec<_> = tokens
+        .iter()
+        .filter(|(kind, _)| *kind == TokenVariant::CustomBlock)
+        .collect();
+    if blocks.len() != originals.len() {
+        return source.into();
+    }
+    let mut restored = String::new();
+    let mut start = 0;
+    for ((_, range), original) in blocks.into_iter().zip(originals) {
+        restored.push_str(&formatted[start..range.start as usize]);
+        restored.push_str(original);
+        start = range.end as usize;
+    }
+    restored.push_str(&formatted[start..]);
+    restored
 }
 
 fn normalize_line_endings(source: &str) -> String {
@@ -430,7 +466,9 @@ fn type_declaration_ranges(tokens: &[FormatToken], ast: &[Declaration]) -> Vec<(
                 return None;
             };
             let start = tokens
-                .binary_search_by_key(&public.unwrap_or(*from).start, |token| token.original_start)
+                .binary_search_by_key(&(*public).unwrap_or(*from).start, |token| {
+                    token.original_start
+                })
                 .ok()?;
             let last_syntax_token = tokens
                 .binary_search_by_key(&to.start, |token| token.original_start)
@@ -954,5 +992,26 @@ mod tests {
             format_xenomorph("type Choice = | A | B;\r\n", &config),
             "type Choice =\r\n    | A\r\n    | B;\r\n"
         );
+    }
+
+    #[test]
+    fn custom_block_contents_are_preserved_verbatim() {
+        let source =
+            "##sql\r\n  SELECT  *  \r\n\tFROM table   \r\n  |raw # code\r\n##;\r\n    type A = string;";
+        let config = FormatterConfig {
+            line_ending: LineEnding::Lf,
+            ..Default::default()
+        };
+        let formatted = format_xenomorph(source, &config);
+        let original_tokens = Lexer::tokenize(source).unwrap();
+        let formatted_tokens = Lexer::tokenize(&formatted).unwrap();
+        assert_eq!(
+            formatted_tokens[0].1.text(&formatted),
+            original_tokens[0].1.text(source)
+        );
+        assert!(formatted.ends_with("\ntype A = string;"), "{formatted}");
+        assert_eq!(format_xenomorph(&formatted, &config), formatted);
+        let incomplete = "##sql\r\n  SELECT  *\r\n";
+        assert_eq!(format_xenomorph(incomplete, &config), incomplete);
     }
 }

@@ -27,6 +27,9 @@ pub enum Declaration {
         decl_id: String,
         docs: Option<String>,
         name: Option<TokenData>,
+        /// The complete fenced declaration and the unparsed body after its identifier.
+        location: crate::source::TextRange,
+        content: crate::source::TextRange,
         value: Vec<u8>,
     },
 }
@@ -199,7 +202,7 @@ pub struct FloatLiteral {
 
 pub type KeyValExpr = (
     // Field identifier. Quoted source keys are normalized to their unquoted
-    // contents by the parser, so this token is owned rather than borrowed.
+    // contents by the parser.
     TokenData,
     // field type
     SimpleType,
@@ -415,6 +418,8 @@ pub enum TokenVariant {
     Path = 34,
     Pub = 35,
     PathSeparator = 36,
+    /// An opaque custom block, including its matching hash fences.
+    CustomBlock = 37,
 }
 
 pub type Token = (TokenVariant, TokenData);
@@ -545,7 +550,24 @@ impl Declaration {
                     ann(a, delta)
                 }
             }
-            Self::Custom { name, .. } => {
+            Self::Custom {
+                name,
+                location,
+                content,
+                ..
+            } => {
+                location.start = (location.start as i64 + delta)
+                    .try_into()
+                    .expect("invalid relocation");
+                location.end = (location.end as i64 + delta)
+                    .try_into()
+                    .expect("invalid relocation");
+                content.start = (content.start as i64 + delta)
+                    .try_into()
+                    .expect("invalid relocation");
+                content.end = (content.end as i64 + delta)
+                    .try_into()
+                    .expect("invalid relocation");
                 if let Some(r) = name {
                     range(r, delta)
                 }
