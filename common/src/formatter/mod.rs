@@ -26,17 +26,40 @@ struct Delimiter {
 /// normalizes indentation and adds line breaks where declarations need to be
 /// expanded.
 pub fn format_xenomorph(source: &str, config: &FormatterConfig) -> String {
+    format_source(source, config, None)
+}
+
+/// Formats complete source lines using the surrounding document as layout context.
+///
+/// `range` uses UTF-8 byte offsets and must start and end at line boundaries (or
+/// EOF). The returned text replaces only those lines, including their line endings.
+pub fn format_xenomorph_range(
+    source: &str,
+    range: std::ops::Range<usize>,
+    config: &FormatterConfig,
+) -> String {
+    format_source(source, config, Some(range))
+}
+
+fn format_source(
+    source: &str,
+    config: &FormatterConfig,
+    range: Option<std::ops::Range<usize>>,
+) -> String {
     let tokens = match Lexer::tokenize(source) {
         Ok(tokens) => tokens,
-        Err(error) if error.location.text(source).starts_with('#') => return source.into(),
+        Err(error) if error.location.text(source).starts_with('#') => {
+            return range.map_or_else(|| source.into(), |range| source[range].into());
+        }
         Err(_) => {
             let output_ending = output_line_ending(source, config.line_ending);
-            let source = normalize_line_endings(source);
-            return convert_line_endings(&source, output_ending);
+            let normalized = normalize_line_endings(source);
+            let formatted = convert_line_endings(&normalized, output_ending);
+            return select_formatted_range(source, &[], &BTreeSet::new(), formatted, range);
         }
     };
     let (ast, _) = Parser::parse(&tokens, source);
-    format_xenomorph_with_syntax(source, &tokens, &ast, config)
+    format_with_syntax(source, &tokens, &ast, config, range)
 }
 
 /// Formats source using a previously produced token stream and AST.
@@ -48,6 +71,28 @@ pub fn format_xenomorph_with_syntax(
     tokens: &[Token],
     ast: &[Declaration],
     config: &FormatterConfig,
+) -> String {
+    format_with_syntax(source, tokens, ast, config, None)
+}
+
+/// Formats complete source lines using cached syntax for the full document.
+/// The range and returned text follow the same contract as `format_xenomorph_range`.
+pub fn format_xenomorph_range_with_syntax(
+    source: &str,
+    tokens: &[Token],
+    ast: &[Declaration],
+    range: std::ops::Range<usize>,
+    config: &FormatterConfig,
+) -> String {
+    format_with_syntax(source, tokens, ast, config, Some(range))
+}
+
+fn format_with_syntax(
+    source: &str,
+    tokens: &[Token],
+    ast: &[Declaration],
+    config: &FormatterConfig,
+    range: Option<std::ops::Range<usize>>,
 ) -> String {
     let original_source = source;
     let output_ending = output_line_ending(source, config.line_ending);
@@ -105,7 +150,53 @@ pub fn format_xenomorph_with_syntax(
     let formatted = reindent(&wrapped, &remapped_tokens, &roots, config);
 
     let formatted = convert_line_endings(&formatted, output_ending);
-    restore_custom_blocks(original_source, tokens, formatted)
+    let formatted = restore_custom_blocks(original_source, tokens, formatted);
+    select_formatted_range(original_source, tokens, &breaks, formatted, range)
+}
+
+fn select_formatted_range(
+    source: &str,
+    tokens: &[Token],
+    breaks: &BTreeSet<usize>,
+    formatted: String,
+    range: Option<std::ops::Range<usize>>,
+) -> String {
+    let Some(range) = range else {
+        return formatted;
+    };
+    if formatted == source {
+        return source[range].into();
+    }
+    let normalized = normalize_line_endings(source);
+    let starts = line_starts(&formatted);
+    let formatted_offset = |offset: usize| {
+        if offset == source.len() {
+            return formatted.len();
+        }
+        let prefix = normalize_line_endings(&source[..offset]);
+        let mut line = prefix.bytes().filter(|byte| *byte == b'\n').count();
+        // Custom block contents are restored verbatim, including lone CRs.
+        for (_, token) in tokens.iter().filter(|(kind, token)| {
+            *kind == TokenVariant::CustomBlock && (token.start as usize) < offset
+        }) {
+            let text = &source[token.start as usize..(token.end as usize).min(offset)];
+            line -= normalize_line_endings(text)
+                .bytes()
+                .filter(|byte| *byte == b'\n')
+                .count()
+                - text.bytes().filter(|byte| *byte == b'\n').count();
+        }
+        // Existing line breaks survive layout. Count only newly inserted breaks
+        // before this original boundary to find its line in the formatted text.
+        line += breaks
+            .range(..prefix.len())
+            .filter(|offset| {
+                !normalized[..**offset].ends_with('\n') && !normalized[**offset..].starts_with('\n')
+            })
+            .count();
+        starts.get(line).copied().unwrap_or(formatted.len())
+    };
+    formatted[formatted_offset(range.start)..formatted_offset(range.end)].into()
 }
 
 fn restore_custom_blocks(source: &str, tokens: &[Token], formatted: String) -> String {
@@ -869,6 +960,75 @@ mod tests {
             max_line_length,
             ..FormatterConfig::default()
         }
+    }
+
+    #[test]
+    fn range_formatting_keeps_nested_indentation_and_accounts_for_wrapping_before_selection() {
+        let source = "type Before = | string | number;\ntype Selected = {\nnested: {\nvalue: string,\n},\n};\ntype After = | string | number;";
+        let start = source.find("value:").unwrap();
+        let end = start + "value: string,\n".len();
+        let config = formatter(80);
+        let expected = "        value: string,\n";
+        assert_eq!(
+            format_xenomorph_range(source, start..end, &config),
+            expected
+        );
+
+        let tokens = Lexer::tokenize(source).unwrap();
+        let (ast, _) = Parser::parse(&tokens, source);
+        assert_eq!(
+            format_xenomorph_range_with_syntax(source, &tokens, &ast, start..end, &config),
+            expected
+        );
+    }
+
+    #[test]
+    fn range_formatting_includes_inserted_lines_and_configured_line_endings() {
+        let source = "type Before = | string | number;\r\ntype Choice = | string | number;\r\ntype After = string;";
+        let start = source.find("type Choice").unwrap();
+        let end = source.find("type After").unwrap();
+        let config = FormatterConfig {
+            indent_kind: IndentKind::Tab,
+            line_ending: LineEnding::Crlf,
+            ..formatter(80)
+        };
+        assert_eq!(
+            format_xenomorph_range(source, start..end, &config),
+            "type Choice =\r\n\t| string\r\n\t| number;\r\n"
+        );
+        assert_eq!(
+            format_xenomorph_range(source, end..source.len(), &config),
+            "type After = string;"
+        );
+    }
+
+    #[test]
+    fn range_formatting_preserves_opaque_blocks_and_maps_lines_after_them() {
+        let source = "##typescript\r\n  raw\ron one line\r\n##;\r\n  type Tail = string;";
+        assert!(Lexer::tokenize(source).is_ok());
+        let start = source.find("  raw").unwrap();
+        let end = source.find("##;").unwrap();
+        assert_eq!(
+            format_xenomorph_range(source, start..end, &formatter(80)),
+            &source[start..end]
+        );
+        let start = source.find("  type Tail").unwrap();
+        assert_eq!(
+            format_xenomorph_range(source, start..source.len(), &formatter(80)),
+            "type Tail = string;"
+        );
+    }
+
+    #[test]
+    fn range_formatting_handles_lexer_errors_without_returning_the_whole_document() {
+        let source =
+            "type Before = string;\r\n  type Broken = \"unterminated\r\n  type Tail = string;";
+        let start = source.find("  type Broken").unwrap();
+        let end = source.find("  type Tail").unwrap();
+        assert_eq!(
+            format_xenomorph_range(source, start..end, &formatter(80)),
+            "  type Broken = \"unterminated\n"
+        );
     }
 
     #[test]

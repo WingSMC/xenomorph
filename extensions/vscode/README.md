@@ -9,6 +9,10 @@ provides fallback highlighting while the server starts and colors Xenomorph
 code blocks embedded in hover and completion documentation, where semantic
 tokens are not available.
 
+Use VS Code's **Format Document** or **Format Selection** commands to format
+Xenomorph source with the workspace's `[formatter]` settings. Selection
+formatting expands to complete selected lines and preserves surrounding text.
+
 ## What is Xenomorph?
 
 It is a schema description language written for polyglot projects, like a microservice architecture. It lets you generate language and library specific codes for DTOs, serializers, database schemas or form validators from a **_single source of TRUTH_**.

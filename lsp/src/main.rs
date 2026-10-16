@@ -5,7 +5,10 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 use xenomorph_common::{
     config::WorkspaceConfigWatcher,
-    formatter::{format_xenomorph, format_xenomorph_with_syntax},
+    formatter::{
+        format_xenomorph, format_xenomorph_range, format_xenomorph_range_with_syntax,
+        format_xenomorph_with_syntax,
+    },
     lexer::{Token, TokenVariant},
     module::{
         types::{DeclarationInfo, ModuleDiagnostic},
@@ -404,6 +407,12 @@ impl LanguageServer for LiveBackend {
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
         self.backend().formatting(params).await
     }
+    async fn range_formatting(
+        &self,
+        params: DocumentRangeFormattingParams,
+    ) -> Result<Option<Vec<TextEdit>>> {
+        self.backend().range_formatting(params).await
+    }
     async fn goto_definition(
         &self,
         params: GotoDefinitionParams,
@@ -559,6 +568,32 @@ fn document_range(source: &str) -> Range {
     Range::new(Position::new(0, 0), Position::new(line, character))
 }
 
+fn formatting_line_range(source: &str, range: Range) -> Option<(std::ops::Range<usize>, Range)> {
+    let document = xenomorph_common::SourceDocument::new(source.into());
+    let start = document.offset(range.start.line, range.start.character, true)? as usize;
+    let end = document.offset(range.end.line, range.end.character, true)? as usize;
+    if start > end {
+        return None;
+    }
+    if start == end {
+        return Some((start..end, range));
+    }
+    let start = document.line_starts()[range.start.line as usize] as usize;
+    let end_line = range.end.line as usize + usize::from(range.end.character != 0);
+    let end = document
+        .line_starts()
+        .get(end_line)
+        .map_or(source.len(), |offset| *offset as usize);
+    let (line, character) = document.position(end as u32, true);
+    Some((
+        start..end,
+        Range::new(
+            Position::new(range.start.line, 0),
+            Position::new(line, character),
+        ),
+    ))
+}
+
 fn apply_document_changes(
     source: &str,
     changes: Vec<TextDocumentContentChangeEvent>,
@@ -671,6 +706,64 @@ fn diagnostics_for_module(errors: &[ModuleDiagnostic], module_path: &str) -> Vec
 }
 
 impl Backend {
+    async fn format_document(
+        &self,
+        uri: Url,
+        range: Option<Range>,
+    ) -> Result<Option<Vec<TextEdit>>> {
+        let _update = self.runtime.updates.lock().await;
+        let registry = self.runtime.snapshot();
+        let documents = self.runtime.documents.lock().unwrap();
+        let Some(document) = documents.get(&uri) else {
+            return Ok(None);
+        };
+        let source = document.text.as_str();
+        let (source_range, edit_range) = match range {
+            Some(range) => {
+                let (source_range, edit_range) =
+                    formatting_line_range(source, range).ok_or_else(|| {
+                        tower_lsp::jsonrpc::Error::invalid_params("Invalid formatting range")
+                    })?;
+                if source_range.is_empty() {
+                    return Ok(Some(vec![]));
+                }
+                (Some(source_range), edit_range)
+            }
+            None => (None, document_range(source)),
+        };
+        let module_path = uri
+            .to_file_path()
+            .ok()
+            .and_then(|path| registry.abs_path_to_module_path(&path));
+        let config = &registry.config.formatter;
+        let formatted = registry
+            .with_module(
+                module_path.as_deref().unwrap_or(""),
+                |tokens, ast, module| {
+                    (module.borrow_source() == source).then(|| match &source_range {
+                        Some(range) => format_xenomorph_range_with_syntax(
+                            source,
+                            tokens,
+                            ast,
+                            range.clone(),
+                            config,
+                        ),
+                        None => format_xenomorph_with_syntax(source, tokens, ast, config),
+                    })
+                },
+            )
+            .flatten()
+            .unwrap_or_else(|| match &source_range {
+                Some(range) => format_xenomorph_range(source, range.clone(), config),
+                None => format_xenomorph(source, config),
+            });
+
+        Ok(Some(vec![TextEdit {
+            range: edit_range,
+            new_text: formatted,
+        }]))
+    }
+
     // ── Path helpers ─────────────────────────────────────────────────
 
     /// Converts a file URI to a module path via the registry.
@@ -1426,6 +1519,7 @@ impl LanguageServer for Backend {
                 }),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 document_formatting_provider: Some(OneOf::Left(true)),
+                document_range_formatting_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 definition_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
@@ -1636,40 +1730,15 @@ impl LanguageServer for Backend {
     }
 
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
-        let _update = self.runtime.updates.lock().await;
-        let registry = self.runtime.snapshot();
-        let uri = params.text_document.uri;
-        let documents = self.runtime.documents.lock().unwrap();
-        let Some(document) = documents.get(&uri) else {
-            return Ok(None);
-        };
-        let source = document.text.as_str();
-        let module_path = uri
-            .to_file_path()
-            .ok()
-            .and_then(|path| registry.abs_path_to_module_path(&path));
+        self.format_document(params.text_document.uri, None).await
+    }
 
-        let formatted = registry
-            .with_module(
-                module_path.as_deref().unwrap_or(""),
-                |tokens, ast, module| {
-                    (module.borrow_source() == source).then(|| {
-                        format_xenomorph_with_syntax(
-                            source,
-                            tokens,
-                            ast,
-                            &registry.config.formatter,
-                        )
-                    })
-                },
-            )
-            .flatten()
-            .unwrap_or_else(|| format_xenomorph(source, &registry.config.formatter));
-
-        Ok(Some(vec![TextEdit {
-            range: document_range(source),
-            new_text: formatted,
-        }]))
+    async fn range_formatting(
+        &self,
+        params: DocumentRangeFormattingParams,
+    ) -> Result<Option<Vec<TextEdit>>> {
+        self.format_document(params.text_document.uri, Some(params.range))
+            .await
     }
 
     async fn goto_definition(
@@ -2211,6 +2280,50 @@ mod tests {
             { "range": { "start": { "line": 0, "character": 4 }, "end": { "line": 0, "character": 5 } }, "text": "x" }
         ])).unwrap();
         assert!(apply_document_changes(source, invalid).is_none());
+    }
+
+    #[test]
+    fn formatting_ranges_expand_lines_and_validate_utf16_boundaries() {
+        let source = "// \u{1f600}\r\ntype A = string;\r\ntype B = string;";
+        let start = source.find("type A").unwrap();
+        let end = source.find("type B").unwrap();
+        assert_eq!(
+            formatting_line_range(source, Range::new(Position::new(1, 5), Position::new(2, 0))),
+            Some((
+                start..end,
+                Range::new(Position::new(1, 0), Position::new(2, 0))
+            ))
+        );
+        assert_eq!(
+            formatting_line_range(
+                source,
+                Range::new(Position::new(2, 5), Position::new(2, 10))
+            ),
+            Some((
+                end..source.len(),
+                Range::new(Position::new(2, 0), Position::new(2, 16))
+            ))
+        );
+        assert_eq!(
+            formatting_line_range(source, Range::new(Position::new(0, 3), Position::new(0, 5))),
+            Some((
+                0..start,
+                Range::new(Position::new(0, 0), Position::new(1, 0))
+            ))
+        );
+        for range in [
+            Range::new(Position::new(0, 4), Position::new(0, 5)),
+            Range::new(Position::new(1, 100), Position::new(2, 0)),
+            Range::new(Position::new(1, 5), Position::new(0, 0)),
+            Range::new(Position::new(3, 0), Position::new(3, 1)),
+        ] {
+            assert!(formatting_line_range(source, range).is_none(), "{range:?}");
+        }
+        let cursor = Range::new(Position::new(1, 5), Position::new(1, 5));
+        assert_eq!(
+            formatting_line_range(source, cursor),
+            Some((start + 5..start + 5, cursor))
+        );
     }
 
     #[test]

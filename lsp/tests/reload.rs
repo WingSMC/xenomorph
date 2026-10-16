@@ -287,6 +287,138 @@ fn formatting_disconnected_documents_uses_the_current_complete_buffer() {
 }
 
 #[test]
+fn range_formatting_preserves_surrounding_text_in_connected_and_standalone_buffers() {
+    use tower_lsp::lsp_types::{TextEdit, Url};
+    use xenomorph_common::SourceDocument;
+
+    let directory = std::env::temp_dir().join(format!(
+        "xenomorph-lsp-range-formatting-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir(&directory).unwrap();
+    fs::write(directory.join("index.xen"), "type Saved = string;").unwrap();
+    config(&directory, &[]);
+    let uris = [
+        Url::from_file_path(directory.join("index.xen")).unwrap(),
+        Url::from_file_path(directory.join("orphan.xen")).unwrap(),
+        Url::parse("untitled:selection.xen").unwrap(),
+    ];
+    let mut server = Server::start(directory);
+    let initialized = server.request(1, "initialize", json!({ "capabilities": {} }));
+    assert_eq!(
+        initialized["result"]["capabilities"]["documentRangeFormattingProvider"],
+        true
+    );
+    server.notification("initialized", json!({}));
+    server.wait_for_log("Language Server initialized");
+
+    let source = "// \u{1f600} draft\r\n   type Before = | string | number;\r\ntype Selected = {\r\nnested: {\r\nvalue: string,\r\n},\r\n};\r\n   type Choice = | string | number;\r\n   type Tail = \"\u{1f600}\";";
+    let ranges = [
+        (
+            json!({ "start": { "line": 4, "character": 3 }, "end": { "line": 5, "character": 0 } }),
+            json!({ "start": { "line": 4, "character": 0 }, "end": { "line": 5, "character": 0 } }),
+            "value: string,\r\n",
+            "        value: string,\n",
+        ),
+        (
+            json!({ "start": { "line": 7, "character": 3 }, "end": { "line": 7, "character": 10 } }),
+            json!({ "start": { "line": 7, "character": 0 }, "end": { "line": 8, "character": 0 } }),
+            "   type Choice = | string | number;\r\n",
+            "type Choice =\n    | string\n    | number;\n",
+        ),
+        (
+            json!({ "start": { "line": 8, "character": 3 }, "end": { "line": 8, "character": 10 } }),
+            json!({ "start": { "line": 8, "character": 0 }, "end": { "line": 8, "character": 20 } }),
+            "   type Tail = \"\u{1f600}\";",
+            "type Tail = \"\u{1f600}\";",
+        ),
+    ];
+    for uri in &uris {
+        server.open(uri, "type Initial = string;");
+        server.diagnostics(uri);
+        server.change(uri, 2, source);
+        server.diagnostics(uri);
+        for (range, edit_range, original, replacement) in &ranges {
+            let response = server.request(
+                2,
+                "textDocument/rangeFormatting",
+                json!({
+                    "textDocument": { "uri": uri },
+                    "range": range,
+                    "options": { "tabSize": 2, "insertSpaces": false }
+                }),
+            );
+            assert_eq!(
+                response["result"].as_array().unwrap().len(),
+                1,
+                "{response}"
+            );
+            assert_eq!(&response["result"][0]["range"], edit_range, "{response}");
+            let edit: TextEdit = serde_json::from_value(response["result"][0].clone()).unwrap();
+            assert_eq!(&edit.new_text, replacement, "{response}");
+            let document = SourceDocument::new(source.into());
+            let start = document
+                .offset(edit.range.start.line, edit.range.start.character, true)
+                .unwrap() as usize;
+            let end = document
+                .offset(edit.range.end.line, edit.range.end.character, true)
+                .unwrap() as usize;
+            let mut applied = source.to_string();
+            applied.replace_range(start..end, &edit.new_text);
+            assert_eq!(applied, source.replacen(original, replacement, 1));
+        }
+
+        let empty = server.request(3, "textDocument/rangeFormatting", json!({
+            "textDocument": { "uri": uri },
+            "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 0 } },
+            "options": { "tabSize": 4, "insertSpaces": true }
+        }));
+        assert_eq!(empty["result"], json!([]));
+        let invalid = server.request(4, "textDocument/rangeFormatting", json!({
+            "textDocument": { "uri": uri },
+            "range": { "start": { "line": 0, "character": 4 }, "end": { "line": 0, "character": 5 } },
+            "options": { "tabSize": 4, "insertSpaces": true }
+        }));
+        assert_eq!(invalid["error"]["code"], -32602, "{invalid}");
+
+        // A formatting request must leave the live buffer unchanged.
+        let full = server.request(
+            5,
+            "textDocument/formatting",
+            json!({
+                "textDocument": { "uri": uri }, "options": { "tabSize": 4, "insertSpaces": true }
+            }),
+        );
+        assert_eq!(
+            full["result"][0]["newText"],
+            xenomorph_common::formatter::format_xenomorph(
+                source,
+                &xenomorph_common::config::FormatterConfig::default()
+            )
+        );
+    }
+
+    // Disconnected formatting must not add the standalone buffer to the graph.
+    let symbols = server.request(
+        6,
+        "textDocument/documentSymbol",
+        json!({ "textDocument": { "uri": uris[1] } }),
+    );
+    assert!(symbols["result"].is_null(), "{symbols}");
+    let unopened = Url::from_file_path(server.directory.join("unopened.xen")).unwrap();
+    let response = server.request(7, "textDocument/rangeFormatting", json!({
+        "textDocument": { "uri": unopened },
+        "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 1 } },
+        "options": { "tabSize": 4, "insertSpaces": true }
+    }));
+    assert!(response["result"].is_null(), "{response}");
+}
+
+#[test]
 fn rapid_import_toggles_leave_the_latest_diagnostic_visible() {
     use tower_lsp::lsp_types::Url;
 

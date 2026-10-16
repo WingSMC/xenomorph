@@ -92,7 +92,7 @@ It provides:
 - Diagnostics
 - Completion
 - Hover
-- Formatting
+- Document and selection formatting.
 - Navigation
 - Rename support
 
