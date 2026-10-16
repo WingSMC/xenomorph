@@ -2182,6 +2182,9 @@ mod tests {
                 NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             ));
             std::fs::create_dir(&directory).unwrap();
+            // Match the registry's canonical paths when the temp directory uses
+            // Windows short names or symlink aliases.
+            let directory = directory.canonicalize().unwrap();
             for (name, source) in sources {
                 std::fs::write(directory.join(format!("{name}.xen")), source).unwrap();
             }
