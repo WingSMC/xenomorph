@@ -177,6 +177,9 @@ fn formatting_disconnected_documents_uses_the_current_complete_buffer() {
             .as_nanos()
     ));
     fs::create_dir(&directory).unwrap();
+    // Unopened imports use the registry's canonical paths in diagnostics.
+    // Resolve Windows short names, path casing, and directory aliases first.
+    let directory = directory.canonicalize().unwrap();
     fs::write(
         directory.join("index.xen"),
         "pub import other::Other;\ntype Root = string;",
@@ -300,6 +303,7 @@ fn range_formatting_preserves_surrounding_text_in_connected_and_standalone_buffe
             .as_nanos()
     ));
     fs::create_dir(&directory).unwrap();
+    let directory = directory.canonicalize().unwrap();
     fs::write(directory.join("index.xen"), "type Saved = string;").unwrap();
     config(&directory, &[]);
     let uris = [
@@ -431,6 +435,7 @@ fn rapid_import_toggles_leave_the_latest_diagnostic_visible() {
             .as_nanos()
     ));
     fs::create_dir(&directory).unwrap();
+    let directory = directory.canonicalize().unwrap();
     fs::write(
         directory.join("index.xen"),
         "pub import other::Other;\ntype Root = string;",
@@ -510,6 +515,7 @@ fn files_outside_the_module_graph_are_dimmed_and_update_with_imports_and_reload(
             .as_nanos()
     ));
     fs::create_dir(&directory).unwrap();
+    let directory = directory.canonicalize().unwrap();
     fs::create_dir(directory.join("modules")).unwrap();
     fs::write(directory.join("modules/index.xen"), "type Root = string;").unwrap();
     fs::write(directory.join("modules/other.xen"), "type Saved = string;").unwrap();
@@ -662,6 +668,7 @@ fn reload_preserves_unsaved_documents_metadata_and_last_valid_runtime() {
             .as_nanos()
     ));
     fs::create_dir(&directory).unwrap();
+    let directory = directory.canonicalize().unwrap();
     fs::write(directory.join("index.xen"), "type Saved = string;").unwrap();
     config(&directory, &["xenomorph_typescript"]);
     let uri = tower_lsp::lsp_types::Url::from_file_path(directory.join("index.xen")).unwrap();
