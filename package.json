@@ -1,6 +1,6 @@
 {
     "name": "xenomorph",
-    "version": "0.1.2",
+    "version": "0.2.0",
     "scripts": {
         "update-versions": "node scripts/update-versions.mjs",
         "check-versions": "node scripts/update-versions.mjs --check",
