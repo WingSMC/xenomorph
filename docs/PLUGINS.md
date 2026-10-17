@@ -25,19 +25,30 @@ The descriptor is an SDK-local Rust value, not the exported ABI. Its factories
 receive `&Config` and return local `AnalyzerListener` instances. The SDK sends
 only C-compatible function tables, opaque handles, and byte buffers to the host.
 
-| Callback                | Purpose                                                                                                  |
-| ----------------------- | -------------------------------------------------------------------------------------------------------- |
-| `initialize`            | Receive the host's resolved configuration before runtime calls. Return an error if initialization fails. |
-| `shutdown`              | Release initialized plugin resources before the instance and library are destroyed.                      |
-| `provide_types`         | Describe semantic types and their dependencies.                                                          |
-| `provide_annotations`   | Describe annotations, parameters, and constraints.                                                       |
-| `provide_custom_declarations` | Register identifiers and callbacks for opaque custom code blocks.                                  |
-| `provide_config_schema` | Describe the plugin's configuration section as JSON Schema.                                              |
-| `register_generator`    | Create a fresh local generator listener for a module.                                                    |
-| `register_analyzer`     | Create a fresh local analysis listener for a module.                                                     |
+| Callback                      | Purpose                                                                                                  |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `initialize`                  | Receive the host's resolved configuration before runtime calls. Return an error if initialization fails. |
+| `shutdown`                    | Release initialized plugin resources before the instance and library are destroyed.                      |
+| `provide_types`               | Describe semantic types and their dependencies.                                                          |
+| `provide_annotations`         | Describe annotations, parameters, and constraints.                                                       |
+| `provide_custom_declarations` | Register identifiers and callbacks for opaque custom code blocks.                                        |
+| `provide_config_schema`       | Describe the plugin's configuration section as JSON Schema.                                              |
+| `register_generator`          | Create a fresh local generator listener for a module.                                                    |
+| `register_analyzer`           | Create a fresh local analysis listener for a module.                                                     |
 
 Keep metadata providers side-effect-free. Metadata and schema discovery does not
 initialize generator state.
+
+Annotation descriptors put the implicit target at parameter zero. Written
+arguments follow it. Set `XenoParam.optional` to `true` for an optional written
+argument; required arguments must precede optional arguments, and the implicit
+target must remain required. `variadic` repeats the final written parameter.
+The host validates these constraints, and editor signatures display optional
+arguments in square brackets, such as `@deprecated([StringLiteral])`.
+
+The metadata payload now includes parameter optionality. Rebuild existing
+plugins with the updated SDK. ABI major and payload protocol remain 1 under the
+unreleased interface policy described below.
 
 ## Declaration namespaces
 
@@ -56,8 +67,15 @@ definitions produce a load error.
 Source references require the namespace, including annotation arguments and
 generic constraints. Core declarations remain unqualified:
 
+With the TypeScript plugin enabled:
+
 ```xen
 pub type Key = TS::symbol;
+```
+
+With the Java plugin enabled:
+
+```xen
 pub type User = { name: string }
     @java::Lombok(java::Value, java::Builder);
 ```
@@ -184,11 +202,11 @@ host cannot recover from abort-mode panics or memory corruption in process.
 
 ## Loading and unloading policies
 
-| Host operation       | Executable capabilities retained |
-| -------------------- | -------------------------------- |
+| Host operation       | Executable capabilities retained         |
+| -------------------- | ---------------------------------------- |
 | Generation           | Generation, analysis, and custom parsing |
-| LSP / analysis       | Analysis and custom parsing      |
-| Configuration schema | None                             |
+| LSP / analysis       | Analysis and custom parsing              |
+| Configuration schema | None                                     |
 
 The host copies semantic metadata and configuration schemas before releasing
 library handles. This preserves TypeScript's `TS::symbol` and Java's Lombok

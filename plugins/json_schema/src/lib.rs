@@ -842,10 +842,19 @@ fn trait_constraint_to_schema(name: &str) -> Option<Value> {
     }
 }
 
-/// Applies xenomorph validation annotations as JSON Schema keywords. The
+/// Applies xenomorph annotations as JSON Schema keywords. The
 /// keyword used for length depends on whether the base schema is a string or
 /// an array.
 fn apply_annotations(schema: &mut Value, annotations: &[Annotation], source: &str) {
+    // Boolean schemas cannot carry metadata directly. Preserve their validation
+    // behavior while making room for the annotation keyword.
+    if schema.is_boolean()
+        && annotations
+            .iter()
+            .any(|annotation| annotation.ident.text(source) == "deprecated")
+    {
+        *schema = json!({ "allOf": [schema.clone()] });
+    }
     let is_array = schema_type_is(schema, "array");
     let map = match schema {
         Value::Object(map) => map,
@@ -859,6 +868,10 @@ fn apply_annotations(schema: &mut Value, annotations: &[Annotation], source: &st
             "max" => insert_number(map, "maximum", number),
             "gt" => insert_number(map, "exclusiveMinimum", number),
             "lt" => insert_number(map, "exclusiveMaximum", number),
+            "multipleof" => insert_number(map, "multipleOf", number),
+            "deprecated" => {
+                map.insert("deprecated".to_string(), json!(true));
+            }
             "len" => {
                 if let Some(n) = number {
                     if is_array {
@@ -1412,6 +1425,76 @@ mod tests {
     fn test_regex_source_extraction() {
         assert_eq!(regex_source("/foo.*/i"), "foo.*");
         assert_eq!(regex_source("/^a$/"), "^a$");
+    }
+
+    #[test]
+    fn deprecated_becomes_metadata_without_changing_validation_or_references() {
+        let defs = generate_defs(concat!(
+            "/** Use Current instead. */ type Old = string @deprecated(\"Use Current.\"); ",
+            "type Current = string; ",
+            "type OldRecord = { value: Old } @deprecated; ",
+            "type OldNever = NEVER @deprecated; ",
+            "type PlainNever = NEVER; ",
+            "type OldGeneric<T> = T @deprecated; type Specialized = OldGeneric<string>;",
+        ));
+
+        assert_eq!(defs["Old"]["deprecated"], true);
+        assert_eq!(defs["Old"]["type"], "string");
+        assert_eq!(defs["Old"]["description"], "Use Current instead.");
+        assert!(defs["Current"].get("deprecated").is_none());
+        assert_eq!(defs["OldRecord"]["deprecated"], true);
+        assert_eq!(
+            defs["OldRecord"]["properties"]["value"]["$ref"],
+            "#/$defs/Old"
+        );
+        assert_eq!(defs["OldNever"]["deprecated"], true);
+        assert_eq!(defs["OldNever"]["allOf"], json!([false]));
+        assert_eq!(defs["PlainNever"], false);
+        assert_eq!(defs["OldGeneric"]["deprecated"], true);
+        assert_eq!(defs["Specialized"]["deprecated"], true);
+        assert_eq!(defs["Specialized"]["type"], "string");
+    }
+
+    #[test]
+    fn multipleof_preserves_integer_and_decimal_increments_exactly() {
+        let defs = generate_defs(concat!(
+            "type Milliseconds = u32 @multipleof(10); ",
+            "type Seconds = f64 @multipleof(0.1); ",
+            "type Fine = decimal @multipleof(0.123456789012345678901234567890123456789); ",
+            "type Large = bigint @multipleof(184467440737095516160); ",
+            "type Timeline = { ",
+            "milliseconds: Milliseconds, seconds: Seconds, fine: Fine, large: Large, ",
+            "};",
+        ));
+
+        assert_eq!(defs["Milliseconds"]["multipleOf"], 10);
+        assert_eq!(defs["Seconds"]["multipleOf"].to_string(), "0.1");
+        assert_eq!(
+            defs["Fine"]["multipleOf"].to_string(),
+            "0.123456789012345678901234567890123456789"
+        );
+        assert_eq!(
+            defs["Large"]["multipleOf"].to_string(),
+            "184467440737095516160"
+        );
+        assert_eq!(
+            defs["Timeline"]["properties"]["seconds"]["$ref"],
+            "#/$defs/Seconds"
+        );
+        let serialized = serde_json::to_string(&defs).unwrap();
+        let restored: Value = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(restored, Value::Object(defs));
+    }
+
+    #[test]
+    fn multipleof_survives_numeric_generic_specialization() {
+        let defs = generate_defs(
+            "type Step<T: Numeric> = T @multipleof(0.1); type Tenths = Step<decimal>;",
+        );
+
+        assert_eq!(defs["Step"]["multipleOf"].to_string(), "0.1");
+        assert_eq!(defs["Tenths"]["type"], "number");
+        assert_eq!(defs["Tenths"]["multipleOf"].to_string(), "0.1");
     }
 
     #[test]

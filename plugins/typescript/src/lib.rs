@@ -294,6 +294,9 @@ fn generate_type_decl(
         t.1.iter()
             .map(|value| format_annotation(value, source))
             .collect();
+    let deprecated =
+        t.1.iter()
+            .find(|annotation| annotation.ident.text(source) == "deprecated");
     let generic_params = format_generic_params(generics, source);
 
     // JSDoc
@@ -305,7 +308,9 @@ fn generate_type_decl(
             }
         }
         for ann in &annotations {
-            out.push_str(&format!(" * {ann}\n"));
+            for line in ann.lines() {
+                out.push_str(&format!(" * {line}\n"));
+            }
         }
         out.push_str(" */\n");
     }
@@ -339,6 +344,9 @@ fn generate_type_decl(
                 "{export}const {name}_TYPE_VALUES = [{}] as const{constraint};\n",
                 elems.join(", ")
             ));
+            if let Some(deprecated) = deprecated {
+                push_jsdoc(out, &format_annotation(deprecated, source), "");
+            }
             out.push_str(&format!(
                 "{export}type {name} = (typeof {name}_TYPE_VALUES)[number];\n\n"
             ));
@@ -356,6 +364,9 @@ fn generate_type_decl(
                 "{export}const {name}_TYPE_VALUES = [{}] as const;\n",
                 values.join(", ")
             ));
+            if let Some(deprecated) = deprecated {
+                push_jsdoc(out, &format_annotation(deprecated, source), "");
+            }
             out.push_str(&format!(
                 "{export}type {name} = typeof {name}_TYPE_VALUES;\n\n"
             ));
@@ -644,6 +655,14 @@ fn integer_uses_bigint(integer: &IntLiteral, source: &str) -> bool {
 }
 
 fn format_annotation(annotation: &Annotation, source: &str) -> String {
+    if annotation.ident.text(source) == "deprecated" {
+        return match annotation.params.first() {
+            Some(Expr::Type(Type::Simple(SimpleType::Literal(Literal::String(reason, _))))) => {
+                format!("@deprecated {}", reason.replace("*/", "* /"))
+            }
+            _ => "@deprecated".to_string(),
+        };
+    }
     if annotation.params.is_empty() {
         format!("@{}", annotation.ident.text(source))
     } else {
@@ -856,6 +875,72 @@ mod tests {
         g.set_source(FIXTURE_SOURCE);
         g
     }
+    #[test]
+    fn deprecated_marks_each_generated_declaration_with_jsdoc() {
+        use xenomorph_common::{lexer::Lexer, parser::Parser};
+
+        let source = concat!(
+            "/** Use Current instead. */ pub type OldText = string @deprecated; ",
+            "pub type OldRecord = { value: OldText } @deprecated; ",
+            "pub type OldEnum = enum { Yes: 1, No: 0 } @deprecated; ",
+            "pub type OldGeneric<T> = T @deprecated; ",
+            "pub type OldColors = set [\"red\", \"green\"] @deprecated; ",
+            "pub type OldTuple = [1, 2] @deprecated; ",
+            "pub type Current = OldText;",
+        );
+        let tokens = Lexer::tokenize(source).unwrap();
+        let (ast, diagnostics) = Parser::parse(&tokens, source);
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let mut generator = TsGenerator::new();
+        generator.set_source(source);
+        generator.on_before_ast(&ast, &mut Vec::new());
+        let output = &generator.out;
+
+        assert!(output.contains(" * Use Current instead."));
+        for declaration in [
+            "export type OldText =",
+            "export interface OldRecord {",
+            "export enum OldEnum {",
+            "export type OldGeneric<T> =",
+            "export const OldColors_TYPE_VALUES =",
+            "export type OldColors =",
+            "export const OldTuple_TYPE_VALUES =",
+            "export type OldTuple =",
+        ] {
+            assert!(
+                output.contains(&format!(" * @deprecated\n */\n{declaration}")),
+                "{output}"
+            );
+        }
+        assert_eq!(output.matches("@deprecated").count(), 8);
+        assert!(output.contains("export type Current = OldText;"));
+        assert!(!output.contains(" */\nexport type Current"));
+    }
+
+    #[test]
+    fn deprecated_reasons_are_jsdoc_text_on_both_constants_and_aliases() {
+        use xenomorph_common::{lexer::Lexer, parser::Parser};
+
+        let source = "pub type Old = set [\"red\"] @deprecated(\"Use NewType.\nKeep */ inside documentation.\");";
+        let tokens = Lexer::tokenize(source).unwrap();
+        let (ast, diagnostics) = Parser::parse(&tokens, source);
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let mut generator = TsGenerator::new();
+        generator.set_source(source);
+        generator.on_before_ast(&ast, &mut Vec::new());
+        let output = &generator.out;
+
+        assert_eq!(
+            output
+                .matches(
+                    " * @deprecated Use NewType.\n * Keep * / inside documentation.\n */\nexport "
+                )
+                .count(),
+            2
+        );
+        assert!(!output.contains("@deprecated("));
+    }
+
     #[test]
     fn test_type_and_field_docs_are_preserved() {
         let key = xenomorph_common::TokenData::new(0, 11);

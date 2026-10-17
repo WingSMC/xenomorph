@@ -1,6 +1,8 @@
 # Java plugin
 
-The Java plugin generates one Lombok DTO per Xenomorph struct or tuple and one Java enum per Xenomorph enum.
+The Java plugin generates one Lombok DTO per Xenomorph struct or tuple and one
+Java enum per Xenomorph enum. Homogeneous literal collections produce array
+constants in `Xenomorph.java` instead of tuple DTOs.
 
 ## Configure the generator
 
@@ -82,6 +84,13 @@ public class SomethingTuple {
 ```
 
 The exact Lombok annotations and accessors depend on the plugin configuration and any Xenomorph `@java::Lombok(java::Value, ...)` annotations.
+
+## Deprecation metadata
+
+`@deprecated` or `@deprecated("Use NewType instead.")` on a named declaration
+emits Java `@Deprecated` and a Javadoc `@deprecated` tag on the generated class,
+enum, or constant. The optional reason appears in the tag. Scalar aliases are
+expanded into their underlying types and have no separate declaration to mark.
 
 ## Plugin lifecycle
 

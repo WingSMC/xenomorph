@@ -90,6 +90,7 @@ static LOMBOK_TYPES: &[&SemanticType] = &[
 static LOMBOK_PARAM: XenoParam = XenoParam {
     name: "decorator",
     constraint: XenoConstraint::Trait(&LOMBOK_TRAIT),
+    optional: false,
 };
 
 static LOMBOK_ANNOTATION: XenoAnnotation = XenoAnnotation {
@@ -146,6 +147,40 @@ xenomorph_common::export_plugin!(PLUGIN);
 
 // ── Generator listener ──────────────────────────────────────────────
 
+#[derive(Clone, Copy)]
+struct DeclarationMetadata<'a> {
+    docs: Option<&'a str>,
+    deprecated: bool,
+    reason: Option<&'a str>,
+}
+
+impl<'a> DeclarationMetadata<'a> {
+    fn new(docs: &'a Option<String>, ty: &'a XenoType, source: &str) -> Self {
+        let annotation =
+            ty.1.iter()
+                .find(|annotation| annotation.ident.text(source) == "deprecated");
+        Self {
+            docs: docs.as_deref(),
+            deprecated: annotation.is_some(),
+            reason: annotation.and_then(|annotation| match annotation.params.first() {
+                Some(Expr::Type(Type::Simple(SimpleType::Literal(Literal::String(reason, _))))) => {
+                    Some(reason.as_str())
+                }
+                _ => None,
+            }),
+        }
+    }
+}
+
+struct JavaConstant {
+    name: String,
+    java_type: String,
+    initializer: String,
+    docs: Option<String>,
+    deprecated: bool,
+    reason: Option<String>,
+}
+
 struct JavaGenerator {
     source: String,
     workdir: PathBuf,
@@ -167,8 +202,7 @@ struct JavaGenerator {
     /// Generated files for the current module: (type name, file contents).
     files: Vec<(String, String)>,
     /// Homogeneous literal collections emitted as `Xenomorph` constants.
-    /// `(name, type, value)`
-    constants: Vec<(String, String, String)>,
+    constants: Vec<JavaConstant>,
     /// Whether the current module contains a generated tuple declaration.
     has_tuples: bool,
     /// Annotation arguments are metadata and are not emitted as Java value types.
@@ -252,11 +286,15 @@ impl<'src> AnalyzerListener<'src> for JavaGenerator {
             } = decl
             {
                 if let Some((java_type, initializer)) = self.constant_collection(&t.0) {
-                    self.constants.push((
-                        name.text(&self.source).to_string(),
+                    let metadata = DeclarationMetadata::new(docs, t, &self.source);
+                    self.constants.push(JavaConstant {
+                        name: name.text(&self.source).to_string(),
                         java_type,
                         initializer,
-                    ));
+                        docs: docs.clone(),
+                        deprecated: metadata.deprecated,
+                        reason: metadata.reason.map(str::to_string),
+                    });
                     continue;
                 }
                 if matches!(&t.0, Type::Tuple(_)) {
@@ -443,7 +481,8 @@ impl JavaGenerator {
         }
 
         let mut imports = BTreeSet::new();
-        for (_, java_type, _) in &self.constants {
+        for constant in &self.constants {
+            let java_type = &constant.java_type;
             if java_type.starts_with("BigInteger") {
                 imports.insert("java.math.BigInteger".to_string());
             }
@@ -465,9 +504,19 @@ impl JavaGenerator {
             out.push('\n');
         }
         out.push_str("public class Xenomorph {\n");
-        for (name, java_type, initializer) in &self.constants {
+        for constant in &self.constants {
+            push_declaration_metadata(
+                &mut out,
+                DeclarationMetadata {
+                    docs: constant.docs.as_deref(),
+                    deprecated: constant.deprecated,
+                    reason: constant.reason.as_deref(),
+                },
+                "    ",
+            );
             out.push_str(&format!(
-                "    public static final {java_type} {name} = {initializer};\n"
+                "    public static final {} {} = {};\n",
+                constant.java_type, constant.name, constant.initializer,
             ));
         }
         out.push_str("}\n");
@@ -496,10 +545,11 @@ impl JavaGenerator {
         t: &XenoType,
     ) -> Option<String> {
         let lombok_decorators = collect_lombok_decorators(&t.1, &self.source);
+        let metadata = DeclarationMetadata::new(docs, t, &self.source);
 
         if let Some(fields) = self.evaluated_utility_fields(&t.0) {
             return Some(self.generate_owned_class(
-                docs,
+                metadata,
                 name,
                 &format_generic_params(generics, &self.source),
                 &fields,
@@ -509,20 +559,20 @@ impl JavaGenerator {
 
         match &t.0 {
             Type::Struct(fields) => Some(self.generate_class(
-                docs,
+                metadata,
                 name,
                 &format_generic_params(generics, &self.source),
                 fields,
                 &lombok_decorators,
             )),
             Type::Tuple(items) => Some(self.generate_tuple_class(
-                docs,
+                metadata,
                 name,
                 &format_generic_params(generics, &self.source),
                 items,
                 &lombok_decorators,
             )),
-            Type::Enum(variants) => Some(self.generate_enum(docs, name, variants)),
+            Type::Enum(variants) => Some(self.generate_enum(metadata, name, variants)),
             _ => None,
         }
     }
@@ -553,7 +603,7 @@ impl JavaGenerator {
 
     fn generate_owned_class(
         &self,
-        docs: &Option<String>,
+        metadata: DeclarationMetadata<'_>,
         name: &str,
         generic_params: &str,
         fields: &[OwnedField],
@@ -591,7 +641,7 @@ impl JavaGenerator {
         }
 
         self.render_class(
-            docs,
+            metadata,
             name,
             generic_params,
             imports,
@@ -604,7 +654,7 @@ impl JavaGenerator {
     #[allow(clippy::too_many_arguments)]
     fn render_class(
         &self,
-        docs: &Option<String>,
+        metadata: DeclarationMetadata<'_>,
         name: &str,
         generic_params: &str,
         mut imports: BTreeSet<String>,
@@ -630,7 +680,7 @@ impl JavaGenerator {
             out.push('\n');
         }
 
-        push_javadoc(&mut out, docs);
+        push_declaration_metadata(&mut out, metadata, "");
         if let Some(marker) = marker {
             out.push_str(&format!("@{marker}\n"));
         }
@@ -645,7 +695,7 @@ impl JavaGenerator {
 
     fn generate_class(
         &self,
-        docs: &Option<String>,
+        metadata: DeclarationMetadata<'_>,
         name: &str,
         generic_params: &str,
         fields: &[KeyValExpr],
@@ -691,7 +741,7 @@ impl JavaGenerator {
         }
 
         self.render_class(
-            docs,
+            metadata,
             name,
             generic_params,
             imports,
@@ -703,7 +753,7 @@ impl JavaGenerator {
 
     fn generate_tuple_class(
         &self,
-        docs: &Option<String>,
+        metadata: DeclarationMetadata<'_>,
         name: &str,
         generic_params: &str,
         items: &[SimpleType],
@@ -734,7 +784,7 @@ impl JavaGenerator {
         }
 
         self.render_class(
-            docs,
+            metadata,
             name,
             generic_params,
             imports,
@@ -777,7 +827,12 @@ impl JavaGenerator {
 
     // ── Enum generation ─────────────────────────────────────────────
 
-    fn generate_enum(&self, docs: &Option<String>, name: &str, variants: &[KeyValExpr]) -> String {
+    fn generate_enum(
+        &self,
+        metadata: DeclarationMetadata<'_>,
+        name: &str,
+        variants: &[KeyValExpr],
+    ) -> String {
         let all_int = !variants.is_empty()
             && variants
                 .iter()
@@ -814,7 +869,7 @@ impl JavaGenerator {
             out.push('\n');
         }
 
-        push_javadoc(&mut out, docs);
+        push_declaration_metadata(&mut out, metadata, "");
         out.push_str(&format!("public enum {name} {{\n"));
 
         if let Some(java_type) = enum_value_type {
@@ -1460,13 +1515,28 @@ fn format_generic_params(
     )
 }
 
-fn push_javadoc(out: &mut String, docs: &Option<String>) {
-    if let Some(doc) = docs {
-        out.push_str("/**\n");
-        for line in doc.lines() {
-            out.push_str(&format!(" * {line}\n"));
+fn push_declaration_metadata(out: &mut String, metadata: DeclarationMetadata<'_>, indent: &str) {
+    if metadata.docs.is_some() || metadata.deprecated {
+        out.push_str(&format!("{indent}/**\n"));
+        if let Some(doc) = metadata.docs {
+            for line in doc.lines() {
+                out.push_str(&format!("{indent} * {line}\n"));
+            }
         }
-        out.push_str(" */\n");
+        if metadata.deprecated {
+            let reason = metadata
+                .reason
+                .unwrap_or("This declaration is deprecated.")
+                .replace("*/", "* /");
+            let tag = format!("@deprecated {reason}");
+            for line in tag.lines() {
+                out.push_str(&format!("{indent} * {line}\n"));
+            }
+        }
+        out.push_str(&format!("{indent} */\n"));
+    }
+    if metadata.deprecated {
+        out.push_str(&format!("{indent}@Deprecated\n"));
     }
 }
 
@@ -1791,6 +1861,77 @@ mod tests {
             "unexpected diagnostics: {diagnostics:#?}"
         );
         ast
+    }
+
+    #[test]
+    fn deprecated_marks_generated_classes_enums_tuples_and_utility_classes() {
+        let source = concat!(
+            "/** A legacy record. */ type OldRecord = { value: string } @deprecated(\"Use Current instead.\"); ",
+            "type OldEnum = enum { Yes: 1, No: 0 } @deprecated; ",
+            "type OldTuple = [string, ?bool] @deprecated; ",
+            "type OldUtility = Partial<OldRecord> @deprecated; ",
+            "type Current = { value: OldRecord };",
+        );
+        let ast = parse(source);
+        let mut generator = generator_with_declarations(&ast, source);
+        generator.on_before_ast(&ast, &mut Vec::new());
+
+        for name in ["OldRecord", "OldEnum", "OldTuple", "OldUtility"] {
+            let (_, output) = generator
+                .files
+                .iter()
+                .find(|(file, _)| file == name)
+                .unwrap();
+            assert!(output.contains(" * @deprecated"), "{name}: {output}");
+            assert!(output.contains("\n@Deprecated\n"), "{name}: {output}");
+            assert!(!output.contains("import lombok.Deprecated;"));
+        }
+        let (_, old) = generator
+            .files
+            .iter()
+            .find(|(name, _)| name == "OldRecord")
+            .unwrap();
+        assert!(old.contains(" * A legacy record."));
+        assert!(old.contains(" * @deprecated Use Current instead."));
+        let (_, current) = generator
+            .files
+            .iter()
+            .find(|(name, _)| name == "Current")
+            .unwrap();
+        assert!(!current.contains("@Deprecated"));
+        assert!(!current.contains("@deprecated"));
+    }
+
+    #[test]
+    fn deprecated_marks_literal_collection_constants_and_keeps_documentation() {
+        let source = concat!(
+            "/** Use NewColors instead. */ type OldColors = set [\"red\", \"green\"] @deprecated; ",
+            "type OldSizes = [1, 300] @deprecated(\"Use NewSizes instead.\"); ",
+            "type NewColors = set [\"blue\"];",
+        );
+        let ast = parse(source);
+        let mut generator = generator_with_declarations(&ast, source);
+        generator.on_before_ast(&ast, &mut Vec::new());
+        let output = generator.constants_file().unwrap();
+
+        assert!(output.contains(" * Use NewColors instead."));
+        assert!(output.contains(" * @deprecated Use NewSizes instead."));
+        assert!(output.contains("    @Deprecated\n    public static final String[] OldColors"));
+        assert!(output.contains("    @Deprecated\n    public static final Short[] OldSizes"));
+        assert_eq!(output.matches("@deprecated").count(), 2);
+        assert_eq!(output.matches("@Deprecated").count(), 2);
+        assert!(!output.contains("@Deprecated\n    public static final String[] NewColors"));
+    }
+
+    #[test]
+    fn deprecated_reasons_preserve_lines_without_closing_java_comments() {
+        let source = "type Old = enum { Yes: 1 } @deprecated(\"Use NewType.\nKeep */ inside documentation.\");";
+        let ast = parse(source);
+        let mut generator = generator_with_declarations(&ast, source);
+        generator.on_before_ast(&ast, &mut Vec::new());
+        let output = &generator.files[0].1;
+
+        assert!(output.contains(" * @deprecated Use NewType.\n * Keep * / inside documentation.\n */\n@Deprecated\npublic enum Old"));
     }
 
     #[test]

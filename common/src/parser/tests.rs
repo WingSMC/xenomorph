@@ -22,6 +22,25 @@ fn assert_no_errors(diagnostics: &[XenoDiagnostic]) {
 }
 
 #[test]
+fn simple_types_reject_inline_annotations() {
+    for text in [
+        "type Invalid = { elapsed: u32 @multipleof(10) };",
+        "type Invalid = enum { elapsed: u32 @multipleof(10) };",
+        "type Invalid = [number @multipleof(0.1)];",
+        "type Box<T> = T; type Invalid = Box<number @multipleof(0.1)>;",
+    ] {
+        let tokens = Lexer::tokenize(text).unwrap();
+        let (_, diagnostics) = parse(&tokens, text);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.severity == XenoDiagSeverity::Err),
+            "inline annotations must be rejected: {text}"
+        );
+    }
+}
+
+#[test]
 fn custom_declarations_keep_the_identifier_and_unparsed_body() {
     let text =
         "/** Custom docs */ pub ##java\n  @Example(# value); $raw \\ code\n##; type Next = string;";

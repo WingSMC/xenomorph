@@ -49,6 +49,7 @@ pub(super) fn from_descriptors(
                 Ok(OwnedParam {
                     name: param.name.into(),
                     constraint: builder.constraint(param.constraint)?,
+                    optional: param.optional,
                 })
             })
             .collect::<Result<_, String>>()?;

@@ -98,6 +98,7 @@ pub struct OwnedSemanticType {
 pub struct OwnedParam {
     pub name: String,
     pub constraint: OwnedConstraint,
+    pub optional: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +117,36 @@ impl OwnedAnnotation {
 
     pub fn explicit_parameters(&self) -> &[OwnedParam] {
         self.params.get(1..).unwrap_or(&[])
+    }
+
+    pub fn required_parameter_count(&self) -> usize {
+        self.explicit_parameters()
+            .iter()
+            .take_while(|parameter| !parameter.optional)
+            .count()
+    }
+
+    pub(crate) fn validate_parameter_order(&self) -> Result<(), String> {
+        if self
+            .target_parameter()
+            .is_some_and(|parameter| parameter.optional)
+        {
+            return Err(format!(
+                "Annotation '{}' has an optional implicit target",
+                self.name
+            ));
+        }
+        let mut optional = false;
+        for parameter in self.explicit_parameters() {
+            if optional && !parameter.optional {
+                return Err(format!(
+                    "Annotation '{}' has a required parameter after an optional parameter",
+                    self.name
+                ));
+            }
+            optional |= parameter.optional;
+        }
+        Ok(())
     }
 
     pub fn parameter_at(&self, index: usize) -> Option<&OwnedParam> {
@@ -229,6 +260,7 @@ impl MetadataGraph {
         }
         for (key, annotation) in &self.annotations {
             validate_identity(key, &annotation.name)?;
+            annotation.validate_parameter_order()?;
             validate_parameter_names(
                 annotation
                     .params
@@ -466,6 +498,7 @@ impl MetadataGraph {
             .map(|param| OwnedParam {
                 name: param.name.to_string(),
                 constraint: self.convert_constraint(param.constraint),
+                optional: param.optional,
             })
             .collect();
         self.annotations.insert(
@@ -531,14 +564,53 @@ mod tests {
             &super::super::XenoParam {
                 name: "self",
                 constraint: XenoConstraint::Type(&RECURSIVE),
+                optional: false,
             },
             &super::super::XenoParam {
                 name: "value",
                 constraint: XenoConstraint::Trait(&SUM),
+                optional: false,
             },
         ],
         variadic: true,
     };
+
+    #[test]
+    fn optional_annotation_parameters_survive_roundtrips_and_require_trailing_order() {
+        let graph = MetadataGraph::from_descriptors(&[], &[&super::super::DEPRECATED]);
+        graph.validate().unwrap();
+        let encoded = xenomorph_plugin_api::codec::encode(&graph).unwrap();
+        let decoded: MetadataGraph = xenomorph_plugin_api::codec::decode(&encoded).unwrap();
+        assert_eq!(decoded, graph);
+        assert_eq!(
+            decoded.annotations["deprecated"].required_parameter_count(),
+            0
+        );
+        assert!(
+            decoded.annotations["deprecated"]
+                .parameter_at(0)
+                .unwrap()
+                .optional
+        );
+
+        let mut invalid = graph.clone();
+        invalid.annotations.get_mut("deprecated").unwrap().params[0].optional = true;
+        assert!(invalid
+            .validate()
+            .unwrap_err()
+            .contains("optional implicit target"));
+
+        let mut invalid = graph;
+        let annotation = invalid.annotations.get_mut("deprecated").unwrap();
+        let mut required = annotation.params[1].clone();
+        required.name = "required".into();
+        required.optional = false;
+        annotation.params.push(required);
+        assert!(invalid
+            .validate()
+            .unwrap_err()
+            .contains("required parameter after an optional"));
+    }
 
     #[test]
     fn annotation_conversion_copies_all_recursive_dependencies() {

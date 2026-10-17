@@ -70,10 +70,16 @@ pub fn format_owned_annotation_signature(annotation: &OwnedAnnotation) -> String
         .iter()
         .enumerate()
         .map(|(index, param)| {
-            if annotation.variadic && index + 1 == explicit_parameters.len() {
-                format!("...{}", format_constraint(&param.constraint))
+            let constraint = format_constraint(&param.constraint);
+            let parameter = if annotation.variadic && index + 1 == explicit_parameters.len() {
+                format!("...{constraint}")
             } else {
-                format_constraint(&param.constraint)
+                constraint
+            };
+            if param.optional {
+                format!("[{parameter}]")
+            } else {
+                parameter
             }
         })
         .collect::<Vec<_>>()
@@ -109,10 +115,12 @@ mod tests {
     static FIRST: XenoParam = XenoParam {
         name: "first",
         constraint: XenoConstraint::Trait(&EXPRESSION),
+        optional: false,
     };
     static REST: XenoParam = XenoParam {
         name: "rest",
         constraint: XenoConstraint::Trait(&EXPRESSION),
+        optional: false,
     };
     static VARIADIC: XenoAnnotation = XenoAnnotation {
         name: "annotation",
@@ -128,6 +136,14 @@ mod tests {
     }
 
     #[test]
+    fn deprecated_signature_shows_optional_string_reason() {
+        assert_eq!(
+            format_annotation_signature(&xenomorph_common::semantic::DEPRECATED),
+            "@deprecated([StringLiteral])"
+        );
+    }
+
+    #[test]
     fn variadic_annotation_signature_marks_only_the_repeated_parameter() {
         assert_eq!(
             format_annotation_signature(&VARIADIC),
@@ -140,6 +156,7 @@ mod tests {
         static LOMBOK: XenoParam = XenoParam {
             name: "decorator",
             constraint: XenoConstraint::Trait(&EXPRESSION),
+            optional: false,
         };
         static ANNOTATION: XenoAnnotation = XenoAnnotation {
             name: "Lombok",

@@ -2044,6 +2044,160 @@ mod tests {
     }
 
     #[test]
+    fn deprecated_is_metadata_on_any_named_type_and_does_not_warn_on_use() {
+        let source = concat!(
+            "pub type OldText = string @deprecated; ",
+            "pub type OldRecord = { value: OldText } @deprecated(); ",
+            "pub type OldChoice = enum { Yes: 1, No: 0 } @deprecated; ",
+            "pub type OldTuple = [OldText, ?bool] @deprecated; ",
+            "pub type OldSet = set [1, 2] @deprecated; ",
+            "pub type OldUnion = |string|u32 @deprecated; ",
+            "pub type OldGeneric<T> = T @deprecated; ",
+            "pub type OldNever = NEVER @deprecated; ",
+            "pub type OldReason = string @deprecated(\"Use Current instead.\"); ",
+            "pub type OldEmptyReason = string @deprecated(\"\"); ",
+            "pub type Current = { record: OldRecord, value: OldGeneric<OldText> };",
+        );
+        let mut cache = HashMap::new();
+        cache.insert("test".to_string(), parsed_module("test", source));
+        let module = &cache["test"];
+        assert!(module.borrow_parser_errors().is_empty());
+        let diagnostics = Analyzer::new(false, &[]).unwrap().run(
+            module.borrow_ast(),
+            module,
+            &[],
+            &cache,
+            &[],
+            &PluginConfigs::new(),
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    }
+
+    #[test]
+    fn deprecated_rejects_non_string_reasons_and_extra_arguments() {
+        let source = concat!(
+            "pub type Old = string @deprecated(1); ",
+            "pub type Other = string @deprecated(true); ",
+            "pub type Reference = string @deprecated(string); ",
+            "pub type Excess = string @deprecated(\"first\", \"second\");",
+        );
+        let mut cache = HashMap::new();
+        cache.insert("test".to_string(), parsed_module("test", source));
+
+        let errors = analyze(&cache, "test");
+        assert_eq!(errors.len(), 4, "{errors:#?}");
+        assert_eq!(
+            errors
+                .iter()
+                .filter(|error| error.contains("expects StringLiteral"))
+                .count(),
+            3
+        );
+        assert!(errors
+            .iter()
+            .any(|error| error
+                .contains("Annotation '@deprecated' expects 0 to 1 argument(s), got 2")));
+    }
+
+    #[test]
+    fn multipleof_accepts_numeric_declarations_aliases_and_decimal_increments() {
+        let source = concat!(
+            "pub type Milliseconds = u32 @multipleof(10); ",
+            "pub type Step<T: Numeric> = T @multipleof(0.1); ",
+            "pub type Seconds = ?f64 @multipleof(0.1); ",
+            "pub type Fraction = f32 @multipleof(0.125 as f32); ",
+            "pub type Precise = decimal @multipleof(0.000000000000000000000000000001); ",
+            "pub type Large = bigint @multipleof(184467440737095516160); ",
+            "pub type Signed = i32 @multipleof(10 as i32); ",
+            "pub type Timeline = { milliseconds: Milliseconds, seconds: Seconds };",
+        );
+        let mut cache = HashMap::new();
+        cache.insert("test".to_string(), parsed_module("test", source));
+        let module = &cache["test"];
+        assert!(module.borrow_parser_errors().is_empty());
+        let diagnostics = Analyzer::new(false, &[]).unwrap().run(
+            module.borrow_ast(),
+            module,
+            &[],
+            &cache,
+            &[],
+            &PluginConfigs::new(),
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    }
+
+    #[test]
+    fn multipleof_rejects_non_numeric_targets() {
+        let source = concat!(
+            "pub type Text = string @multipleof(10); ",
+            "pub type Flag = bool @multipleof(10); ",
+            "pub type List = number[] @multipleof(10); ",
+            "pub type Mixed = |number|string @multipleof(10);",
+        );
+        let mut cache = HashMap::new();
+        cache.insert("test".to_string(), parsed_module("test", source));
+
+        let errors = analyze(&cache, "test");
+        assert_eq!(errors.len(), 4, "{errors:#?}");
+        assert!(errors.iter().all(|error| {
+            error.contains("Annotation '@multipleof' is not applicable")
+                && error.contains("Required trait(s): Numeric")
+        }));
+    }
+
+    #[test]
+    fn multipleof_requires_exactly_one_numeric_literal() {
+        let source = concat!(
+            "pub type Missing = number @multipleof(); ",
+            "pub type Multiple = number @multipleof(1, 2); ",
+            "pub type Text = number @multipleof(\"0.1\"); ",
+            "pub type Flag = number @multipleof(true); ",
+            "pub type Reference = number @multipleof(number);",
+        );
+        let mut cache = HashMap::new();
+        cache.insert("test".to_string(), parsed_module("test", source));
+
+        let errors = analyze(&cache, "test");
+        assert_eq!(errors.len(), 5, "{errors:#?}");
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("expects 1 argument(s), got 0")));
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("expects 1 argument(s), got 2")));
+        assert_eq!(
+            errors
+                .iter()
+                .filter(|error| error.contains("expects NumberLiteral"))
+                .count(),
+            3,
+            "{errors:#?}"
+        );
+    }
+
+    #[test]
+    fn multipleof_rejects_zero_and_negative_increments() {
+        let source = concat!(
+            "pub type Zero = number @multipleof(0); ",
+            "pub type DecimalZero = decimal @multipleof(0.0); ",
+            "pub type Negative = integer @multipleof(-10); ",
+            "pub type DecimalNegative = f64 @multipleof(-0.1); ",
+            "pub type Conditional = number @if(true, @multipleof(0));",
+        );
+        let mut cache = HashMap::new();
+        cache.insert("test".to_string(), parsed_module("test", source));
+
+        let errors = analyze(&cache, "test");
+        assert_eq!(errors.len(), 5, "{errors:#?}");
+        assert!(errors
+            .iter()
+            .all(|error| error
+                == "Annotation '@multipleof' argument 'value' must be greater than zero."));
+    }
+
+    #[test]
     fn match_accepts_string_and_string_descendants() {
         let source = "pub type Email = string @match(/.*@.*\\.com/) @minlen(10); pub type BuiltinDescendant = uuid @match(/^[0-9a-f-]+$/); pub type UserDescendant = Email @match(/^alias$/);";
         let mut cache = HashMap::new();

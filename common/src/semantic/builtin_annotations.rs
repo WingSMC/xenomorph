@@ -16,6 +16,8 @@ pub enum XenoAnnotationKind {
 pub struct XenoParam {
     pub name: &'static str,
     pub constraint: XenoConstraint,
+    /// Optional written parameters must follow all required parameters.
+    pub optional: bool,
 }
 
 #[derive(Debug)]
@@ -54,38 +56,47 @@ impl XenoAnnotation {
 pub static ANY_TARGET_PARAM: XenoParam = XenoParam {
     name: "self",
     constraint: XenoConstraint::Type(&ANY),
+    optional: false,
 };
 pub static NUMERIC_TARGET_PARAM: XenoParam = XenoParam {
     name: "self",
     constraint: XenoConstraint::Trait(&NUMERIC),
+    optional: false,
 };
 pub static HAS_LENGTH_TARGET_PARAM: XenoParam = XenoParam {
     name: "self",
     constraint: XenoConstraint::Trait(&HAS_LENGTH),
+    optional: false,
 };
 pub static STRING_TARGET_PARAM: XenoParam = XenoParam {
     name: "self",
     constraint: XenoConstraint::Type(&STRING),
+    optional: false,
 };
 pub static NUMBER_VALUE_PARAM: XenoParam = XenoParam {
     name: "value",
     constraint: XenoConstraint::Trait(&NUMBER_LITERAL),
+    optional: false,
 };
 pub static INTEGER_VALUE_PARAM: XenoParam = XenoParam {
     name: "value",
     constraint: XenoConstraint::Trait(&INTEGER_LITERAL),
+    optional: false,
 };
 pub static REGEX_PATTERN_PARAM: XenoParam = XenoParam {
     name: "pattern",
     constraint: XenoConstraint::Trait(&REGEX_LITERAL),
+    optional: false,
 };
 pub static EXPRESSION_VALUE_PARAM: XenoParam = XenoParam {
     name: "value",
     constraint: XenoConstraint::Trait(&EXPRESSION),
+    optional: false,
 };
 pub static CONDITION_PARAM: XenoParam = XenoParam {
     name: "condition",
     constraint: XenoConstraint::Trait(&EXPRESSION),
+    optional: false,
 };
 
 pub static MIN: XenoAnnotation = XenoAnnotation {
@@ -115,6 +126,16 @@ pub static GT: XenoAnnotation = XenoAnnotation {
 pub static LT: XenoAnnotation = XenoAnnotation {
     name: "lt",
     documentation: Some("Specifies that some numeric value must be less than the parameter."),
+    kind: XenoAnnotationKind::Validation,
+    params: &[&NUMERIC_TARGET_PARAM, &NUMBER_VALUE_PARAM],
+    variadic: false,
+};
+
+pub static MULTIPLEOF: XenoAnnotation = XenoAnnotation {
+    name: "multipleof",
+    documentation: Some(
+        "Requires a numeric value to be an integer multiple of a positive increment. Integer and decimal increments are supported, e.g. `0.1` for tenth increments.",
+    ),
     kind: XenoAnnotationKind::Validation,
     params: &[&NUMERIC_TARGET_PARAM, &NUMBER_VALUE_PARAM],
     variadic: false,
@@ -154,6 +175,22 @@ pub static MATCH: XenoAnnotation = XenoAnnotation {
     variadic: false,
 };
 
+pub static DEPRECATED: XenoAnnotation = XenoAnnotation {
+    name: "deprecated",
+    documentation: Some(
+        "Marks a type declaration as deprecated metadata. Accepts an optional string literal reason and does not affect runtime validation.",
+    ),
+    kind: XenoAnnotationKind::Meta,
+    params: &[&ANY_TARGET_PARAM, &DEPRECATION_REASON_PARAM],
+    variadic: false,
+};
+
+pub static DEPRECATION_REASON_PARAM: XenoParam = XenoParam {
+    name: "reason",
+    constraint: XenoConstraint::Trait(&STRING_LITERAL),
+    optional: true,
+};
+
 pub static IF: XenoAnnotation = XenoAnnotation {
     name: "if",
     documentation: Some("Applies or removes **validation** depending on the condition."),
@@ -181,7 +218,19 @@ pub static ELSE: XenoAnnotation = XenoAnnotation {
 };
 
 pub static BUILTIN_ANNOTATIONS: &[&XenoAnnotation] = &[
-    &MIN, &MAX, &GT, &LT, &LEN, &MINLEN, &MAXLEN, &MATCH, &IF, &ELSEIF, &ELSE,
+    &MIN,
+    &MAX,
+    &GT,
+    &LT,
+    &MULTIPLEOF,
+    &LEN,
+    &MINLEN,
+    &MAXLEN,
+    &MATCH,
+    &DEPRECATED,
+    &IF,
+    &ELSEIF,
+    &ELSE,
 ];
 
 // Re-export the basic parameter traits from this module's API surface. These
@@ -189,26 +238,32 @@ pub static BUILTIN_ANNOTATIONS: &[&XenoAnnotation] = &[
 pub static STRING_VALUE_PARAM: XenoParam = XenoParam {
     name: "value",
     constraint: XenoConstraint::Trait(&STRING_LITERAL),
+    optional: false,
 };
 pub static BOOL_VALUE_PARAM: XenoParam = XenoParam {
     name: "value",
     constraint: XenoConstraint::Trait(&BOOL_LITERAL),
+    optional: false,
 };
 pub static LITERAL_VALUE_PARAM: XenoParam = XenoParam {
     name: "value",
     constraint: XenoConstraint::Trait(&LITERAL),
+    optional: false,
 };
 pub static IDENTIFIER_VALUE_PARAM: XenoParam = XenoParam {
     name: "value",
     constraint: XenoConstraint::Trait(&IDENTIFIER),
+    optional: false,
 };
 pub static TYPE_VALUE_PARAM: XenoParam = XenoParam {
     name: "value",
     constraint: XenoConstraint::Trait(&TYPE_REFERENCE),
+    optional: false,
 };
 pub static ANNOTATION_VALUE_PARAM: XenoParam = XenoParam {
     name: "value",
     constraint: XenoConstraint::Trait(&ANNOTATION),
+    optional: false,
 };
 
 #[cfg(test)]

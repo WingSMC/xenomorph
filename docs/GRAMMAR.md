@@ -1,4 +1,9 @@
-# Descriptors
+# Language reference
+
+This document describes the implemented language. Declarations end with `;`.
+Use commas between struct fields, enum variants, tuple members, set prefill
+values, type arguments, and annotation arguments. Closed lists accept a trailing
+comma. Newlines do not replace commas or semicolons.
 
 ## Modules, imports, and exports
 
@@ -115,15 +120,88 @@ Formatting preserves the fenced content verbatim.
 
 ## Complex types
 
-- Structs/Enums: `{...}` or with [generics](#Generics) `<Generics>` `{}`
-- Lists/Tuples: `[a, b, c]` with literals or types, for example `[string, i32]`
-- Arrays use postfix syntax: `Type[]`, for example `string[]` or `User[]`
+| Form                 | Example right-hand side          |
+| -------------------- | -------------------------------- |
+| Struct               | `{ name: string, active: bool }` |
+| Enum                 | `enum { Ready: 1, Failed: 2 }`   |
+| Tuple                | `[string, i32, ?bool]`           |
+| Array                | `string[]` or `User[]`           |
+| Typed set            | `set<string>`                    |
+| Prefilled set        | `set ["red", "green"]`           |
+| Typed, prefilled set | `set<u8> [1, 2, 3]`              |
+| Sum / union          | `\|string\|u32`                  |
+| Intersection         | `&First&Second`                  |
+
+Struct fields, enum variants, tuple members, and type arguments contain simple
+types: a literal or type identifier, an optional `?` prefix, or an identifier's
+array form. Type identifiers can include type arguments. Nested composites need
+named declarations:
+
+```xen
+type Address = { street: string };
+type Row = string[];
+type Matrix = Row[];
+type User = { address: Address, names: ?Row };
+```
+
+`?Row` makes the entire value optional. The array suffix applies to identifiers,
+including generic references such as `Box<string>[]`; literals cannot take it.
+Use aliases for additional array dimensions rather than `string[][]`.
+
+### Sets
+
+`set` requires an element type in `<...>`, a literal prefill in `[...]`, or both.
+`set TypeName` and bare `set` are invalid. Prefills contain comma-separated
+literals; type names cannot appear as prefill values. Duplicate values are
+semantic errors, including equal numeric literals with different casts.
+
+```xen
+type Names = set<string>;
+type Colors = set ["red", "green"];
+type Sizes = set<u16> [1, 300,];
+type EmptyNames = set<string> [];
+```
+
+Without an explicit element type, a nonempty prefill uses its first value's type
+as the element type. Later values must fit that type. Use an explicit element
+type when later values need a wider range. Collection operations such as `+`,
+`*`, `\`, and `<>` are not implemented.
+
+### Generics
+
+Generic parameters follow the declaration name. A parameter can have one type or
+trait constraint after `:`. Separate parameters and arguments with commas:
+
+```xen
+type Box<T> = { value: T };
+type Increment<T: Numeric> = T @multipleof(0.1);
+type Label<T: HasLength> = T @minlen(1);
+type TextBox = Box<string>;
+type Tenths = Increment<decimal>;
+type NonemptyText = Label<string>;
+```
+
+Built-in utilities include `Pick<T, Keys>`, `Omit<T, Keys>`, `Keyof<T>`,
+`Required<T>`, `Partial<T>`, and `Complete<T>`. `Pick`, `Omit`, `Keyof`,
+`Partial`, and `Complete` require a struct. `Pick` and `Omit` select keys from a
+sum of string literals. `Required<T>` removes outer optionality from any type.
+
+```xen
+type Profile = { name: string, enabled: ?bool };
+type NameKeys =
+    | "name";
+type NameOnly = Pick<Profile, NameKeys>;
+type WithoutName = Omit<Profile, NameKeys>;
+type ProfileKeys = Keyof<Profile>;
+type OptionalProfile = Partial<Profile>;
+type CompleteProfile = Complete<Profile>;
+type OptionalText = ?string;
+type PresentText = Required<OptionalText>;
+```
 
 ### Union, intersection, and bottom types
 
-A sum type starts with `|`. A value of `|A|B` can be either `A` or `B`, so only
-constraints and ancestors guaranteed by **both** members are available on the
-sum. A constraint implemented by only one member is optional and cannot be
+A sum type starts with `|` to make parsing obvious. A value of `|A|B` can be either `A` or `B`, so only constraints and ancestors guaranteed by **both** members are available on the sum. A constraint implemented by only one member is optional and cannot be
 applied to the sum as a whole.
 
 An intersection type starts with `&`. A value of `&A&B` must be both `A` and
@@ -132,9 +210,19 @@ members. A constraint guaranteed by either member is therefore available on
 the intersection.
 
 ```xen
-type Text = |uuid|string @match(/[a-f]+/); // both members derive from string
-type Mixed = |uuid|u8;                    // string-only constraints are unsafe
-type NumericText = &f32&integer;          // inherits constraints from both
+type Alphanumeric = string
+    @match(/[0-9a-f]+/);
+// both members derive from string, the decorator is applied to the whole type.
+type Text =
+    |uuid
+    |Alphanumeric
+    @deprecated;
+type Mixed =
+    | uuid
+    | u8;
+type NumericText =
+    & f32
+    & integer; // inherits constraints from both
 ```
 
 `NEVER` is the bottom type. It has no possible values and is a subtype of every
@@ -142,7 +230,7 @@ type, including source-declared types. Its universal parentage is resolved by
 the source type hierarchy; it is not stored as a generated static parent list.
 
 The analyzer proves incompatibility conservatively. A provably empty
-intersection such as `&u8&string` resolves to `NEVER` and produces an error at
+intersection such as `& u8 & string` resolves to `NEVER` and produces an error at
 the source intersection. Intersections that might overlap are retained when
 the hierarchy cannot prove that they are empty.
 
@@ -152,6 +240,7 @@ Struct and enum keys can be quoted when their wire name is not a Xenomorph
 identifier or conflicts with a Xenomorph keyword:
 
 ```xen
+type Automation = { enabled: bool };
 type ExecutionMode = {
         "ecu.test": ?Automation,
         "type": string,
@@ -173,60 +262,102 @@ native reserved keyword in a context that requires a native identifier. Java
 also reports keyword clashes for fields and enum variants. Quoted wire keys do
 not bypass these checks when the target must emit them as native identifiers.
 
-## Builtin validators:
+## Annotation placement
 
-The validators that are function-like that have the signiture `name(...args)` need a `@` prefix in the schema.
+Annotations belong to the full type expression on the right-hand side of a
+top-level named `type` declaration. Simple types used in struct and enum
+fields, tuple elements, and type arguments cannot carry annotations. They
+contain identifiers or literals, optionality, and array forms only.
 
-Validators are executed in the order they are written in most contexts, but the plugins can alter this behavior.
+Declare an annotated type first, then reference it where a simple type is
+required:
 
-## Validation operators
+```xen
+type Milliseconds = u32 @multipleof(10);
+type Tenths = decimal @multipleof(0.1);
+type Timeline = { elapsed_ms: Milliseconds, elapsed_seconds: ?Tenths };
+```
 
-- `( )` for grouping validators
-- `not` inverts the result e.g. `not empty`
-- `or` or `|`
-- `xor` or `^`
+Writing `elapsed_ms: u32 @multipleof(10)` directly inside the struct is invalid.
+This is a deliberate language restriction that keeps annotation applicability
+and plugin interpretation easier to verify.
 
-## Single field
+## Deprecation metadata
 
-### Common validators
+`@deprecated` marks a named type declaration as deprecated. It accepts an optional
+string literal reason and can apply to any type. It does not change type
+compatibility, validate runtime values, or emit compiler warnings when the type
+is used. You can also provide replacement advice in the declaration's documentation:
 
-- `<literal>` are they equal e.g. `string "exact"`
-- `in(<enum, list>)` is in enumeration/list
-- `empty` for strings and arrays
-- Range: `a..b` or `a.<b` or `a<.b` or `a<.<b` where `a` and `b` are `<number>`
-- `only(<plugin_list>)` restrict fields to plugins
-- `exclude(<plugin_list>)` opposite of `only`
+```xen
+/** Use Timeline instead. */
+type LegacyTimeline = { elapsed: u32 } @deprecated("Use Timeline instead.");
+```
 
-### Number / Integer / BigInt / Float / Decimal validation
+Plugins preserve the marker using their target's standard representation:
 
-- `min(<number>)` use this as lte
-- `max(<number>)` use this as gte
-- `gt(<number>)`
-- `lt(<number>)`
-- `multipleof(<number>)` you can test precision with this e.g. `0.031 multipleof(0.001)` is true.<br>_might break down if you write something too small_
+| Target      | Generated metadata                                                                 |
+| ----------- | ---------------------------------------------------------------------------------- |
+| JSON Schema | `"deprecated": true` on the type's schema                                          |
+| TypeScript  | JSDoc `@deprecated` on each generated declaration                                  |
+| Java        | `@Deprecated` and Javadoc `@deprecated` on generated classes, enums, and constants |
 
-### String
+TypeScript and Java include the reason in the documentation tag. JSON Schema
+uses the boolean keyword; put additional prose in the declaration's documentation
+to include it in the schema's `description`. Both `@deprecated` and
+`@deprecated()` omit the reason.
 
-- `/regex/`
-- `match(<regex>)` requires a string or a type derived from `string` to match the regular expression
-- `minlen(<number>)`
-- `maxlen(<number>)`
-- `len(<number>)`
-- `len(<range>)` is in range
+Java scalar aliases are expanded into their underlying types and have no separate
+declaration to mark. Fields that reference a deprecated type are not themselves
+marked deprecated. The annotation placement rules above also apply to
+`@deprecated`.
 
-## Multi field
+## Built-in annotations
 
-Other fields are referenced by their name after a `$` prefix.
+Annotations carry metadata for plugins to interpret. The compiler checks
+their target and argument constraints; runtime data validation is generated or
+performed by a plugin. Annotation order is retained in the AST.
 
-- `eq(<$field>)` equal to another field
-- `neq(<$field>)` not equal to another field
-- `gt(<$field>)` greater than another field
-- `lt($field>)` less than another field
-- `min(<$field>)` greater than or equal to another field
-- `max(<$field>)` less than or equal to another field
-- `in(<$field>)` is in another field (list)
-- `not in(<$field>)` is not in another field
-- `if(_ , (<$field> ([+-]<validator>)*)*)` can be used on bool fields
-- `if(<validator>*, (<$field> ([+-]<validator>)*)*)` can be used on any field with the appropriate validators
-- `elseif(<validator>*, <$field> (([+-]<validator>)*)*)` can be used right after `if` to specify the else if condition
-- `else(<$field> ([+-]<validator>)*)` can be used right after `if` to specify the else condition
+| Annotation                                        | Applicable target            | Explicit arguments           |
+| ------------------------------------------------- | ---------------------------- | ---------------------------- |
+| `@min(value)`, `@max(value)`                      | `Numeric`                    | One numeric literal          |
+| `@gt(value)`, `@lt(value)`                        | `Numeric`                    | One numeric literal          |
+| `@multipleof(value)`                              | `Numeric`                    | One positive numeric literal |
+| `@len(value)`, `@minlen(value)`, `@maxlen(value)` | `HasLength`                  | One integer literal          |
+| `@match(pattern)`                                 | `string` and its descendants | One regex literal            |
+| `@deprecated(reason)`                             | Any type                     | Optional string literal      |
+| `@if(condition, expression)`                      | Any type                     | Two expressions              |
+| `@elseif(condition, expression)`                  | Any type                     | Two expressions              |
+| `@else(expression)`                               | Any type                     | One expression               |
+
+Targets are checked against the registered type or trait constraint. For example,
+`@minlen` applies to values implementing `HasLength`, including strings and
+arrays. Numeric annotations accept integer and decimal literals, including
+compatible numeric casts.
+
+`@multipleof(0.1)` describes increments of one tenth; `@multipleof(10)` describes
+increments of ten. The argument must be greater than zero and is stored exactly.
+Plugins that generate floating-point validators must account for the target's
+precision. The JSON Schema plugin emits the `multipleOf` keyword.
+
+Regex literals are annotation arguments, for example
+`type Code = string @match(/^[A-Z]+$/);`. A bare `/regex/` after a type is invalid.
+
+Annotation expressions can contain types, literals, regexes, and nested
+annotations. `@elseif` must immediately follow `@if` or another `@elseif`, and
+`@else` must follow `@if` or `@elseif`. Nested annotations do not interrupt the
+outer chain. The compiler checks these signatures and the chain order; plugins
+determine how to interpret the conditional metadata.
+
+```xen
+type ConditionalNumber = number
+    @if(true, @min(1))
+    @elseif(false, @min(2))
+    @else(@min(0));
+```
+
+Runtime field references such as `$field`, validator operators such as `not`
+and `xor`, and built-ins such as `eq`, `in`, `empty`, `only`, and `exclude` are
+not implemented. Unknown annotation names produce warnings rather than adding
+core behavior. Draft ideas are recorded separately in
+[Unimplemented design sketches](NOT_SURE_YET.md).

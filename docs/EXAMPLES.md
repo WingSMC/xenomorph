@@ -22,52 +22,53 @@ type PositiveId = u64 @min(1 as u64);
 
 Casts are checked. For example, `256 as u8`, `-1 as u8`, and a decimal that loses precision as `f32` are errors. See [Grammar: Numeric literal representation and casts](GRAMMAR.md#numeric-literal-representation-and-casts) for inference and generator rules.
 
-## Lists
+## Tuples and arrays
 
-Lists can be made of literals and types.
-If a list has a type in it you can no longer use it as a value.
+Simple types in fields, tuples, and type arguments cannot carry annotations.
+Apply annotations to a top-level named type, then reference that type. See
+[Annotation placement](GRAMMAR.md#annotation-placement) for the design rationale.
 
-Lets say we have two lists, one of string literals (literals can be considered sub-types) and one of types.
-Usually in place of the types you can use the right side of the `=` operators.
+Tuples have fixed positions containing simple types or literals. Separate members
+with commas and end every declaration with a semicolon. Arrays use an identifier
+followed by `[]`.
 
-```ts
-type ActuatorInterface = ["axles", "vehicle", "wheel-individual"]
+```xen
+type ActuatorInterface = ["axles", "vehicle", "wheel-individual"];
 type Tuple = [
 	ActuatorInterface,
 	string,
 	number,
 	number,
-]
+];
 
-// You can validate tuple fields
+// Declare an annotated type before using it in a tuple.
+type EventLabel = string @minlen(15) @maxlen(300);
 type EventTuple = [
-	EventList,
-	string @len(15..300) | null,
+	datetime,
+	?EventLabel,
 	number, // Price
-]
+];
+type Events = EventTuple[] @minlen(1);
 ```
 
-You can constrain lists and do operations on them.
+## Sets
 
-- `set` enforces unique values
-	- `*` intersection
-	- `\` difference
-	- `<>` symmetric difference: `(a \ b) + (b \ a)` same as `(a + b) \ (a * b)`
-- `+` concatenation (union for sets)
+A set declaration needs an element type in angle brackets, a literal prefill in
+square brackets, or both. Prefill members require commas. A trailing comma is
+allowed. Duplicate literal values produce semantic errors; they are not silently
+removed.
 
-The `set` keyword produces and error in declarations with duplicates, but when used on pre-existing types it just creates new types without the duplicates.
-
-```ts
-type SomeIncorrectSet = set ["axles" "service-request" "axles"] // -> Error
-type SomeList = ["axles" "service-request" "axles"]
-type SomeSet = set SomeList // -> ["axles" "service-request"]
+```xen
+type InterfaceName = string;
+type Interfaces = set<InterfaceName>;
+type KnownInterfaces = set ["axles", "service-request"];
+type SmallIntegers = set<u8> [1, 2, 3,];
+type EmptyInterfaces = set<InterfaceName> [];
 ```
 
-```ts
-type SomeOtherInterface = set ["axles", "service-request"]
-type AllInterfaces = SomeOtherInterface + set ActuatorInterface
-// -> ["axles" "service-request" "vehicle" "wheel-individual"]
-```
+A prefill accepts literals rather than type identifiers. Collection concatenation, difference.
+
+<!-- TODO: set operations -->
 
 ## Structs & Enums
 
@@ -76,49 +77,55 @@ keywords. The Java target preserves the wire key with Gson metadata while
 using a legal Java member name.
 
 ```xen
+type Automation = { enabled: bool };
 type ExecutionMode = {
 	"ecu.test": ?Automation,
 	"type": string,
 };
 ```
 
-```ts
-
+```xen
+type UserId = u64;
+type UserName = string @match(/^[A-Z]{3,5}_[0-9]{1,3}$/) @minlen(5) @maxlen(20);
+type UserAge = u8 @min(13) @max(127);
 type User = {
-	// by default it will use string for other targets
-	// if it is generating a mongo orm it will use string
-	// if it is an SQL ORM it will use u64
-	_id: 
-		| string
-		| @Mongo:id
-		| @SQL:primary(u64),
-	name: string /^[A-Z]{3,5}_[0-9]{1,3}$/ @len(5..20),
-	age: u8 @min(13) @max(127) @if(lt(18), $adultContent +false),
+	_id: UserId,
+	name: UserName,
+	age: UserAge,
 	utype: UserType,
-	// if tests the languageFilter boolean value implicitly
-	// so a validator expression is not needed
-	languageFilter: bool @if(_, $age +@min(16)) @else($age +@min(12)),
+	languageFilter: bool,
 	adultContent: bool,
-}
+};
 
 // Action user contains algebraic data just like rust enums
 type UserType = enum {
 	Admin: -1,
 	Basic: 1,
 	Premium: 2,
-}
+};
+type QueryLogRange = { from: datetime, to: datetime };
 type Action = enum {
-	// DeleteUser contains same type as User._id, it's
-	// own type is an auto generated integer much like in rust
-	DeleteUser: User._id, // in memory [0, User._id]
-	EditUser: User._id,   // in memory [1, User._id]
-	QueryLogs: {from: Date, to: Date},  // in memory [2, Date, Date]
-}
+	DeleteUser: UserId,
+	EditUser: UserId,
+	QueryLogs: QueryLogRange,
+};
 
-type Admin = User & {
-	actions: ActionEntry[] @minlen(1) @maxlen(10),
-}
+type ActionEntry = [datetime, Action];
+type ActionEntries = ActionEntry[] @minlen(1) @maxlen(10);
+type AdminActions = { actions: ActionEntries };
+type Admin = &User&AdminActions;
 
-type ActionEntry = [Date, Action]
+type TimelineTick = decimal @multipleof(0.1);
+type Timeline = { position: TimelineTick };
+```
 
+## Deprecation
+
+Mark a named declaration as deprecated metadata, with an optional reason:
+
+```xen
+type LegacyId = u32 @deprecated;
+type LegacyTimeline = { elapsed: u32 } @deprecated("Use Timeline instead.");
+type Tick = decimal @multipleof(0.1);
+type Timeline = { position: Tick };
 ```

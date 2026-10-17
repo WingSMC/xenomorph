@@ -168,10 +168,15 @@ impl<'context> AnnotationValidator<'context> {
         errors: &mut Vec<XenoDiagnostic>,
     ) {
         let expected_params = annotation.explicit_parameters();
-        let invalid_count = if annotation.variadic {
-            args.len() < expected_params.len()
+        let minimum = annotation.required_parameter_count();
+        let invalid_count =
+            args.len() < minimum || (!annotation.variadic && args.len() > expected_params.len());
+        let expected_count = if annotation.variadic {
+            format!("{minimum} or more")
+        } else if minimum != expected_params.len() {
+            format!("{minimum} to {}", expected_params.len())
         } else {
-            args.len() != expected_params.len()
+            minimum.to_string()
         };
         if invalid_count {
             errors.push(XenoDiagnostic {
@@ -179,10 +184,9 @@ impl<'context> AnnotationValidator<'context> {
                 severity: crate::XenoDiagSeverity::Err,
                 location: (*name),
                 message: format!(
-                    "Annotation '@{}' expects {}{} argument(s), got {}.",
+                    "Annotation '@{}' expects {} argument(s), got {}.",
                     annotation.name,
-                    expected_params.len(),
-                    if annotation.variadic { " or more" } else { "" },
+                    expected_count,
                     args.len()
                 ),
             });
@@ -206,6 +210,26 @@ impl<'context> AnnotationValidator<'context> {
                         Self::arg_type_name(arg)
                     ),
                 });
+            } else if annotation.name == "multipleof" {
+                let positive = match arg {
+                    Expr::Type(Type::Simple(SimpleType::Literal(Literal::Int(integer)))) => {
+                        integer.value > 0.into()
+                    }
+                    Expr::Type(Type::Simple(SimpleType::Literal(Literal::Float(decimal)))) => {
+                        decimal.value > 0
+                    }
+                    _ => true,
+                };
+                if !positive {
+                    errors.push(XenoDiagnostic {
+                        tags: vec![],
+                        severity: crate::XenoDiagSeverity::Err,
+                        location: Self::expr_location(arg),
+                        message:
+                            "Annotation '@multipleof' argument 'value' must be greater than zero."
+                                .to_string(),
+                    });
+                }
             }
         }
     }

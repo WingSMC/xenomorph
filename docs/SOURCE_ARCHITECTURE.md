@@ -40,7 +40,7 @@ identifier. Kahn's algorithm defers import cycles and modules depending on
 them, with diagnostics until the cycle is removed. Recursive type references
 are a separate graph and remain legal, including:
 
-```ts
+```xen
 type TreeNode = { children: Tree[] };
 type Tree =
     | TreeNode

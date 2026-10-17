@@ -252,7 +252,10 @@ fn sdk_namespaces_declarations_that_share_builtin_names() {
         name: "min",
         documentation: None,
         kind: XenoAnnotationKind::Meta,
-        params: &[&crate::semantic::ANY_TARGET_PARAM],
+        params: &[
+            &crate::semantic::ANY_TARGET_PARAM,
+            &crate::semantic::DEPRECATION_REASON_PARAM,
+        ],
         variadic: false,
     };
     static TYPES: &[&XenoType] = &[&TYPE];
@@ -281,6 +284,11 @@ fn sdk_namespaces_declarations_that_share_builtin_names() {
         .annotations
         .contains_key("fixture::min"));
     assert!(!description.metadata.types.contains_key("string"));
+    assert!(description.metadata.annotations["fixture::min"].params[1].optional);
+    assert_eq!(
+        description.metadata.annotations["fixture::min"].required_parameter_count(),
+        0
+    );
     assert_eq!(
         description.metadata.annotations["fixture::min"].params[0]
             .constraint
@@ -316,6 +324,7 @@ fn plugin_graphs_keep_core_and_other_plugin_declarations_distinct() {
             &XenoParam {
                 name: "value",
                 constraint: XenoConstraint::Type(&TYPE),
+                optional: false,
             },
         ],
         variadic: false,

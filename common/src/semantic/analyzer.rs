@@ -123,6 +123,7 @@ impl ScopeInfo {
     fn validate_annotation_metadata(&self) -> Result<(), String> {
         for (key, annotation) in &self.annotations {
             super::metadata::validate_identity(key, &annotation.name)?;
+            annotation.validate_parameter_order()?;
             super::metadata::validate_parameter_names(
                 annotation
                     .params
