@@ -713,6 +713,21 @@ impl TypeHierarchy {
             .map(Arc::as_ref)
     }
 
+    /// Resolves `name` as it is written inside `module_path`: a local
+    /// declaration first, then the module's imports, then semantic types.
+    pub fn get_type_from(&self, module_path: Option<&str>, name: &str) -> Option<&TypeDefinition> {
+        self.resolve_type(name, module_path)
+    }
+
+    /// Every source declaration in the hierarchy, across all modules, in no
+    /// particular order.
+    pub fn declarations(&self) -> impl Iterator<Item = &TypeDefinition> {
+        self.types
+            .values()
+            .filter(|definition| definition.module_path.is_some())
+            .map(Arc::as_ref)
+    }
+
     pub fn get_trait(&self, name: &str) -> Option<&OwnedTrait> {
         self.traits.get(name)
     }
@@ -1040,13 +1055,42 @@ impl TypeHierarchy {
         resolving: &mut HashSet<String>,
     ) -> Result<Option<Vec<OwnedField>>, TypeEvaluationError> {
         let evaluated = self.evaluate_type_inner(candidate, context, resolving)?;
-        if let OwnedType::Struct(fields) = evaluated {
-            return Ok(Some(fields));
+        let body = match evaluated {
+            OwnedType::Struct(_) | OwnedType::Intersection(_) => evaluated,
+            other => match self.resolve_declaration_body(&other, context, resolving, Some)? {
+                Some(body) => body,
+                None => return Ok(None),
+            },
+        };
+        match body {
+            OwnedType::Struct(fields) => Ok(Some(fields)),
+            OwnedType::Intersection(items) => {
+                let mut merged: Vec<OwnedField> = Vec::new();
+                for item in &items {
+                    let Some(fields) = self.resolve_struct_fields(item, context, resolving)? else {
+                        return Ok(None);
+                    };
+                    merge_struct_fields(&mut merged, fields);
+                }
+                Ok(Some(merged))
+            }
+            _ => Ok(None),
         }
-        self.resolve_declaration_body(&evaluated, context, resolving, |body| match body {
-            OwnedType::Struct(fields) => Some(fields),
-            _ => None,
-        })
+    }
+
+    /// Resolves the fields of a struct-shaped type: a struct, a declaration or
+    /// utility producing one, or an intersection whose members are all
+    /// struct-shaped (fields are merged in member order). `None` when the type
+    /// is not struct-shaped.
+    pub fn struct_fields(
+        &self,
+        candidate: &OwnedType,
+    ) -> Result<Option<Vec<OwnedField>>, TypeEvaluationError> {
+        self.resolve_struct_fields(
+            candidate,
+            self.current_module.as_deref(),
+            &mut HashSet::new(),
+        )
     }
 
     fn resolve_literal_sum(
@@ -2327,6 +2371,38 @@ pub fn literal_to_owned(literal: &Literal, source: &str) -> OwnedLiteral {
         },
         Literal::String(value, _) => OwnedLiteral::String(value.clone()),
         Literal::Boolean(value, _) => OwnedLiteral::Boolean(*value),
+    }
+}
+
+/// Adds `fields` to an intersection's merged field list. A key present in
+/// both members must satisfy both: equal types collapse, a required member
+/// wins over the same optional type, other types become an intersection.
+fn merge_struct_fields(merged: &mut Vec<OwnedField>, fields: Vec<OwnedField>) {
+    for field in fields {
+        let Some(existing) = merged.iter_mut().find(|existing| existing.name == field.name) else {
+            merged.push(field);
+            continue;
+        };
+        if existing.documentation.is_none() {
+            existing.documentation = field.documentation;
+        }
+        if existing.ty == field.ty {
+            continue;
+        }
+        let both_optional = matches!(existing.ty, OwnedType::Optional(_))
+            && matches!(field.ty, OwnedType::Optional(_));
+        let left = required_type(existing.ty.clone());
+        let right = required_type(field.ty.clone());
+        let combined = if left == right {
+            left
+        } else {
+            OwnedType::Intersection(vec![left, right])
+        };
+        existing.ty = if both_optional {
+            optional_type(combined)
+        } else {
+            combined
+        };
     }
 }
 

@@ -3,11 +3,17 @@
 extends = "./schema/tda/xenomorph.toml"
 
 [parser]
-entry = "schema/tda/ui"
+entry = "schema/tda/index"
+# entry = "schema/tda/backend"
+# entry = "schema/tda/ai"
+# entry = "schema/tda/ui"
 
 [plugins]
 path = "./target/release/"
 plugins = ["xenomorph_json_schema", "xenomorph_java", "xenomorph_typescript"]
+# plugins = ["xenomorph_java"]
+# plugins = ["xenomorph_typescript"]
+# plugins = ["xenomorph_json_schema"]
 
 [plugins.typescript]
 output = "./tests/out/typescript/"
@@ -17,6 +23,6 @@ output = "./tests/out/json_schema/"
 
 [plugins.java]
 output = "./tests/out/java/"
-package = "com.xyz.model"
+package = "jet.schema"
 data = true
 builder = true

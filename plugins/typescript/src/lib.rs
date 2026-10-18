@@ -394,7 +394,7 @@ fn generate_interface(
         let optional = is_optional(value);
 
         if let Some(docs) = docs {
-            push_jsdoc(out, extract_documentation(docs, source), "  ");
+            push_jsdoc(out, &extract_documentation(docs, source), "  ");
         }
         let opt = if optional { "?" } else { "" };
         out.push_str(&format!(
@@ -424,7 +424,7 @@ fn generate_enum(
         out.push_str(&format!("{export}enum {name} {{\n"));
         for (key, value, docs) in variants {
             if let Some(docs) = docs {
-                push_jsdoc(out, extract_documentation(docs, source), "  ");
+                push_jsdoc(out, &extract_documentation(docs, source), "  ");
             }
             out.push_str(&format!(
                 "  {} = {},\n",
@@ -438,7 +438,7 @@ fn generate_enum(
         for (index, (key, value, docs)) in variants.iter().enumerate() {
             let payload_ts = simple_type_to_ts(value, source);
             if let Some(docs) = docs {
-                push_jsdoc(out, extract_documentation(docs, source), "  ");
+                push_jsdoc(out, &extract_documentation(docs, source), "  ");
             }
             let suffix = if index + 1 == variants.len() { ";" } else { "" };
             out.push_str(&format!(

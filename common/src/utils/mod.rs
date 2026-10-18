@@ -2,11 +2,23 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use crate::TokenData;
 
-/// Just slices the value of the token to remove the comment boundries '/**' and '*/',
-/// and trims the result to remove any leading or trailing whitespace.
-pub fn extract_documentation<'src>(token: &TokenData, source: &'src str) -> &'src str {
-    let len = token.text(source).len();
-    token.text(source)[3..len - 2].trim()
+/// Removes the comment boundaries '/**' and '*/', strips the conventional
+/// leading ` * ` from continuation lines and trims surrounding blank space.
+pub fn extract_documentation(token: &TokenData, source: &str) -> String {
+    let text = token.text(source);
+    let inner = &text[3..text.len() - 2];
+    let lines: Vec<&str> = inner
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            match trimmed.strip_prefix('*') {
+                Some(rest) => rest.strip_prefix(' ').unwrap_or(rest),
+                None => trimmed,
+            }
+            .trim_end()
+        })
+        .collect();
+    lines.join("\n").trim().to_string()
 }
 
 pub fn calculate_hash<T: Hash>(t: &T) -> u64 {
@@ -44,4 +56,26 @@ pub fn module_path_parts(module_path: &str) -> Vec<&str> {
         .split(['/', '\\'])
         .filter(|part| !part.is_empty())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn documentation_strips_continuation_stars() {
+        let source = "/**\n * First line.\n *   indented\n *\n * Last.\n */";
+        let token = TokenData::new(0, source.len());
+        assert_eq!(
+            extract_documentation(&token, source),
+            "First line.\n  indented\n\nLast."
+        );
+    }
+
+    #[test]
+    fn single_line_documentation_is_trimmed() {
+        let source = "/** Only line. */";
+        let token = TokenData::new(0, source.len());
+        assert_eq!(extract_documentation(&token, source), "Only line.");
+    }
 }

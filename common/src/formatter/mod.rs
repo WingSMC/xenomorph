@@ -792,6 +792,7 @@ fn reindent(
         IndentKind::Tab => "\t".to_string(),
     };
     let lines = source.split('\n').collect::<Vec<_>>();
+    let in_block_comment = lines_starting_in_block_comment(source);
     let mut output = String::with_capacity(source.len());
     let mut stack: Vec<Delimiter> = Vec::new();
     let mut token_index = 0;
@@ -840,7 +841,14 @@ fn reindent(
         indent_level = indent_level.max(usize::from(continuation));
         let trimmed = line.trim();
 
-        if !trimmed.is_empty() {
+        if in_block_comment[line_index] && !trimmed.is_empty() {
+            // Keep conventional ` * ` alignment under the comment opener.
+            output.push_str(&indent_unit.repeat(indent_level));
+            if trimmed.starts_with('*') {
+                output.push(' ');
+            }
+            output.push_str(trimmed);
+        } else if !trimmed.is_empty() {
             output.push_str(&indent_unit.repeat(indent_level));
             output.push_str(&normalize_operator_prefix(trimmed));
         }
@@ -873,6 +881,45 @@ fn reindent(
     }
 
     output
+}
+
+/// For each line, whether it starts inside a `/* */` or `/** */` comment.
+fn lines_starting_in_block_comment(source: &str) -> Vec<bool> {
+    let mut result = vec![false];
+    let mut chars = source.chars().peekable();
+    let (mut in_block, mut in_string, mut in_line_comment) = (false, false, false);
+    while let Some(c) = chars.next() {
+        if c == '\n' {
+            in_line_comment = false;
+            result.push(in_block);
+            continue;
+        }
+        if in_line_comment {
+            continue;
+        }
+        if in_block {
+            if c == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                in_block = false;
+            }
+        } else if in_string {
+            match c {
+                '\\' => {
+                    chars.next_if(|next| *next != '\n');
+                }
+                '"' => in_string = false,
+                _ => {}
+            }
+        } else if c == '"' {
+            in_string = true;
+        } else if c == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            in_block = true;
+        } else if c == '/' && chars.peek() == Some(&'/') {
+            in_line_comment = true;
+        }
+    }
+    result
 }
 
 fn normalize_operator_prefix(line: &str) -> String {
@@ -1050,6 +1097,14 @@ mod tests {
         assert!(output.contains("\r\n    // reason\r\n"));
         assert!(output.contains("ConcreteDeclaration2,\r\n};"));
         assert_eq!(format_xenomorph(&output, &config), output);
+    }
+
+    #[test]
+    fn keeps_star_alignment_in_multi_line_comments() {
+        let source = "/*\n * Header.\n */\n\n/**\n * Doc.\n */\ntype S = {\n/**\n* Field doc.\n   */\na: string,\n};";
+        let expected = "/*\n * Header.\n */\n\n/**\n * Doc.\n */\ntype S = {\n    /**\n     * Field doc.\n     */\n    a: string,\n};";
+        assert_eq!(format_xenomorph(source, &formatter(80)), expected);
+        assert_eq!(format_xenomorph(expected, &formatter(80)), expected);
     }
 
     #[test]

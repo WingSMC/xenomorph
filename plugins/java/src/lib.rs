@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 
@@ -9,8 +9,10 @@ use xenomorph_common::parser::{
 };
 use xenomorph_common::plugins::XenoPlugin;
 use xenomorph_common::semantic::{
-    is_type_utility, simple_to_owned_type, unsupported_target_type_diagnostic, AnalyzerListener,
-    OwnedField, OwnedLiteral, OwnedType, ScopeInfo, TypeHierarchy, XenoAnnotation,
+    is_type_utility, simple_to_owned_type, type_to_owned_type, unsupported_target_type_diagnostic,
+    AnalyzerListener,
+    OwnedField, OwnedLiteral, OwnedSet, OwnedType, ScopeInfo, TypeDefinition, TypeHierarchy,
+    XenoAnnotation,
     XenoAnnotationKind, XenoConstraint, XenoParam, XenoParent, XenoTrait, XenoTraitKind,
     XenoType as SemanticType, ANY_TARGET_PARAM,
 };
@@ -181,6 +183,22 @@ struct JavaConstant {
     reason: Option<String>,
 }
 
+/// Identity of a source declaration: its module path and name.
+type DeclarationKey = (Option<String>, String);
+
+/// A literal set or literal sum generated as a Java enum.
+struct LiteralEnum {
+    /// `String`, a numeric primitive, `BigInteger`, or `BigDecimal`.
+    value_type: &'static str,
+    literals: Vec<OwnedLiteral>,
+}
+
+impl LiteralEnum {
+    fn is_numeric(&self) -> bool {
+        self.value_type != "String"
+    }
+}
+
 struct JavaGenerator {
     source: String,
     workdir: PathBuf,
@@ -203,6 +221,9 @@ struct JavaGenerator {
     files: Vec<(String, String)>,
     /// Homogeneous literal collections emitted as `Xenomorph` constants.
     constants: Vec<JavaConstant>,
+    /// Marker interfaces each class-backed declaration implements, collected
+    /// from the sums of every module in the type hierarchy.
+    sum_parents: BTreeMap<DeclarationKey, BTreeSet<String>>,
     /// Whether the current module contains a generated tuple declaration.
     has_tuples: bool,
     /// Annotation arguments are metadata and are not emitted as Java value types.
@@ -224,6 +245,7 @@ impl JavaGenerator {
             type_hierarchy: TypeHierarchy::default(),
             files: Vec::new(),
             constants: Vec::new(),
+            sum_parents: BTreeMap::new(),
             has_tuples: false,
             annotation_depth: 0,
         }
@@ -274,8 +296,9 @@ impl<'src> AnalyzerListener<'src> for JavaGenerator {
     fn on_before_ast(
         &mut self,
         ast: &[Declaration],
-        _errors: &mut Vec<xenomorph_common::XenoDiagnostic>,
+        errors: &mut Vec<xenomorph_common::XenoDiagnostic>,
     ) {
+        self.sum_parents = self.collect_sum_parents();
         for decl in ast {
             if let Declaration::Type {
                 docs,
@@ -285,10 +308,24 @@ impl<'src> AnalyzerListener<'src> for JavaGenerator {
                 ..
             } = decl
             {
+                let type_name = name.text(&self.source);
+                if let Some(literal_enum) = self
+                    .type_hierarchy
+                    .get_type(type_name)
+                    .and_then(|definition| self.literal_enum(definition))
+                {
+                    let metadata = DeclarationMetadata::new(docs, t, &self.source);
+                    let constants = literal_enum_constant_names(&literal_enum.literals);
+                    report_enum_constant_collisions(name, &t.0, &constants, errors);
+                    let content =
+                        self.generate_literal_enum(metadata, type_name, &literal_enum, &constants);
+                    self.files.push((type_name.to_string(), content));
+                    continue;
+                }
                 if let Some((java_type, initializer)) = self.constant_collection(&t.0) {
                     let metadata = DeclarationMetadata::new(docs, t, &self.source);
                     self.constants.push(JavaConstant {
-                        name: name.text(&self.source).to_string(),
+                        name: type_name.to_string(),
                         java_type,
                         initializer,
                         docs: docs.clone(),
@@ -301,10 +338,9 @@ impl<'src> AnalyzerListener<'src> for JavaGenerator {
                     self.has_tuples = true;
                 }
                 if let Some(content) =
-                    self.generate_type_decl(docs, name.text(&self.source), generics.as_deref(), t)
+                    self.generate_type_decl(docs, type_name, generics.as_deref(), t)
                 {
-                    self.files
-                        .push((name.text(&self.source).to_string(), content));
+                    self.files.push((type_name.to_string(), content));
                 }
             }
         }
@@ -423,36 +459,296 @@ impl<'src> AnalyzerListener<'src> for JavaGenerator {
 // ── Type declaration generation ─────────────────────────────────────
 
 impl JavaGenerator {
-    /// Set and constant-collection declarations have no generated class, so
-    /// references to them resolve to the collection type itself.
-    fn declared_collection_type(
+    /// The Java type a field gets when it references a source declaration
+    /// that has no class of its own, or that Java represents specially.
+    fn declared_type_to_java(
         &self,
-        name: &str,
+        definition: &TypeDefinition,
         imports: &mut BTreeSet<String>,
     ) -> Option<String> {
-        let body = self.type_hierarchy.get_type(name)?.body.as_ref()?;
-        let literals: Vec<&OwnedLiteral> = match body {
-            OwnedType::Set(set) if set.values.is_none() => {
-                return Some(self.owned_type_to_java(body, imports));
+        definition.module_path.as_ref()?;
+        if self.literal_enum(definition).is_some()
+            || self.interface_sum_members(definition).is_some()
+        {
+            return Some(definition.name.clone());
+        }
+        let body = definition.body.as_ref()?;
+        match body {
+            OwnedType::Set(set) if set.values.is_none() => Some(self.owned_type_to_java(body, imports)),
+            // A literal set is a value type; one without an enum (booleans)
+            // takes the scalar type of its members.
+            OwnedType::Set(set) => common_java_owned_literal_type(
+                &set.values.as_ref()?.iter().collect::<Vec<_>>(),
+                imports,
+            )
+            .or_else(|| Some("Object".to_string())),
+            OwnedType::Tuple(items) => {
+                let literals = items
+                    .iter()
+                    .map(|item| match item {
+                        OwnedType::Literal(literal) => Some(literal),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Some(format!(
+                    "{}[]",
+                    common_java_owned_literal_type(&literals, imports)?
+                ))
             }
-            OwnedType::Set(set) => set.values.as_ref()?.iter().collect(),
-            OwnedType::Tuple(items) => items
-                .iter()
-                .map(|item| match item {
-                    OwnedType::Literal(literal) => Some(literal),
-                    _ => None,
-                })
-                .collect::<Option<_>>()?,
-            _ => return None,
-        };
-        Some(format!(
-            "{}[]",
-            common_java_owned_literal_type(&literals, imports)?
-        ))
+            // Sums mixing scalars, literals, or members without a class have
+            // no common Java type.
+            OwnedType::Sum(_) => Some("Object".to_string()),
+            _ => None,
+        }
     }
 
-    /// Homogeneous literal tuples and prefilled sets become plain arrays.
-    /// Heterogeneous literal tuples keep their positional tuple class.
+    /// Prefilled sets and sums of literals become Java enums when every
+    /// literal shares one string or numeric Java type.
+    fn literal_enum(&self, definition: &TypeDefinition) -> Option<LiteralEnum> {
+        if definition.module_path.is_none() || !definition.generic_params.is_empty() {
+            return None;
+        }
+        let (element, literals) = match definition.body.as_ref()? {
+            OwnedType::Set(OwnedSet {
+                element_type,
+                values: Some(values),
+            }) => (element_type.as_deref(), values.clone()),
+            OwnedType::Sum(items) if !items.is_empty() => {
+                let mut visiting = vec![declaration_key(definition)];
+                let mut literals = Vec::new();
+                for item in items {
+                    for literal in self.sum_member_literals(
+                        definition.module_path.as_deref(),
+                        item,
+                        &mut visiting,
+                    )? {
+                        if !literals.contains(&literal) {
+                            literals.push(literal);
+                        }
+                    }
+                }
+                (None, literals)
+            }
+            _ => return None,
+        };
+
+        let mut imports = BTreeSet::new();
+        let mut common =
+            common_java_owned_literal_type(&literals.iter().collect::<Vec<_>>(), &mut imports);
+        if !literals.is_empty() && common.is_none() {
+            return None;
+        }
+        if let Some(element) = element {
+            let element = self.owned_type_to_java(
+                &self.type_hierarchy.resolve_for_target(element),
+                &mut imports,
+            );
+            common = Some(match common {
+                None => element,
+                Some(common) => widen_java_type(&common, &element).unwrap_or(common),
+            });
+        }
+        let value_type = match common.as_deref().unwrap_or("String") {
+            "String" => "String",
+            "Byte" | "Short" | "Integer" => "int",
+            "Long" => "long",
+            "BigInteger" => "BigInteger",
+            "Float" => "float",
+            "Double" => "double",
+            "BigDecimal" => "BigDecimal",
+            _ if literals.is_empty() => "String",
+            _ => return None,
+        };
+        Some(LiteralEnum {
+            value_type,
+            literals,
+        })
+    }
+
+    /// Literals a sum member contributes to a literal enum: the literal
+    /// itself, or every value of a referenced literal set or literal sum.
+    /// `None` when the member is not literal-only.
+    fn sum_member_literals(
+        &self,
+        context: Option<&str>,
+        member: &OwnedType,
+        visiting: &mut Vec<DeclarationKey>,
+    ) -> Option<Vec<OwnedLiteral>> {
+        let definition = match member {
+            OwnedType::Literal(literal) => return Some(vec![literal.clone()]),
+            OwnedType::Named { name, arguments } if arguments.is_empty() => {
+                self.type_hierarchy.get_type_from(context, name)?
+            }
+            OwnedType::Qualified {
+                module_path,
+                name,
+                arguments,
+            } if arguments.is_empty() => self
+                .type_hierarchy
+                .get_type_in(module_path.as_deref(), name)?,
+            _ => return None,
+        };
+        let key = declaration_key(definition);
+        if visiting.contains(&key) || !definition.generic_params.is_empty() {
+            return None;
+        }
+        visiting.push(key);
+        let context = definition.module_path.as_deref();
+        let literals = match definition.body.as_ref()? {
+            OwnedType::Set(OwnedSet {
+                values: Some(values),
+                ..
+            }) => Some(values.clone()),
+            OwnedType::Sum(items) => items.iter().try_fold(Vec::new(), |mut acc, item| {
+                acc.extend(self.sum_member_literals(context, item, visiting)?);
+                Some(acc)
+            }),
+            other => self.sum_member_literals(context, other, visiting),
+        };
+        visiting.pop();
+        literals
+    }
+
+    /// Sums of class-backed declarations become marker interfaces. Returns
+    /// the sum's direct members, or `None` when Java cannot model it so.
+    fn interface_sum_members(&self, definition: &TypeDefinition) -> Option<Vec<DeclarationKey>> {
+        self.interface_sum_members_inner(definition, &mut Vec::new())
+    }
+
+    fn interface_sum_members_inner(
+        &self,
+        definition: &TypeDefinition,
+        visiting: &mut Vec<DeclarationKey>,
+    ) -> Option<Vec<DeclarationKey>> {
+        let OwnedType::Sum(items) = definition.body.as_ref()? else {
+            return None;
+        };
+        if items.is_empty()
+            || definition.module_path.is_none()
+            || !definition.generic_params.is_empty()
+        {
+            return None;
+        }
+        let key = declaration_key(definition);
+        if visiting.contains(&key) {
+            return None;
+        }
+        visiting.push(key);
+        let members = items
+            .iter()
+            .map(|item| {
+                self.class_backed_member(definition.module_path.as_deref(), item, visiting)
+            })
+            .collect::<Option<Vec<_>>>();
+        visiting.pop();
+        let mut unique = Vec::new();
+        for member in members? {
+            if !unique.contains(&member) {
+                unique.push(member);
+            }
+        }
+        Some(unique)
+    }
+
+    /// The declaration a sum member names when Java generates a class or a
+    /// marker interface for it. Transparent aliases are followed.
+    fn class_backed_member(
+        &self,
+        context: Option<&str>,
+        member: &OwnedType,
+        visiting: &mut Vec<DeclarationKey>,
+    ) -> Option<DeclarationKey> {
+        let definition = match member {
+            OwnedType::Named { name, arguments } if arguments.is_empty() => {
+                self.type_hierarchy.get_type_from(context, name)?
+            }
+            OwnedType::Qualified {
+                module_path,
+                name,
+                arguments,
+            } if arguments.is_empty() => self
+                .type_hierarchy
+                .get_type_in(module_path.as_deref(), name)?,
+            _ => return None,
+        };
+        if definition.module_path.is_none() || !definition.generic_params.is_empty() {
+            return None;
+        }
+        let key = declaration_key(definition);
+        if self.generates_class(definition)
+            || self
+                .interface_sum_members_inner(definition, visiting)
+                .is_some()
+        {
+            return Some(key);
+        }
+        match definition.body.as_ref()? {
+            target @ (OwnedType::Named { .. } | OwnedType::Qualified { .. })
+                if definition.transparent_alias && !visiting.contains(&key) =>
+            {
+                visiting.push(key);
+                let member =
+                    self.class_backed_member(definition.module_path.as_deref(), target, visiting);
+                visiting.pop();
+                member
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether the declaration generates a Java class from struct fields:
+    /// a struct, a struct-shaped intersection, or a struct utility.
+    fn generates_class(&self, definition: &TypeDefinition) -> bool {
+        let struct_shaped = || {
+            matches!(
+                self.type_hierarchy.struct_fields(&OwnedType::Qualified {
+                    module_path: definition.module_path.clone(),
+                    name: definition.name.clone(),
+                    arguments: Vec::new(),
+                }),
+                Ok(Some(_))
+            )
+        };
+        match definition.body.as_ref() {
+            Some(OwnedType::Struct(_)) => true,
+            Some(OwnedType::Intersection(_)) => struct_shaped(),
+            Some(OwnedType::Named { name, .. })
+                if definition.transparent_alias && is_type_utility(name) =>
+            {
+                struct_shaped()
+            }
+            _ => false,
+        }
+    }
+
+    /// Maps each class-backed declaration to the marker interfaces of the
+    /// sums that list it, across every module in the type hierarchy.
+    fn collect_sum_parents(&self) -> BTreeMap<DeclarationKey, BTreeSet<String>> {
+        let mut parents: BTreeMap<DeclarationKey, BTreeSet<String>> = BTreeMap::new();
+        for definition in self.type_hierarchy.declarations() {
+            for member in self.interface_sum_members(definition).unwrap_or_default() {
+                parents
+                    .entry(member)
+                    .or_default()
+                    .insert(definition.name.clone());
+            }
+        }
+        parents
+    }
+
+    /// Marker interfaces implemented (classes) or extended (interfaces) by
+    /// the declaration named `name` in the current module.
+    fn sum_interfaces_of(&self, name: &str) -> Vec<String> {
+        self.type_hierarchy
+            .get_type(name)
+            .and_then(|definition| self.sum_parents.get(&declaration_key(definition)))
+            .map(|parents| parents.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Homogeneous literal tuples, and literal sets without a Java enum
+    /// (booleans), become `Xenomorph` array constants. Heterogeneous literal
+    /// tuples keep their positional tuple class.
     fn constant_collection(&self, ty: &Type) -> Option<(String, String)> {
         let literals: Vec<&Literal> = match ty {
             Type::Set(set) => set.values.as_ref()?.iter().collect(),
@@ -557,6 +853,16 @@ impl JavaGenerator {
             ));
         }
 
+        if let Some(fields) = self.intersection_fields(&t.0) {
+            return Some(self.generate_owned_class(
+                metadata,
+                name,
+                &format_generic_params(generics, &self.source),
+                &fields,
+                &lombok_decorators,
+            ));
+        }
+
         match &t.0 {
             Type::Struct(fields) => Some(self.generate_class(
                 metadata,
@@ -573,6 +879,11 @@ impl JavaGenerator {
                 &lombok_decorators,
             )),
             Type::Enum(variants) => Some(self.generate_enum(metadata, name, variants)),
+            Type::Sum(_) => {
+                let definition = self.type_hierarchy.get_type(name)?;
+                let members = self.interface_sum_members(definition)?;
+                Some(self.generate_interface(metadata, name, &members))
+            }
             _ => None,
         }
     }
@@ -599,6 +910,17 @@ impl JavaGenerator {
             OwnedType::Struct(fields) => Some(fields),
             _ => None,
         }
+    }
+
+    /// Java has no intersection types, so an intersection of struct-shaped
+    /// members is flattened into one class carrying every member's fields.
+    fn intersection_fields(&self, ty: &Type) -> Option<Vec<OwnedField>> {
+        if !matches!(ty, Type::Intersection(_)) {
+            return None;
+        }
+        self.type_hierarchy
+            .struct_fields(&type_to_owned_type(ty, &self.source))
+            .ok()?
     }
 
     fn generate_owned_class(
@@ -687,7 +1009,15 @@ impl JavaGenerator {
         for annotation in class_annotations {
             out.push_str(&format!("@{annotation}\n"));
         }
-        out.push_str(&format!("public class {name}{generic_params} {{\n"));
+        let interfaces = self.sum_interfaces_of(name);
+        let implements = if interfaces.is_empty() {
+            String::new()
+        } else {
+            format!(" implements {}", interfaces.join(", "))
+        };
+        out.push_str(&format!(
+            "public class {name}{generic_params}{implements} {{\n"
+        ));
         out.push_str(field_block);
         out.push_str("}\n");
         out
@@ -715,7 +1045,7 @@ impl JavaGenerator {
             if let Some(docs) = docs {
                 push_indented_javadoc(
                     &mut field_block,
-                    extract_documentation(docs, &self.source),
+                    &extract_documentation(docs, &self.source),
                     "    ",
                 );
             }
@@ -884,7 +1214,7 @@ impl JavaGenerator {
                 if let Some(docs) = docs {
                     push_indented_javadoc(
                         &mut out,
-                        extract_documentation(docs, &self.source),
+                        &extract_documentation(docs, &self.source),
                         "    ",
                     );
                 }
@@ -906,7 +1236,7 @@ impl JavaGenerator {
                 if let Some(docs) = docs {
                     push_indented_javadoc(
                         &mut out,
-                        extract_documentation(docs, &self.source),
+                        &extract_documentation(docs, &self.source),
                         "    ",
                     );
                 }
@@ -916,6 +1246,220 @@ impl JavaGenerator {
             }
         }
 
+        out.push_str("}\n");
+        out
+    }
+
+    /// A sum of class-backed declarations becomes a marker interface that
+    /// each member class implements and each member sum extends.
+    fn generate_interface(
+        &self,
+        metadata: DeclarationMetadata<'_>,
+        name: &str,
+        members: &[DeclarationKey],
+    ) -> String {
+        let member_links = members
+            .iter()
+            .map(|(_, member)| format!("{{@link {member}}}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let note = format!(
+            "Sum of {member_links}; every member implements this marker interface.\n\n\
+             <p>Gson cannot deserialize an interface by itself. Register a \
+             discriminator-aware {{@code TypeAdapter}} for {{@code {name}}} (TBD) \
+             on every Gson instance that reads it.</p>"
+        );
+        let docs = match metadata.docs {
+            Some(docs) => format!("{docs}\n\n{note}"),
+            None => note,
+        };
+
+        let mut out = generated_java_header(&self.package);
+        push_declaration_metadata(
+            &mut out,
+            DeclarationMetadata {
+                docs: Some(&docs),
+                ..metadata
+            },
+            "",
+        );
+        let parents = self.sum_interfaces_of(name);
+        let extends = if parents.is_empty() {
+            String::new()
+        } else {
+            format!(" extends {}", parents.join(", "))
+        };
+        out.push_str(&format!("public interface {name}{extends} {{\n}}\n"));
+        out
+    }
+
+    /// A literal set or literal sum becomes an enum whose constants carry the
+    /// exact literals, with lookup helpers for validation and selection.
+    fn generate_literal_enum(
+        &self,
+        metadata: DeclarationMetadata<'_>,
+        name: &str,
+        literal_enum: &LiteralEnum,
+        constants: &[(String, bool)],
+    ) -> String {
+        let value_type = literal_enum.value_type;
+        let numeric = literal_enum.is_numeric();
+        let mut imports = BTreeSet::new();
+        if numeric {
+            for import in [
+                "com.google.gson.JsonParseException",
+                "com.google.gson.TypeAdapter",
+                "com.google.gson.annotations.JsonAdapter",
+                "com.google.gson.stream.JsonReader",
+                "com.google.gson.stream.JsonToken",
+                "com.google.gson.stream.JsonWriter",
+                "java.io.IOException",
+                "java.math.BigDecimal",
+            ] {
+                imports.insert(import.to_string());
+            }
+            if value_type == "BigInteger" {
+                imports.insert("java.math.BigInteger".to_string());
+            }
+        } else {
+            imports.insert("com.google.gson.annotations.SerializedName".to_string());
+        }
+
+        let mut out = generated_java_header(&self.package);
+        for import in &imports {
+            out.push_str(&format!("import {import};\n"));
+        }
+        out.push('\n');
+        push_declaration_metadata(&mut out, metadata, "");
+        if numeric {
+            out.push_str(&format!("@JsonAdapter({name}.GsonAdapter.class)\n"));
+        }
+        out.push_str(&format!("public enum {name} {{\n"));
+        if literal_enum.literals.is_empty() {
+            out.push_str("    ;\n");
+        }
+        for (index, (literal, (constant, _))) in
+            literal_enum.literals.iter().zip(constants).enumerate()
+        {
+            let separator = if index + 1 == literal_enum.literals.len() {
+                ";"
+            } else {
+                ","
+            };
+            if let OwnedLiteral::String(value) = literal {
+                out.push_str(&format!(
+                    "    @SerializedName({})\n",
+                    java_string_literal(value)
+                ));
+            }
+            out.push_str(&format!(
+                "    {constant}({}){separator}\n",
+                owned_literal_to_java(literal, value_type)
+            ));
+        }
+
+        let matches = match value_type {
+            "String" => "constant.value.equals(value)",
+            "BigInteger" | "BigDecimal" => {
+                "value != null && constant.value.compareTo(value) == 0"
+            }
+            _ => "constant.value == value",
+        };
+        let to_string = if numeric {
+            "String.valueOf(value)"
+        } else {
+            "value"
+        };
+        out.push_str(&format!(
+            r#"
+    private final {value_type} value;
+
+    {name}({value_type} value) {{
+        this.value = value;
+    }}
+
+    /**
+     * Returns the literal this constant stands for.
+     */
+    public {value_type} getValue() {{
+        return value;
+    }}
+
+    /**
+     * Returns the constant whose literal is {{@code value}}.
+     *
+     * @throws IllegalArgumentException if {{@code value}} is not one of the literals.
+     */
+    public static {name} fromValue({value_type} value) {{
+        {name} constant = lookup(value);
+        if (constant == null) {{
+            throw new IllegalArgumentException("Unknown {name} value: " + value);
+        }}
+        return constant;
+    }}
+
+    /**
+     * Returns whether {{@code value}} is one of the literals.
+     */
+    public static boolean contains({value_type} value) {{
+        return lookup(value) != null;
+    }}
+
+    private static {name} lookup({value_type} value) {{
+        for ({name} constant : values()) {{
+            if ({matches}) {{
+                return constant;
+            }}
+        }}
+        return null;
+    }}
+
+    @Override
+    public String toString() {{
+        return {to_string};
+    }}
+"#
+        ));
+        if numeric {
+            out.push_str(&format!(
+                r#"
+    /**
+     * Reads and writes the numeric literal instead of the constant name.
+     */
+    public static final class GsonAdapter extends TypeAdapter<{name}> {{
+        @Override
+        public void write(JsonWriter out, {name} constant) throws IOException {{
+            if (constant == null) {{
+                out.nullValue();
+            }} else {{
+                out.value((Number) constant.value);
+            }}
+        }}
+
+        @Override
+        public {name} read(JsonReader in) throws IOException {{
+            if (in.peek() == JsonToken.NULL) {{
+                in.nextNull();
+                return null;
+            }}
+            String text = in.nextString();
+            BigDecimal number;
+            try {{
+                number = new BigDecimal(text);
+            }} catch (NumberFormatException exception) {{
+                throw new JsonParseException("Unknown {name} value: " + text, exception);
+            }}
+            for ({name} constant : values()) {{
+                if (new BigDecimal(String.valueOf(constant.value)).compareTo(number) == 0) {{
+                    return constant;
+                }}
+            }}
+            throw new JsonParseException("Unknown {name} value: " + text);
+        }}
+    }}
+"#
+            ));
+        }
         out.push_str("}\n");
         out
     }
@@ -982,10 +1526,22 @@ impl JavaGenerator {
                 .map(|item| self.owned_type_to_java(item, imports))
                 .unwrap_or_else(|| "Object".to_string()),
             OwnedType::Generic { name, .. } => name.clone(),
-            OwnedType::Named { name, arguments }
-            | OwnedType::Qualified {
-                name, arguments, ..
-            } => self.named_owned_type_to_java(name, arguments, imports),
+            OwnedType::Named { name, arguments } => self.named_owned_type_to_java(
+                name,
+                arguments,
+                self.type_hierarchy.get_type(name),
+                imports,
+            ),
+            OwnedType::Qualified {
+                module_path,
+                name,
+                arguments,
+            } => self.named_owned_type_to_java(
+                name,
+                arguments,
+                self.type_hierarchy.get_type_in(module_path.as_deref(), name),
+                imports,
+            ),
         }
     }
 
@@ -993,6 +1549,7 @@ impl JavaGenerator {
         &self,
         name: &str,
         arguments: &[OwnedType],
+        definition: Option<&TypeDefinition>,
         imports: &mut BTreeSet<String>,
     ) -> String {
         if name == "array" {
@@ -1021,8 +1578,10 @@ impl JavaGenerator {
         if let Some(base) = native_type_to_java(name, imports) {
             return base;
         }
-        if let Some(collection) = self.declared_collection_type(name, imports) {
-            return collection;
+        if let Some(declared) =
+            definition.and_then(|definition| self.declared_type_to_java(definition, imports))
+        {
+            return declared;
         }
         if arguments.is_empty() {
             name.to_string()
@@ -1158,8 +1717,13 @@ fn owned_literal_to_java(literal: &OwnedLiteral, java_type: &str) -> String {
         OwnedLiteral::Integer { value, .. } if java_type == "BigInteger" => {
             format!("new BigInteger(\"{value}\")")
         }
+        OwnedLiteral::Integer { value, .. } if java_type == "BigDecimal" => {
+            format!("new BigDecimal(\"{value}\")")
+        }
         OwnedLiteral::Integer { value, .. } => value.to_string(),
-        OwnedLiteral::Float { value, .. } if java_type == "Float" => format!("{value}F"),
+        OwnedLiteral::Float { value, .. } if java_type == "Float" || java_type == "float" => {
+            format!("{value}F")
+        }
         OwnedLiteral::Float { value, .. } if java_type == "BigDecimal" => {
             format!("new BigDecimal(\"{value}\")")
         }
@@ -1346,6 +1910,104 @@ fn java_member_name(wire_name: &str) -> String {
     output
 }
 
+fn declaration_key(definition: &TypeDefinition) -> DeclarationKey {
+    (definition.module_path.clone(), definition.name.clone())
+}
+
+/// An UPPER_SNAKE_CASE enum constant name for a literal, e.g.
+/// `"Decision Table Testing"` → `DECISION_TABLE_TESTING`, `"camelCase"` →
+/// `CAMEL_CASE`, `-1.5` → `VALUE_MINUS_1_5`.
+fn java_enum_constant_name(literal: &OwnedLiteral) -> String {
+    let text = match literal {
+        OwnedLiteral::String(value) => value.clone(),
+        OwnedLiteral::Boolean(value) => value.to_string(),
+        OwnedLiteral::Integer { value, .. } => format!("value {value}").replace('-', " minus "),
+        OwnedLiteral::Float { value, .. } => format!("value {value}").replace('-', " minus "),
+    };
+
+    let characters = text.chars().collect::<Vec<_>>();
+    let mut words: Vec<String> = Vec::new();
+    let mut word = String::new();
+    for (index, &character) in characters.iter().enumerate() {
+        if !character.is_alphanumeric() {
+            if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+            continue;
+        }
+        let previous = index.checked_sub(1).map(|index| characters[index]);
+        let next = characters.get(index + 1);
+        let starts_word = character.is_uppercase()
+            && previous.is_some_and(|previous| {
+                previous.is_lowercase()
+                    || (previous.is_uppercase() && next.is_some_and(|next| next.is_lowercase()))
+            });
+        if starts_word && !word.is_empty() {
+            words.push(std::mem::take(&mut word));
+        }
+        word.push(character);
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    let name = words.join("_").to_uppercase();
+    java_member_name(if name.is_empty() { "EMPTY" } else { &name })
+}
+
+/// Enum constant names for literals in order. Names that collide after
+/// normalization get a numeric suffix and are flagged `true`.
+fn literal_enum_constant_names(literals: &[OwnedLiteral]) -> Vec<(String, bool)> {
+    let mut used = BTreeSet::new();
+    literals
+        .iter()
+        .map(|literal| {
+            let base = java_enum_constant_name(literal);
+            if used.insert(base.clone()) {
+                return (base, false);
+            }
+            let unique = (2..)
+                .map(|suffix| format!("{base}_{suffix}"))
+                .find(|candidate| !used.contains(candidate))
+                .expect("an unused suffix exists");
+            used.insert(unique.clone());
+            (unique, true)
+        })
+        .collect()
+}
+
+fn report_enum_constant_collisions(
+    name: &TokenData,
+    ty: &Type,
+    constants: &[(String, bool)],
+    errors: &mut Vec<XenoDiagnostic>,
+) {
+    let literals: Vec<&Literal> = match ty {
+        Type::Set(set) => set.values.iter().flatten().collect(),
+        Type::Sum(items) => items
+            .iter()
+            .filter_map(|item| match item {
+                SimpleType::Literal(literal) => Some(literal),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    for (index, (constant, collided)) in constants.iter().enumerate() {
+        if *collided {
+            errors.push(XenoDiagnostic {
+                tags: vec![],
+                location: literals
+                    .get(index)
+                    .map_or(*name, |literal| literal.get_last_token()),
+                message: format!(
+                    "Java enum constant names for this literal collide after normalization; it is generated as '{constant}'."
+                ),
+                severity: XenoDiagSeverity::Warn,
+            });
+        }
+    }
+}
+
 fn is_java_identifier_start(character: char) -> bool {
     character == '_' || character == '$' || character.is_alphabetic()
 }
@@ -1468,17 +2130,8 @@ fn validate_java_member_names(
 ) {
     let mut seen = std::collections::BTreeMap::<String, &str>::new();
     for (key, _, _) in members {
-        if is_java_keyword(key.text(source)) {
-            errors.push(XenoDiagnostic {
-                tags: vec![],
-                location: *key,
-                message: format!(
-                    "Java {member_kind} identifier '{}' conflicts with a reserved keyword.",
-                    key.text(source)
-                ),
-                severity: XenoDiagSeverity::Err,
-            });
-        }
+        // Keywords are escaped by `java_member_name`, so `protected` and
+        // `protected_` collide here.
         let java_name = java_member_name(key.text(source));
         if let Some(previous) = seen.insert(java_name.clone(), key.text(source)) {
             if previous != key.text(source) {
@@ -1907,20 +2560,27 @@ mod tests {
         let source = concat!(
             "/** Use NewColors instead. */ type OldColors = set [\"red\", \"green\"] @deprecated; ",
             "type OldSizes = [1, 300] @deprecated(\"Use NewSizes instead.\"); ",
-            "type NewColors = set [\"blue\"];",
+            "type NewSizes = [2];",
         );
         let ast = parse(source);
         let mut generator = generator_with_declarations(&ast, source);
         generator.on_before_ast(&ast, &mut Vec::new());
         let output = generator.constants_file().unwrap();
 
-        assert!(output.contains(" * Use NewColors instead."));
         assert!(output.contains(" * @deprecated Use NewSizes instead."));
-        assert!(output.contains("    @Deprecated\n    public static final String[] OldColors"));
         assert!(output.contains("    @Deprecated\n    public static final Short[] OldSizes"));
-        assert_eq!(output.matches("@deprecated").count(), 2);
-        assert_eq!(output.matches("@Deprecated").count(), 2);
-        assert!(!output.contains("@Deprecated\n    public static final String[] NewColors"));
+        assert_eq!(output.matches("@deprecated").count(), 1);
+        assert_eq!(output.matches("@Deprecated").count(), 1);
+        assert!(!output.contains("OldColors"));
+
+        let (_, colors) = generator
+            .files
+            .iter()
+            .find(|(name, _)| name == "OldColors")
+            .expect("literal sets generate an enum");
+        assert!(colors.contains(
+            "/**\n * Use NewColors instead.\n * @deprecated This declaration is deprecated.\n */\n@Deprecated\npublic enum OldColors {"
+        ));
     }
 
     #[test]
@@ -1932,6 +2592,33 @@ mod tests {
         let output = &generator.files[0].1;
 
         assert!(output.contains(" * @deprecated Use NewType.\n * Keep * / inside documentation.\n */\n@Deprecated\npublic enum Old"));
+    }
+
+    #[test]
+    fn struct_intersections_generate_a_flattened_class() {
+        let source = "type A = { a: string, shared: ?string }; type B = { b: i32, shared: string }; type C = { c: ?bool }; type AB = &A&B; type ABC = &AB&C;";
+        let ast = parse(source);
+        let mut generator = generator_with_declarations(&ast, source);
+
+        generator.on_before_ast(&ast, &mut Vec::new());
+
+        let class = |name: &str| {
+            generator
+                .files
+                .iter()
+                .find(|(file, _)| file == name)
+                .map(|(_, class)| class.clone())
+                .unwrap_or_else(|| panic!("{name} generates a class"))
+        };
+        let ab = class("AB");
+        assert!(ab.contains("public class AB {"));
+        assert!(ab.contains("    @NonNull\n    private String a;"));
+        assert!(ab.contains("    @NonNull\n    private Integer b;"));
+        assert!(ab.contains("    @NonNull\n    private String shared;"));
+        let abc = class("ABC");
+        assert!(abc.contains("private String a;"));
+        assert!(abc.contains("private Integer b;"));
+        assert!(abc.contains("    private Boolean c;"));
     }
 
     #[test]
@@ -1955,8 +2642,8 @@ mod tests {
     }
 
     #[test]
-    fn homogeneous_literal_collections_become_xenomorph_array_constants() {
-        let source = "type Colors = set [\"red\", \"green\"]; type Sizes = [1, 300]; type Holder = { colors: Colors };";
+    fn homogeneous_literal_tuples_become_xenomorph_array_constants() {
+        let source = "type Sizes = [1, 300]; type Holder = { sizes: Sizes };";
         let ast = parse(source);
         let mut generator = generator_with_declarations(&ast, source);
 
@@ -1964,19 +2651,199 @@ mod tests {
 
         let constants = generator
             .constants_file()
-            .expect("literal collections produce constants");
+            .expect("literal tuples produce constants");
         assert!(constants.contains("public class Xenomorph {"));
-        assert!(constants.contains("public static final String[] Colors = {\"red\", \"green\"};"));
         assert!(constants.contains("public static final Short[] Sizes = {1, 300};"));
-        assert!(
-            !generator.files.iter().any(|(name, _)| name == "Colors"),
-            "constant collections do not get their own class"
-        );
+        assert!(!generator.files.iter().any(|(name, _)| name == "Sizes"));
         assert!(generator
             .files
             .iter()
             .any(|(name, contents)| name == "Holder"
-                && contents.contains("private String[] colors;")));
+                && contents.contains("private Short[] sizes;")));
+    }
+
+    fn generated<'a>(generator: &'a JavaGenerator, name: &str) -> &'a str {
+        generator
+            .files
+            .iter()
+            .find(|(file, _)| file == name)
+            .map(|(_, contents)| contents.as_str())
+            .unwrap_or_else(|| panic!("{name} generates a file"))
+    }
+
+    #[test]
+    fn string_literal_sets_and_sums_become_enums_used_as_field_types() {
+        let source = concat!(
+            "type Kind = set [\"Decision Table Testing\", \"camelCase\", \"a-b\"]; ",
+            "type Mode = |\"on\"|\"off\"; ",
+            "type S = { kind: Kind, kinds: Kind[], maybe: ?Kind, mode: Mode };",
+        );
+        let ast = parse(source);
+        let mut generator = generator_with_declarations(&ast, source);
+
+        generator.on_before_ast(&ast, &mut Vec::new());
+
+        assert!(generator.constants_file().is_none());
+        let kind = generated(&generator, "Kind");
+        assert!(kind.contains("import com.google.gson.annotations.SerializedName;"));
+        assert!(kind.contains("public enum Kind {"));
+        assert!(kind.contains(
+            "    @SerializedName(\"Decision Table Testing\")\n    DECISION_TABLE_TESTING(\"Decision Table Testing\"),\n"
+        ));
+        assert!(kind.contains("    @SerializedName(\"camelCase\")\n    CAMEL_CASE(\"camelCase\"),\n"));
+        assert!(kind.contains("    @SerializedName(\"a-b\")\n    A_B(\"a-b\");\n"));
+        assert!(kind.contains("    private final String value;"));
+        assert!(kind.contains("    public String getValue() {"));
+        assert!(kind.contains("    public static Kind fromValue(String value) {"));
+        assert!(kind.contains("throw new IllegalArgumentException(\"Unknown Kind value: \" + value);"));
+        assert!(kind.contains("    public static boolean contains(String value) {"));
+        assert!(kind.contains("if (constant.value.equals(value)) {"));
+        assert!(kind.contains("    public String toString() {\n        return value;"));
+        assert!(generated(&generator, "Mode").contains("    ON(\"on\"),\n"));
+
+        let holder = generated(&generator, "S");
+        assert!(holder.contains("    @NonNull\n    private Kind kind;"));
+        assert!(holder.contains("    @NonNull\n    private List<Kind> kinds;"));
+        assert!(holder.contains("    private Kind maybe;"));
+        assert!(!holder.contains("@NonNull\n    private Kind maybe;"));
+        assert!(holder.contains("    private Mode mode;"));
+    }
+
+    #[test]
+    fn sums_of_literal_sets_merge_into_one_enum() {
+        let source = concat!(
+            "type Technique = set [\"BVA\", \"EP\"]; ",
+            "type Placeholder = set [\"placeholder\"]; ",
+            "type Stored = |Technique|Placeholder|\"EP\"; ",
+            "type Holder = { technique: Stored };",
+        );
+        let ast = parse(source);
+        let mut generator = generator_with_declarations(&ast, source);
+
+        generator.on_before_ast(&ast, &mut Vec::new());
+
+        let stored = generated(&generator, "Stored");
+        assert!(stored.contains("public enum Stored {"));
+        assert!(stored.contains("    BVA(\"BVA\"),\n"));
+        assert!(stored.contains("    EP(\"EP\"),\n"));
+        assert!(stored.contains("    PLACEHOLDER(\"placeholder\");\n"));
+        assert_eq!(stored.matches("EP(\"EP\")").count(), 1);
+        assert!(generated(&generator, "Holder").contains("    private Stored technique;"));
+    }
+
+    #[test]
+    fn numeric_literal_sets_become_enums_with_numeric_gson_values() {
+        let source = "type Small = set<u8> [1, 2]; type Ratio = set [0.5, 1.5]; type Holder = { small: Small };";
+        let ast = parse(source);
+        let mut generator = generator_with_declarations(&ast, source);
+
+        generator.on_before_ast(&ast, &mut Vec::new());
+
+        let small = generated(&generator, "Small");
+        assert!(small.contains("@JsonAdapter(Small.GsonAdapter.class)\npublic enum Small {"));
+        assert!(small.contains("    VALUE_1(1),\n    VALUE_2(2);\n"));
+        assert!(small.contains("    private final int value;"));
+        assert!(small.contains("    public static Small fromValue(int value) {"));
+        assert!(small.contains("if (constant.value == value) {"));
+        assert!(small.contains("out.value((Number) constant.value);"));
+        assert!(!small.contains("SerializedName"));
+        let ratio = generated(&generator, "Ratio");
+        assert!(ratio.contains("    VALUE_0_5(0.5F),\n    VALUE_1_5(1.5F);\n"));
+        assert!(ratio.contains("    private final float value;"));
+        assert!(generated(&generator, "Holder").contains("private Small small;"));
+    }
+
+    #[test]
+    fn colliding_enum_constant_names_get_a_suffix_and_a_warning() {
+        let source = "type Kind = set [\"a b\", \"a_b\"];";
+        let ast = parse(source);
+        let mut generator = generator_with_declarations(&ast, source);
+        let mut errors = Vec::new();
+
+        generator.on_before_ast(&ast, &mut errors);
+
+        let kind = generated(&generator, "Kind");
+        assert!(kind.contains("    A_B(\"a b\"),\n"));
+        assert!(kind.contains("    A_B_2(\"a_b\");\n"));
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(errors[0].severity, XenoDiagSeverity::Warn));
+        assert_eq!(errors[0].location.text(source), "\"a_b\"");
+    }
+
+    #[test]
+    fn struct_sums_become_marker_interfaces_implemented_by_members() {
+        let source = concat!(
+            "/** A message. */ type Msg = |SaveMsg|ProblemMsg @deprecated; ",
+            "type Any = |Msg|Other; ",
+            "type SaveMsg = { path: string }; ",
+            "type A = { a: string }; type B = { b: i32 }; type ProblemMsg = &A&B; ",
+            "type Other = Pick<A, OtherKeys>; type OtherKeys = |\"a\"; ",
+            "type Holder = { msg: Msg, msgs: Msg[], maybe: ?Msg, any: Any };",
+        );
+        let ast = parse(source);
+        let mut generator = generator_with_declarations(&ast, source);
+
+        generator.on_before_ast(&ast, &mut Vec::new());
+
+        let msg = generated(&generator, "Msg");
+        assert!(msg.contains(" * A message.\n"));
+        assert!(msg.contains("{@link SaveMsg}, {@link ProblemMsg}"));
+        assert!(msg.contains("discriminator-aware {@code TypeAdapter}"));
+        assert!(msg.contains("@Deprecated\npublic interface Msg extends Any {\n}\n"));
+        assert!(generated(&generator, "Any").contains("public interface Any {\n}\n"));
+        assert!(generated(&generator, "SaveMsg").contains("public class SaveMsg implements Msg {"));
+        assert!(generated(&generator, "ProblemMsg").contains("public class ProblemMsg implements Msg {"));
+        assert!(generated(&generator, "Other").contains("public class Other implements Any {"));
+        assert!(generated(&generator, "A").contains("public class A {"));
+
+        let holder = generated(&generator, "Holder");
+        assert!(holder.contains("    @NonNull\n    private Msg msg;"));
+        assert!(holder.contains("    @NonNull\n    private List<Msg> msgs;"));
+        assert!(holder.contains("    private Msg maybe;"));
+        assert!(holder.contains("    @NonNull\n    private Any any;"));
+    }
+
+    #[test]
+    fn sums_in_other_modules_add_marker_interfaces() {
+        let messages = "type SaveMsg = { path: string };";
+        let sums = "type Msg = |SaveMsg|Local; type Local = { x: string };";
+        let mut generator = generator_with_builtins();
+        for (module, source) in [("messages", messages), ("sums", sums)] {
+            for declaration in parse(source) {
+                if let Declaration::Type {
+                    name, generics, ty, ..
+                } = declaration
+                {
+                    generator.type_hierarchy.insert_declaration(
+                        module,
+                        name.text(source),
+                        TypeDeclarationInfo::from_ast(generics.as_deref(), &ty.0, source),
+                    );
+                }
+            }
+        }
+        generator
+            .type_hierarchy
+            .register_module("sums", vec!["messages".to_string()]);
+        generator.type_hierarchy.set_current_module("messages");
+        generator.set_source(messages);
+        let ast = parse(messages);
+
+        generator.on_before_ast(&ast, &mut Vec::new());
+
+        assert!(generated(&generator, "SaveMsg").contains("public class SaveMsg implements Msg {"));
+    }
+
+    #[test]
+    fn sums_without_class_members_keep_no_interface() {
+        let source = "type Mixed = |string|i32; type Holder = { mixed: Mixed };";
+        let ast = parse(source);
+        let mut generator = generator_with_declarations(&ast, source);
+
+        generator.on_before_ast(&ast, &mut Vec::new());
+
+        assert!(!generator.files.iter().any(|(name, _)| name == "Mixed"));
+        assert!(generated(&generator, "Holder").contains("private Object mixed;"));
     }
 
     #[test]
@@ -2099,8 +2966,32 @@ mod tests {
     }
 
     #[test]
-    fn java_keywords_are_rejected_for_field_identifiers() {
-        let source = r#"type Payload = { "class": string };"#;
+    fn java_keyword_member_names_are_escaped_with_gson_names() {
+        let source = r#"type Payload = { "protected": string, class: i32 }; type Mode = enum { "public": 1 };"#;
+        let ast = parse(source);
+        let Declaration::Type {
+            ty: (Type::Struct(fields), _),
+            ..
+        } = &ast[0]
+        else {
+            panic!("expected struct declaration");
+        };
+        let mut generator = generator_with_declarations(&ast, source);
+        let mut errors = Vec::new();
+
+        generator.on_before_struct(fields, &mut errors);
+        generator.on_before_ast(&ast, &mut errors);
+
+        assert!(errors.is_empty(), "{errors:#?}");
+        let class = generated(&generator, "Payload");
+        assert!(class.contains("    @SerializedName(\"protected\")\n    @NonNull\n    private String protected_;"));
+        assert!(class.contains("    @SerializedName(\"class\")\n    @NonNull\n    private Integer class_;"));
+        assert!(generated(&generator, "Mode").contains("    @SerializedName(\"public\")\n    public_(1);"));
+    }
+
+    #[test]
+    fn escaped_keyword_member_names_collide_with_their_escaped_spelling() {
+        let source = r#"type Payload = { "protected": string, protected_: string };"#;
         let ast = parse(source);
         let Declaration::Type {
             ty: (Type::Struct(fields), _),
@@ -2118,10 +3009,7 @@ mod tests {
         }
 
         assert_eq!(errors.len(), 1);
-        assert_eq!(
-            errors[0].message,
-            "Java field identifier 'class' conflicts with a reserved keyword."
-        );
+        assert!(errors[0].message.contains("both normalize to 'protected_'"));
     }
 
     #[test]

@@ -1,8 +1,9 @@
 # Java plugin
 
 The Java plugin generates one Lombok DTO per Xenomorph struct or tuple and one
-Java enum per Xenomorph enum. Homogeneous literal collections produce array
-constants in `Xenomorph.java` instead of tuple DTOs.
+Java enum per Xenomorph enum, literal set, or literal sum. Sums of struct
+declarations generate marker interfaces. Homogeneous literal tuples and boolean
+literal sets produce array constants in `Xenomorph.java` instead of tuple DTOs.
 
 ## Configure the generator
 
@@ -84,6 +85,80 @@ public class SomethingTuple {
 ```
 
 The exact Lombok annotations and accessors depend on the plugin configuration and any Xenomorph `@java::Lombok(java::Value, ...)` annotations.
+
+## Struct utilities and intersections
+
+Java has no structural types, so struct-producing utilities (`Pick`, `Omit`,
+`Partial`, `Complete`) and intersections of struct-shaped members (`&A&B`) each
+generate their own flattened class. An intersection's class carries every
+member's fields in member order. A field present in several members is
+required unless every member marks it optional. The class does not extend its
+members, so a `B` value is not assignable to an `A` reference in Java.
+
+## Literal sets and literal sums
+
+A prefilled set (`type Kind = set ["a", "b"];`, `type Small = set<u8> [1, 2];`)
+or a sum of literals of one kind (`type Mode = |"on"|"off";`) is a value type.
+It generates a Java enum, and fields of that type use the enum (`Kind`,
+`List<Kind>`):
+
+```java
+public enum Kind {
+    @SerializedName("a")
+    A("a"),
+    @SerializedName("Decision Table Testing")
+    DECISION_TABLE_TESTING("Decision Table Testing");
+
+    private final String value;
+    // getValue(), toString(), fromValue(String), contains(String)
+}
+```
+
+- Constant names are UPPER_SNAKE_CASE. Numbers become `VALUE_1`,
+  `VALUE_MINUS_1`, or `VALUE_0_5`. When two literals produce the same name,
+  the later constant gets a `_2`, `_3` suffix and the plugin reports a warning.
+- `fromValue` returns the matching constant or throws
+  `IllegalArgumentException`. `contains` checks a raw value, for example for
+  validation or UI selections.
+- Numeric enums store `int`, `long`, `float`, `double`, `BigInteger`, or
+  `BigDecimal`. Gson always writes enums as strings, so numeric enums carry a
+  nested `@JsonAdapter` `GsonAdapter` that reads and writes JSON numbers.
+- Boolean literal sets keep an array constant in `Xenomorph.java`, and fields
+  use `Boolean`. Literal sums of mixed kinds map to `Object`.
+- A sum whose members are literals or other literal sets and literal sums
+  (`type Stored = |Technique|Placeholder;`) generates one enum that holds
+  all their values, without duplicates. Java enums cannot extend each other,
+  so `Stored` and `Technique` are unrelated Java types.
+- Sets without a prefill, such as `set<string>`, stay `Set<String>`.
+
+## Sums of structs
+
+A named sum whose members are all class-backed declarations (structs,
+struct-shaped intersections, or struct utilities) generates a marker interface:
+
+```xen
+type Msg = |SaveMsg|ProblemMsg;
+```
+
+```java
+public interface Msg {}
+public class SaveMsg implements Msg { ... }
+```
+
+Fields of type `Msg` use the interface. A nested sum of such sums extends the
+inner interfaces. A class implements every sum that lists it, including sums in
+other modules, as long as those modules are reachable from the parser entry.
+Gson cannot deserialize an interface by itself; a discriminator-aware
+`TypeAdapter` is still to be defined (TBD). Sums with non-class members, such as
+`|string|i32`, generate no interface and fields use `Object`.
+
+## Java keyword names
+
+Struct fields whose names are Java keywords, including quoted keys such as
+`"class"`, get a trailing `_` (`protected_`) and
+`@SerializedName("protected")`. A field that is already named `protected_`
+collides with the escaped name and is reported as an error. Declaration
+(type) names that are Java keywords are still errors.
 
 ## Deprecation metadata
 

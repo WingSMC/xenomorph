@@ -443,29 +443,22 @@ impl JsonSchemaGenerator {
                 })
             }
             OwnedType::Set(set) => {
-                let items = set.element_type.as_deref().map_or_else(
-                    || {
-                        combine_type_schemas(
-                            set.values
-                                .as_deref()
-                                .unwrap_or_default()
-                                .iter()
-                                .map(owned_literal_to_schema)
-                                .collect(),
-                        )
-                    },
-                    |element| self.owned_type_to_schema(element),
-                );
-                let mut schema = json!({
+                if let Some(values) = &set.values {
+                    return literal_set_schema(
+                        set.element_type
+                            .as_deref()
+                            .map(|element| self.owned_type_to_schema(element)),
+                        values.iter().map(owned_literal_to_json).collect(),
+                    );
+                }
+                json!({
                     "type": "array",
                     "uniqueItems": true,
-                    "items": items,
-                });
-                if let Some(values) = &set.values {
-                    schema["const"] =
-                        Value::Array(values.iter().map(owned_literal_to_json).collect());
-                }
-                schema
+                    "items": set
+                        .element_type
+                        .as_deref()
+                        .map_or_else(|| json!({}), |element| self.owned_type_to_schema(element)),
+                })
             }
             OwnedType::Struct(fields) => {
                 let mut properties = Map::new();
@@ -558,28 +551,22 @@ impl JsonSchemaGenerator {
     }
 
     fn set_to_schema(&self, set: &SetType, context: &mut SchemaContext<'_, '_>) -> Value {
+        if let Some(values) = &set.values {
+            let element = set
+                .element_type
+                .as_ref()
+                .map(|element| self.simple_type_to_schema(element, context));
+            return literal_set_schema(element, values.iter().map(literal_to_json).collect());
+        }
         let items = set.element_type.as_ref().map_or_else(
-            || {
-                combine_type_schemas(
-                    set.values
-                        .as_deref()
-                        .unwrap_or_default()
-                        .iter()
-                        .map(|literal| literal_to_schema(literal, &self.source))
-                        .collect(),
-                )
-            },
+            || json!({}),
             |element| self.simple_type_to_schema(element, context),
         );
-        let mut schema = json!({
+        json!({
             "type": "array",
             "uniqueItems": true,
             "items": items,
-        });
-        if let Some(values) = &set.values {
-            schema["const"] = Value::Array(values.iter().map(literal_to_json).collect());
-        }
-        schema
+        })
     }
 
     fn struct_to_schema(
@@ -809,15 +796,6 @@ impl<'src> AnalyzerListener<'src> for JsonSchemaGenerator {
 
 // ── Schema combination & annotations ────────────────────────────────
 
-/// Combines multiple alternative schemas: 0 → permissive, 1 → itself,
-/// many → `anyOf`.
-fn combine_type_schemas(mut schemas: Vec<Value>) -> Value {
-    match schemas.len() {
-        0 => json!({}),
-        1 => schemas.pop().unwrap(),
-        _ => json!({ "anyOf": schemas }),
-    }
-}
 
 fn trait_constraint_to_schema(name: &str) -> Option<Value> {
     match name {
@@ -998,6 +976,37 @@ fn integer_schema(name: &str) -> Option<Value> {
 }
 
 // ── Literal & misc helpers ──────────────────────────────────────────
+
+/// A prefilled set is a value type accepting exactly its literals. The
+/// element schema (or the literals' shared JSON type) keeps its constraints.
+fn literal_set_schema(element: Option<Value>, values: Vec<Value>) -> Value {
+    let mut schema = match element {
+        Some(Value::Object(schema)) => schema,
+        _ => {
+            let mut schema = Map::new();
+            let mut types = values.iter().map(|value| match value {
+                Value::String(_) => "string",
+                Value::Bool(_) => "boolean",
+                Value::Number(number) if number.is_i64() || number.is_u64() => "integer",
+                Value::Number(_) => "number",
+                _ => "",
+            });
+            if let Some(first) = types.next() {
+                let common = types.try_fold(first, |common, ty| match (common, ty) {
+                    (left, right) if left == right => Some(left),
+                    ("integer", "number") | ("number", "integer") => Some("number"),
+                    _ => None,
+                });
+                if let Some(common) = common.filter(|common| !common.is_empty()) {
+                    schema.insert("type".to_string(), json!(common));
+                }
+            }
+            schema
+        }
+    };
+    schema.insert("enum".to_string(), Value::Array(values));
+    Value::Object(schema)
+}
 
 fn literal_to_json(lit: &Literal) -> Value {
     match lit {
@@ -1202,6 +1211,27 @@ mod tests {
             }
             _ => {}
         }
+    }
+
+    #[test]
+    fn literal_sets_are_scalar_enums_and_plain_sets_stay_arrays() {
+        let defs = generate_defs(
+            "type Kind = set [\"a\", \"b\"]; type Small = set<u8> [1, 2]; type Tags = set<string>; type S = { kind: Kind, kinds: Kind[] };",
+        );
+
+        assert_eq!(defs["Kind"]["type"], json!("string"));
+        assert_eq!(defs["Kind"]["enum"], json!(["a", "b"]));
+        assert!(defs["Kind"].get("items").is_none());
+        assert_eq!(defs["Small"]["type"], json!("integer"));
+        assert_eq!(defs["Small"]["maximum"], json!(255));
+        assert_eq!(defs["Small"]["enum"], json!([1, 2]));
+        assert_eq!(defs["Tags"]["type"], json!("array"));
+        assert_eq!(defs["Tags"]["uniqueItems"], json!(true));
+        assert_eq!(defs["S"]["properties"]["kind"]["$ref"], json!("#/$defs/Kind"));
+        assert_eq!(
+            defs["S"]["properties"]["kinds"]["items"]["$ref"],
+            json!("#/$defs/Kind")
+        );
     }
 
     #[test]
