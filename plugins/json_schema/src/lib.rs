@@ -66,6 +66,7 @@ struct JsonSchemaGenerator {
     output_dir: Option<PathBuf>,
     /// Imported types keyed by module path, for resolving `$ref` targets.
     imported_types: HashMap<String, Vec<String>>,
+    import_selections: HashMap<String, Vec<String>>,
     /// Types declared in the current module. Local names take precedence over
     /// same-named declarations in imported modules.
     own_types: HashSet<String>,
@@ -115,6 +116,7 @@ impl JsonSchemaGenerator {
             module_path: String::new(),
             output_dir: None,
             imported_types: HashMap::new(),
+            import_selections: HashMap::new(),
             own_types: HashSet::new(),
             type_hierarchy: TypeHierarchy::default(),
             annotation_depth: 0,
@@ -669,6 +671,7 @@ impl<'src> AnalyzerListener<'src> for JsonSchemaGenerator {
         self.abs_path = scope.abs_path.clone();
         self.module_path = scope.module_path.clone();
         self.imported_types = scope.imported_types.clone();
+        self.import_selections = scope.import_selections.clone();
         self.own_types = scope.own_types.iter().cloned().collect();
         self.type_hierarchy = scope.type_hierarchy.clone();
         self.annotation_depth = 0;
@@ -700,13 +703,25 @@ impl<'src> AnalyzerListener<'src> for JsonSchemaGenerator {
         for decl in ast {
             if let Declaration::Import {
                 public: Some(_),
+                path,
                 names,
                 ..
             } = decl
             {
                 for name in names {
                     let text = name.text(&self.source);
-                    self.defs.insert(text.to_string(), self.ref_for(text));
+                    if text == "*" {
+                        for name in self
+                            .import_selections
+                            .get(&path.join("/"))
+                            .into_iter()
+                            .flatten()
+                        {
+                            self.defs.insert(name.clone(), self.ref_for(name));
+                        }
+                    } else {
+                        self.defs.insert(text.to_string(), self.ref_for(text));
+                    }
                 }
             }
             if let Declaration::Type {
@@ -795,7 +810,6 @@ impl<'src> AnalyzerListener<'src> for JsonSchemaGenerator {
 }
 
 // ── Schema combination & annotations ────────────────────────────────
-
 
 fn trait_constraint_to_schema(name: &str) -> Option<Value> {
     match name {
@@ -1227,7 +1241,10 @@ mod tests {
         assert_eq!(defs["Small"]["enum"], json!([1, 2]));
         assert_eq!(defs["Tags"]["type"], json!("array"));
         assert_eq!(defs["Tags"]["uniqueItems"], json!(true));
-        assert_eq!(defs["S"]["properties"]["kind"]["$ref"], json!("#/$defs/Kind"));
+        assert_eq!(
+            defs["S"]["properties"]["kind"]["$ref"],
+            json!("#/$defs/Kind")
+        );
         assert_eq!(
             defs["S"]["properties"]["kinds"]["items"]["$ref"],
             json!("#/$defs/Kind")

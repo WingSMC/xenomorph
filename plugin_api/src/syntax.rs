@@ -9,6 +9,7 @@ pub enum Declaration {
         public: Option<TokenData>,
         path: Vec<String>,
         path_tokens: Vec<TokenData>,
+        /// Selected identifiers, or a single `*` token for all public declarations.
         names: Vec<TokenData>,
         location: TokenData,
     },
@@ -395,7 +396,6 @@ pub enum TokenVariant {
     // Backslash,
     // Slash,
     // Dollar,
-    // Asterix,
     // Caret,
     // Percent,
     // Hash,
@@ -420,6 +420,7 @@ pub enum TokenVariant {
     PathSeparator = 36,
     /// An opaque custom block, including its matching hash fences.
     CustomBlock = 37,
+    Asterisk = 38,
 }
 
 pub type Token = (TokenVariant, TokenData);

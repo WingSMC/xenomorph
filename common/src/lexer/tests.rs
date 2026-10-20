@@ -155,6 +155,17 @@ mod tests {
     #[test]
     fn imports_lex_identifiers_and_namespace_separators() {
         assert_eq!(
+            tok("pub import models::*;"),
+            vec![
+                (TokenVariant::Pub, "pub"),
+                (TokenVariant::Import, "import"),
+                (TokenVariant::Identifier, "models"),
+                (TokenVariant::PathSeparator, "::"),
+                (TokenVariant::Asterisk, "*"),
+                (TokenVariant::Semicolon, ";"),
+            ]
+        );
+        assert_eq!(
             tok(source::IMPORT),
             vec![
                 (TokenVariant::Import, "import"),

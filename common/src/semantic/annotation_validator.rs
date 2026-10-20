@@ -463,6 +463,7 @@ mod tests {
             abs_path: PathBuf::new(),
             own_types,
             imported_types: HashMap::new(),
+            import_selections: HashMap::new(),
             builtin_types: BUILTIN_TYPES
                 .iter()
                 .map(|builtin_type| builtin_type.name.to_string())

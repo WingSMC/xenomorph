@@ -87,6 +87,7 @@ struct TsGenerator {
     output_dir: Option<PathBuf>,
     /// Imported types keyed by module path, for generating destructured imports.
     imported_types: HashMap<String, Vec<String>>,
+    import_selections: HashMap<String, Vec<String>>,
     /// Complete semantic graph used to distinguish generated declarations
     /// from static types that require an explicit TypeScript mapping.
     type_hierarchy: TypeHierarchy,
@@ -105,6 +106,7 @@ impl TsGenerator {
             module_path: String::new(),
             output_dir: None,
             imported_types: HashMap::new(),
+            import_selections: HashMap::new(),
             type_hierarchy: TypeHierarchy::default(),
             annotation_depth: 0,
         }
@@ -120,6 +122,7 @@ impl<'src> AnalyzerListener<'src> for TsGenerator {
         self.abs_path = scope.abs_path.clone();
         self.module_path = scope.module_path.clone();
         self.imported_types = scope.imported_types.clone();
+        self.import_selections = scope.import_selections.clone();
         self.type_hierarchy = scope.type_hierarchy.clone();
         self.annotation_depth = 0;
         self.out.clear();
@@ -149,14 +152,29 @@ impl<'src> AnalyzerListener<'src> for TsGenerator {
         for decl in ast {
             if let Declaration::Import {
                 public: Some(_),
+                path,
                 names,
                 ..
             } = decl
             {
                 let mut exports: std::collections::BTreeMap<String, Vec<&str>> =
                     std::collections::BTreeMap::new();
-                for name in names {
-                    let text = name.text(&self.source);
+                let selected: Vec<_> = names
+                    .iter()
+                    .flat_map(|name| {
+                        if name.text(&self.source) == "*" {
+                            self.import_selections
+                                .get(&path.join("/"))
+                                .into_iter()
+                                .flatten()
+                                .map(String::as_str)
+                                .collect()
+                        } else {
+                            vec![name.text(&self.source)]
+                        }
+                    })
+                    .collect();
+                for text in selected {
                     if let Some(path) = self
                         .type_hierarchy
                         .get_type(text)

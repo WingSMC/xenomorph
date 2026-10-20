@@ -241,6 +241,60 @@ fn parses_visibility_and_single_or_grouped_declaration_imports() {
 }
 
 #[test]
+fn parses_wildcard_imports_and_rejects_non_terminal_wildcards() {
+    let source = "import models::*; pub import folder::models::*;";
+    let tokens = Lexer::tokenize(source).unwrap();
+    let (ast, diagnostics) = Parser::parse(&tokens, source);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(ast.len(), 2);
+    for (declaration, expected_path, public) in [
+        (&ast[0], vec!["models"], false),
+        (&ast[1], vec!["folder", "models"], true),
+    ] {
+        let Declaration::Import {
+            path,
+            path_tokens,
+            names,
+            ..
+        } = declaration
+        else {
+            panic!("Expected import");
+        };
+        assert_eq!(path, &expected_path);
+        assert_eq!(
+            path_tokens
+                .iter()
+                .map(|n| n.text(source))
+                .collect::<Vec<_>>(),
+            expected_path
+        );
+        assert_eq!(
+            names.iter().map(|n| n.text(source)).collect::<Vec<_>>(),
+            ["*"]
+        );
+        assert_eq!(declaration.public().is_some(), public);
+    }
+    for invalid in [
+        "import *;",
+        "import models::*::Api;",
+        "import models::{*};",
+        "import models::{Api, *};",
+        "import models::*, Api;",
+        "import models::**;",
+        "type Invalid = *;",
+    ] {
+        let tokens = Lexer::tokenize(invalid).unwrap();
+        let (_, diagnostics) = Parser::parse(&tokens, invalid);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.severity == XenoDiagSeverity::Err),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
 fn parses_documentation_and_generics() {
     let generic = source::generic_type_decl(
         source::TYPE_NAME,

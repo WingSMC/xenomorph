@@ -499,6 +499,7 @@ fn metadata_merge_and_consumers_reject_overwrites_without_mutating_state() {
         abs_path: PathBuf::new(),
         own_types: vec![],
         imported_types: Default::default(),
+        import_selections: Default::default(),
         builtin_types: Default::default(),
         known_annotations: Default::default(),
         type_hierarchy: TypeHierarchy::default(),
@@ -608,6 +609,98 @@ fn authoritative_config_drives_all_generator_output_paths() {
         .is_file());
     assert_eq!(registry.plugins.len(), 3);
     assert!(registry.plugins.iter().all(LoadedPlugin::is_loaded));
+}
+
+#[test]
+#[ignore = "Build workspace cdylibs first: cargo build --workspace"]
+fn generators_expand_wildcard_reexports_and_keep_private_imports_out_of_exports() {
+    let workspace = Workspace::new();
+    fs::write(
+        workspace.0.join("index.xen"),
+        "pub import barrel::*; import extra::*; pub type Root = Used;",
+    )
+    .unwrap();
+    fs::write(
+        workspace.0.join("barrel.xen"),
+        "pub import other::*; type Hidden = string;",
+    )
+    .unwrap();
+    fs::write(
+        workspace.0.join("other.xen"),
+        "type Helper = string; pub type Api = { id: Helper }; pub type Spare = { value: number };",
+    )
+    .unwrap();
+    fs::write(
+        workspace.0.join("extra.xen"),
+        "pub type Used = bool; pub type Unused = string; type Private = string;",
+    )
+    .unwrap();
+    let registry = XenoRegistry::load_workspace_with_config(
+        workspace.config(
+            &plugin_directory(),
+            &[
+                "xenomorph_typescript",
+                "xenomorph_java",
+                "xenomorph_json_schema",
+            ],
+        ),
+        true,
+    )
+    .unwrap();
+    for path in ["index", "barrel", "other", "extra"] {
+        let diagnostics = registry.get_all_errors_for(path);
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|d| d.severity == crate::XenoDiagSeverity::Err),
+            "{path}: {diagnostics:?}"
+        );
+    }
+    let entry = fs::read_to_string(workspace.0.join("index.ts")).unwrap();
+    assert!(
+        entry.contains("export type { Api, Spare } from \"./other\";"),
+        "{entry}"
+    );
+    assert!(
+        entry.contains("import type { Used } from \"./extra\";"),
+        "{entry}"
+    );
+    assert!(
+        !entry.contains("export type { Used }")
+            && !entry.contains("Hidden")
+            && !entry.contains("Helper")
+            && !entry.contains("Unused")
+            && !entry.contains("Private"),
+        "{entry}"
+    );
+    let barrel = fs::read_to_string(workspace.0.join("barrel.ts")).unwrap();
+    assert!(
+        barrel.contains("export type { Api, Spare } from \"./other\";"),
+        "{barrel}"
+    );
+    let other = fs::read_to_string(workspace.0.join("other.ts")).unwrap();
+    assert!(
+        other.contains("type Helper = string;") && !other.contains("export type Helper"),
+        "{other}"
+    );
+    let schema: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(workspace.0.join("index.schema.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        schema["$defs"]["Api"]["$ref"],
+        "./other.schema.json#/$defs/Api"
+    );
+    assert_eq!(
+        schema["$defs"]["Spare"]["$ref"],
+        "./other.schema.json#/$defs/Spare"
+    );
+    assert!(schema["$defs"].get("Hidden").is_none() && schema["$defs"].get("Unused").is_none());
+    assert!(workspace.0.join("Api.java").is_file() && workspace.0.join("Spare.java").is_file());
+    assert!(
+        !workspace.0.join("Hidden.java").exists()
+            && !workspace.0.join("Unused.java").exists()
+            && !workspace.0.join("Private.java").exists()
+    );
 }
 
 #[test]

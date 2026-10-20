@@ -139,7 +139,7 @@ fn lexical_style(variant: TokenVariant) -> Option<TokenStyle> {
         | TokenVariant::Neq
         | TokenVariant::Gt
         | TokenVariant::Lt => TokenKind::Operator,
-        TokenVariant::PathSeparator => TokenKind::Operator,
+        TokenVariant::PathSeparator | TokenVariant::Asterisk => TokenKind::Operator,
         TokenVariant::Documentation => {
             return Some(TokenStyle {
                 kind: TokenKind::Comment,
@@ -443,6 +443,7 @@ mod tests {
     fn syntax_roles_come_from_the_rust_tokens_and_ast() {
         let source = r#"/** docs */
 pub import shared::types::{Shared};
+pub import shared::models::*;
 type Box<T: number> = {
     value: T,
 };
@@ -464,6 +465,7 @@ type Cast = 1 as u64;
         assert!(contains("shared", TokenKind::Namespace, 0));
         assert!(contains("types", TokenKind::Namespace, 0));
         assert!(contains("Shared", TokenKind::Type, 0));
+        assert!(contains("*", TokenKind::Operator, 0));
         assert!(contains("Box", TokenKind::Type, DECLARATION));
         assert!(contains("T", TokenKind::TypeParameter, DECLARATION));
         assert!(contains("T", TokenKind::TypeParameter, 0));

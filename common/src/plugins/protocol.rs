@@ -257,6 +257,7 @@ mod tests {
             abs_path: PathBuf::new(),
             own_types: vec![],
             imported_types: std::collections::HashMap::new(),
+            import_selections: std::collections::HashMap::new(),
             builtin_types: metadata.types.keys().cloned().collect(),
             known_annotations: metadata.annotations.keys().cloned().collect(),
             type_hierarchy: hierarchy,

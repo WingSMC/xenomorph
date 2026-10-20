@@ -216,11 +216,17 @@ fn declaration_node(declaration: &Declaration, tokens: &[Token], source: &str) -
             public
                 .iter()
                 .map(|p| token_node("Public", p, source))
-                .chain(
-                    names
-                        .iter()
-                        .map(|name| token_node("ImportedDeclaration", name, source)),
-                )
+                .chain(names.iter().map(|name| {
+                    token_node(
+                        if name.text(source) == "*" {
+                            "WildcardImport"
+                        } else {
+                            "ImportedDeclaration"
+                        },
+                        name,
+                        source,
+                    )
+                }))
                 .collect(),
         ),
         Declaration::Type {
@@ -569,6 +575,20 @@ mod tests {
         assert_eq!(result.diagnostics.len(), 1);
         assert_eq!(result.diagnostics[0].severity, "error");
         assert_eq!(result.diagnostics[0].range.start.character, 14);
+    }
+
+    #[test]
+    fn inspector_preserves_wildcard_import_tokens_and_ranges() {
+        let result = inspect_source("pub import folder::models::*;");
+        assert!(result.diagnostics.is_empty());
+        let declaration = &result.ast[0];
+        assert_eq!(declaration.kind, "ImportDeclaration");
+        assert_eq!(declaration.label.as_deref(), Some("folder::models"));
+        let wildcard = &declaration.children[1];
+        assert_eq!(wildcard.kind, "WildcardImport");
+        assert_eq!(wildcard.label.as_deref(), Some("*"));
+        assert_eq!(wildcard.range.unwrap().start.character, 27);
+        assert_eq!(wildcard.range.unwrap().end.character, 28);
     }
 
     #[test]

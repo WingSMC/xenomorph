@@ -235,6 +235,10 @@ impl<'src> DeclarationMethods<'src> for Declaration {
         let names;
         loop {
             parser.expect(TokenVariant::PathSeparator)?;
+            if matches!(parser.peek(), Some((TokenVariant::Asterisk, _))) {
+                names = vec![parser.expect(TokenVariant::Asterisk)?];
+                break;
+            }
             if matches!(parser.peek(), Some((TokenVariant::LCurly, _))) {
                 names = parser.parse_list(
                     TokenVariant::LCurly,

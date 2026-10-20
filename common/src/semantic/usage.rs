@@ -25,12 +25,28 @@ pub fn analyze_usage(
     for declaration in ast {
         match declaration {
             Declaration::Import {
+                path,
                 names,
                 public: None,
                 ..
             } => {
                 for token in names {
                     let name = token.text(source);
+                    if name == "*" {
+                        if let Some(names) = imported_types.get(&path.join("/")) {
+                            if !names.is_empty()
+                                && names.iter().all(|name| !references.contains(name))
+                            {
+                                diagnostics.push(XenoDiagnostic {
+                                    location: *token,
+                                    message: "Unused wildcard import.".into(),
+                                    severity: XenoDiagSeverity::Warn,
+                                    tags: vec![XenoDiagnosticTag::Unnecessary],
+                                });
+                            }
+                        }
+                        continue;
+                    }
                     if known_imports.contains(name) && !references.contains(name) {
                         diagnostics.push(XenoDiagnostic {
                             location: *token,
@@ -89,6 +105,22 @@ mod tests {
                 .collect()
         });
         analyze_usage(&ast, source, "index", &imported_types, reachable.as_ref())
+    }
+
+    #[test]
+    fn wildcard_usage_warns_only_when_no_selected_name_is_used() {
+        assert!(usage(
+            "import other::*; pub type Root = Used;",
+            &["Used", "Spare"],
+            None
+        )
+        .is_empty());
+        assert!(usage("pub import other::*;", &["Used", "Spare"], None).is_empty());
+        assert!(usage("import other::*;", &[], None).is_empty());
+        let diagnostics = usage("import other::*;", &["Used", "Spare"], None);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].message, "Unused wildcard import.");
+        assert_eq!(diagnostics[0].location.text("import other::*;"), "*");
     }
 
     #[test]

@@ -24,12 +24,14 @@ pub type Api = { user: User, status: Status };
 Import paths start at the configured entry file's directory. Use `::` between
 directories, the module filename without `.xen`, and the selected declarations.
 `import folder::models::User;` selects one declaration. Braced lists accept a
-trailing comma and can span multiple lines. Only named public declarations are
-visible to an importer; importing a module does not expose its other names.
+trailing comma and can span multiple lines. `import folder::models::*;` selects
+all public declarations, including public re-exports. The wildcard must be the final path segment and cannot appear in a
+braced list.
 
 `pub import folder::models::{User, Status};` imports and re-exports those names.
 Consumers can import them through this module. Re-exports retain the original
 declaration's identity for navigation and semantic resolution.
+`pub import folder::models::*;` imports and re-exports all public declarations.
 
 The configured entry module's public declarations and public imports are the
 bundle roots. Generators and plugin analyzers receive those roots and their
@@ -44,6 +46,8 @@ References in private declarations count as usage, even if those declarations
 are outside the entry bundle. Public imports are exempt because they re-export
 their selections. In a partially used braced list, only the unused selections
 receive warnings.
+A private wildcard import receives a warning only when none of its selected
+names is referenced.
 
 ## Types
 

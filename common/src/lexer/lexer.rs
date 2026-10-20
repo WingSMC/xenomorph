@@ -161,7 +161,7 @@ impl<'src> Lexer<'src> {
                 '(' => (TokenVariant::LParen, self.single_char_token_next()),
                 ')' => (TokenVariant::RParen, self.single_char_token_next()),
                 // '.' => (TokenVariant::Dot, self.single_char_token_next()),
-                // '*' => (TokenVariant::Asterix, self.single_char_token_next()),
+                '*' => (TokenVariant::Asterisk, self.single_char_token_next()),
                 // '^' => (TokenVariant::Caret, self.single_char_token_next()),
                 '=' => (TokenVariant::Eq, self.single_char_token_next()),
                 // '\\' => (TokenVariant::Backslash, self.single_char_token_next()),

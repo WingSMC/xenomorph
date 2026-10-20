@@ -1,4 +1,14 @@
 {
+    "Import all public declarations": {
+        "prefix": "import *",
+        "body": "import ${1:module}::*;",
+        "description": "Import all public declarations from a module"
+    },
+    "Re-export all public declarations": {
+        "prefix": "pub import *",
+        "body": "pub import ${1:module}::*;",
+        "description": "Import and re-export all public declarations from a module"
+    },
     "Import declarations": {
         "prefix": "import",
         "body": "import ${1:module}::{${2:Declaration}};",

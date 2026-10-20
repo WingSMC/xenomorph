@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
-mod bindings;
+pub(crate) mod bindings;
 pub mod types;
 pub(crate) use bindings::in_scope;
 
@@ -969,6 +969,7 @@ impl XenoRegistry {
         let mut hierarchy = self.hierarchy.read().unwrap().clone();
         hierarchy.set_current_module(path);
         let scope = crate::semantic::ScopeInfo {
+            import_selections: bindings::import_selections(&index, path),
             module_path: path.into(),
             abs_path: module.abs_path.clone(),
             own_types: module.declarations.keys().cloned().collect(),
@@ -1052,6 +1053,14 @@ impl XenoRegistry {
     /// Validates all import declarations in a module.
     fn validate_imports(&self, module: &ModuleData, module_path: &str) -> Vec<ModuleDiagnostic> {
         let mut errors = Vec::new();
+        let index = self.index.read().unwrap();
+        let bindings = bindings::import_bindings(module.borrow_ast(), module.borrow_source());
+        let mut occurrences = HashMap::<String, usize>::new();
+        for binding in &bindings {
+            for name in bindings::selected_names(&index, binding) {
+                *occurrences.entry(name).or_default() += 1;
+            }
+        }
         for decl in module.borrow_ast().iter() {
             if let Declaration::Import {
                 path,
@@ -1066,31 +1075,37 @@ impl XenoRegistry {
                     None,
                 ) {
                     Ok((target, abs_path)) => {
-                        let index = self.index.read().unwrap();
                         let mut selected = HashSet::new();
-                        for name in names {
-                            let text = name.text(module.borrow_source());
-                            let message = if !selected.insert(text) {
+                        let selections: Vec<_> = names
+                            .iter()
+                            .flat_map(|token| {
+                                if token.text(module.borrow_source()) == "*" {
+                                    bindings::exported_declarations(&index, &target)
+                                        .into_iter()
+                                        .map(|d| (d.name, *token))
+                                        .collect()
+                                } else {
+                                    vec![(token.text(module.borrow_source()).into(), *token)]
+                                }
+                            })
+                            .collect();
+                        for (text, token) in selections {
+                            let message = if !selected.insert(text.clone()) {
                                 Some(format!("Duplicate import of '{text}'"))
-                            } else if bindings::exported(&index, &target, text, &mut HashSet::new())
-                                .is_none()
+                            } else if bindings::exported(
+                                &index,
+                                &target,
+                                &text,
+                                &mut HashSet::new(),
+                            )
+                            .is_none()
                             {
                                 Some(format!(
                                     "Module '{}' does not export '{text}'",
                                     path.join("::")
                                 ))
-                            } else if module.declarations.contains_key(text)
-                                || module
-                                    .borrow_ast()
-                                    .iter()
-                                    .filter_map(|d| match d {
-                                        Declaration::Import { names, .. } => Some(names),
-                                        _ => None,
-                                    })
-                                    .flatten()
-                                    .filter(|n| n.text(module.borrow_source()) == text)
-                                    .count()
-                                    > 1
+                            } else if module.declarations.contains_key(&text)
+                                || occurrences.get(&text).copied().unwrap_or(0) > 1
                             {
                                 Some(format!(
                                     "Import '{text}' conflicts with another declaration or import"
@@ -1102,7 +1117,7 @@ impl XenoRegistry {
                                 errors.push(module.diagnostic(
                                     crate::XenoDiagnostic {
                                         tags: vec![],
-                                        location: *name,
+                                        location: token,
                                         message,
                                         severity: XenoDiagSeverity::Err,
                                     },
@@ -1326,24 +1341,7 @@ impl XenoRegistry {
                 );
             }
         }
-        let Some(module) = index.get(path) else {
-            return vec![];
-        };
-        let names: HashSet<_> = module
-            .declarations
-            .keys()
-            .chain(
-                module
-                    .bindings
-                    .iter()
-                    .filter(|b| b.public)
-                    .flat_map(|b| b.names.iter()),
-            )
-            .collect();
-        names
-            .into_iter()
-            .filter_map(|name| bindings::exported(&index, path, name, &mut HashSet::new()))
-            .collect()
+        bindings::exported_declarations(&index, path)
     }
 
     fn imported_types(
@@ -2563,6 +2561,125 @@ mod update_tests {
                 "{errors:?}"
             );
         }
+        fs::remove_dir_all(&registry.root).unwrap();
+    }
+
+    #[test]
+    fn wildcard_imports_expose_public_reexports_and_follow_visibility_edits() {
+        let registry = registry();
+        let other = registry.root.join("other.xen");
+        let entry = registry.root.join("index.xen");
+        fs::write(
+            &other,
+            "type Helper = string; pub type Api = Helper; pub type Spare = number;",
+        )
+        .unwrap();
+        fs::write(
+            registry.root.join("barrel.xen"),
+            "pub import other::*; type Private = string;",
+        )
+        .unwrap();
+        let errors = registry.load_module_from_source(&entry, "pub import barrel::*;".into());
+        assert!(
+            !errors.iter().any(|d| d.severity == XenoDiagSeverity::Err),
+            "{errors:?}"
+        );
+        assert_eq!(
+            registry.reachable_declarations(),
+            HashSet::from([
+                ("other".into(), "Api".into()),
+                ("other".into(), "Helper".into()),
+                ("other".into(), "Spare".into()),
+            ])
+        );
+        assert_eq!(
+            registry
+                .find_declaration("index", "Api")
+                .unwrap()
+                .module_path,
+            "other"
+        );
+        for name in ["Helper", "Private"] {
+            assert!(registry.find_declaration("index", name).is_none());
+        }
+        let exported: Vec<_> = registry
+            .get_exported_declarations("index")
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        assert_eq!(exported, ["Api", "Spare"]);
+
+        registry.load_module_from_source(&entry, "import barrel::*; pub type Root = Api;".into());
+        assert!(registry
+            .get_exported_declarations("index")
+            .iter()
+            .all(|d| d.name == "Root"));
+        assert!(!registry
+            .reachable_declarations()
+            .contains(&("other".into(), "Spare".into())));
+        assert!(registry.get_all_errors_for("index").is_empty());
+        registry.load_module_from_source(&entry, "pub import barrel::*;".into());
+        registry.load_module_from_source(&other, "type Helper = string; pub type Api = Helper; type Spare = number; pub type Added = bool;".into());
+        assert!(registry.find_declaration("index", "Spare").is_none());
+        assert!(registry.find_declaration("index", "Added").is_some());
+        assert!(registry.get_all_errors_for("index").is_empty());
+        fs::remove_dir_all(&registry.root).unwrap();
+    }
+
+    #[test]
+    fn wildcard_imports_report_name_conflicts_at_the_selection() {
+        let registry = registry();
+        fs::write(registry.root.join("other.xen"), "pub type Api = string;").unwrap();
+        for source in [
+            "import other::*; type Api = number;",
+            "import other::*; import other::Api;",
+            "import other::*; import other::*;",
+        ] {
+            registry.load_module_from_source(&registry.root.join("index.xen"), source.into());
+            let errors = registry.get_all_errors_for("index");
+            assert!(
+                errors
+                    .iter()
+                    .any(|d| d.message.contains("Import 'Api' conflicts")
+                        && d.location == Some((0, 14, 1))),
+                "{errors:?}"
+            );
+        }
+        fs::remove_dir_all(&registry.root).unwrap();
+    }
+
+    #[test]
+    fn wildcard_imports_allow_empty_exports_and_stop_at_cycles() {
+        let registry = registry();
+        fs::write(registry.root.join("empty.xen"), "type Private = string;").unwrap();
+        registry.load_module_from_source(
+            &registry.root.join("index.xen"),
+            "pub import empty::*;".into(),
+        );
+        assert!(registry.get_all_errors_for("index").is_empty());
+        assert!(registry.reachable_declarations().is_empty());
+        fs::write(
+            registry.root.join("a.xen"),
+            "pub import b::*; pub type A = string;",
+        )
+        .unwrap();
+        fs::write(
+            registry.root.join("b.xen"),
+            "pub import a::*; pub type B = number;",
+        )
+        .unwrap();
+        registry
+            .load_module_from_source(&registry.root.join("index.xen"), "pub import a::*;".into());
+        let names: Vec<_> = registry
+            .get_exported_declarations("index")
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        assert_eq!(names, ["A", "B"]);
+        assert!(registry
+            .get_all_errors_for("a")
+            .iter()
+            .any(|d| d.message.contains("cycle")));
         fs::remove_dir_all(&registry.root).unwrap();
     }
 

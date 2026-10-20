@@ -105,6 +105,10 @@
                         {
                             "name": "punctuation.separator.namespace.xenomorph",
                             "match": "::"
+                        },
+                        {
+                            "name": "keyword.operator.wildcard.xenomorph",
+                            "match": "\\*"
                         }
                     ]
                 }

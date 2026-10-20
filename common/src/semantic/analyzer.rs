@@ -31,6 +31,10 @@ pub struct ScopeInfo {
     pub own_types: Vec<String>,
     /// Types imported from other modules, keyed by module path.
     pub imported_types: HashMap<String, Vec<String>>,
+    /// Public names selected from each import path, including wildcard selections.
+    /// Re-exports in `imported_types` use the original declaration's module instead.
+    #[serde(default)]
+    pub import_selections: HashMap<String, Vec<String>>,
     /// Built-in type names (no module provenance).
     pub builtin_types: HashSet<String>,
     /// All known annotation names (builtins + plugins, flat set).
@@ -85,6 +89,21 @@ impl ScopeInfo {
         check_types(&self.module_path, &self.own_types)?;
         for (module, names) in &self.imported_types {
             check_types(module, names)?;
+        }
+        for names in self.import_selections.values() {
+            let mut unique = HashSet::new();
+            for name in names {
+                if !unique.insert(name)
+                    || !self
+                        .imported_types
+                        .values()
+                        .any(|types| types.contains(name))
+                {
+                    return Err(format!(
+                        "Scope references repeated or missing import selection '{name}'"
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -430,6 +449,7 @@ impl Analyzer {
         }
 
         let scope = ScopeInfo {
+            import_selections: crate::module::bindings::import_selections(&index, &module_path_str),
             module_path: module_path_str,
             abs_path: module_data.borrow_abs_path().to_path_buf(),
             own_types,
@@ -519,6 +539,9 @@ impl Analyzer {
                         (reachable, &mut d)
                     {
                         names.retain(|token| {
+                            if token.text(source) == "*" {
+                                return true;
+                            }
                             scope
                                 .type_hierarchy
                                 .get_type(token.text(source))
@@ -536,6 +559,18 @@ impl Analyzer {
                 .collect();
             let mut bundle_scope = scope.clone();
             if let Some(reachable) = reachable {
+                for names in bundle_scope.import_selections.values_mut() {
+                    names.retain(|name| {
+                        scope
+                            .type_hierarchy
+                            .get_type(name)
+                            .is_some_and(|definition| {
+                                definition.module_path.as_ref().is_some_and(|path| {
+                                    reachable.contains(&(path.clone(), name.clone()))
+                                })
+                            })
+                    });
+                }
                 bundle_scope
                     .own_types
                     .retain(|name| reachable.contains(&(scope.module_path.clone(), name.clone())));
@@ -587,7 +622,7 @@ impl Analyzer {
             ast,
             source,
             &scope.module_path,
-            &scope.imported_types,
+            &scope.import_selections,
             reachable,
         ));
         errors
@@ -955,6 +990,7 @@ mod tests {
             abs_path: PathBuf::new(),
             own_types,
             imported_types: HashMap::new(),
+            import_selections: HashMap::new(),
             builtin_types: BUILTIN_TYPES
                 .iter()
                 .map(|semantic_type| semantic_type.name.to_string())

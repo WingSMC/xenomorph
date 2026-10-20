@@ -673,6 +673,7 @@ mod tests {
             abs_path: std::env::current_dir().unwrap().join("schema"),
             own_types: vec!["Value".into()],
             imported_types: HashMap::from([("other".into(), vec!["Value".into()])]),
+            import_selections: HashMap::from([("barrel".into(), vec!["Value".into()])]),
             builtin_types: HashSet::new(),
             known_annotations: HashSet::new(),
             type_hierarchy: TypeHierarchy::default(),
@@ -746,6 +747,12 @@ mod tests {
         assert!(restored.descends_from_semantic_type(&OwnedType::named("NEVER"), "string"));
         assert!(restored.find_annotation("min").is_some());
         assert!(restored.has_type("Value"));
+        assert_eq!(restored.import_selections, scope.import_selections);
+        for names in [vec!["Missing".into()], vec!["Value".into(), "Value".into()]] {
+            let mut invalid = restored.clone();
+            invalid.import_selections.insert("barrel".into(), names);
+            assert!(invalid.validate().unwrap_err().contains("import selection"));
+        }
         let mut invalid = restored.clone();
         invalid.type_hierarchy.set_current_module("wrong");
         assert!(invalid.validate().unwrap_err().contains("lookup context"));
@@ -777,6 +784,7 @@ mod tests {
             abs_path: std::ffi::OsString::from_wide(&[0x43, 0x3a, 0x5c, 0xd800]).into(),
             own_types: Vec::new(),
             imported_types: HashMap::new(),
+            import_selections: HashMap::new(),
             builtin_types: HashSet::new(),
             known_annotations: HashSet::new(),
             type_hierarchy: TypeHierarchy::default(),

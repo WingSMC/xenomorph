@@ -1079,6 +1079,14 @@ mod tests {
     }
 
     #[test]
+    fn formats_wildcard_imports_without_changing_the_selection() {
+        let source = "  import models::*;\n   pub import folder::models::*;";
+        let expected = "import models::*;\npub import folder::models::*;";
+        assert_eq!(format_xenomorph(source, &formatter(80)), expected);
+        assert_eq!(format_xenomorph(expected, &formatter(80)), expected);
+    }
+
+    #[test]
     fn wraps_public_import_lists_and_preserves_comments_and_line_endings() {
         let config = FormatterConfig {
             line_ending: LineEnding::Auto,

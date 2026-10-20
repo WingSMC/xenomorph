@@ -1149,7 +1149,7 @@ impl Backend {
                 if !module.is_empty() {
                     let is_selected =
                         |token: &TokenData| !(token.start <= offset && offset <= token.end);
-                    let mut imported: HashSet<_> = ast
+                    let mut imported: HashSet<String> = ast
                         .iter()
                         .filter_map(|declaration| match declaration {
                             Declaration::Import { names, .. } => Some(names),
@@ -1157,8 +1157,23 @@ impl Backend {
                         })
                         .flatten()
                         .filter(|token| is_selected(token))
-                        .map(|token| token.text(source))
+                        .map(|token| token.text(source).to_string())
                         .collect();
+                    for declaration in ast {
+                        if let Declaration::Import { path, names, .. } = declaration {
+                            if names
+                                .iter()
+                                .any(|token| is_selected(token) && token.text(source) == "*")
+                            {
+                                imported.extend(
+                                    self.registry
+                                        .get_exported_declarations(&path.join("/"))
+                                        .into_iter()
+                                        .map(|d| d.name),
+                                );
+                            }
+                        }
+                    }
                     // An unfinished import is absent from the AST. Retain its
                     // completed selections on either side of the cursor.
                     let active: Vec<_> = tokens
@@ -1175,7 +1190,7 @@ impl Backend {
                                 && matches!(pair[1].0, TokenVariant::Comma | TokenVariant::RCurly)
                                 && is_selected(&pair[0].1)
                             {
-                                imported.insert(pair[0].1.text(source));
+                                imported.insert(pair[0].1.text(source).to_string());
                             }
                         }
                     }
@@ -2455,6 +2470,8 @@ mod tests {
             ("import other::{|, Open};", vec!["Fresh"]),
             ("import other::{Fresh, |Open};", vec!["Open"]),
             ("import other::{Open}; import other::|", vec!["Fresh"]),
+            ("import other::*; import other::{|", vec![]),
+            ("pub import barrel::*; import other::{|", vec!["Fresh"]),
             ("import other::{|}; import other::Open;", vec!["Fresh"]),
             ("import other::{O|pen};", vec!["Open"]),
             ("import other::{// \u{1f600}\nOpen, |", vec!["Fresh"]),
