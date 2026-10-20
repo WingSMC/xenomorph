@@ -75,7 +75,8 @@ These actions inspect only that declaration. Disable them with
 
 ## AST visualization
 
-The AST tab renders the parser's structured output as a tree. You can:
+The AST tab renders the parser's structured output as a left-to-right tree.
+Documents with many nodes open with their declarations collapsed. You can:
 
 - pan by dragging and zoom with the mouse wheel or toolbar buttons;
 - fit, expand, or collapse the tree;
@@ -89,9 +90,20 @@ active Xenomorph document and a references icon that opens the module graph.
 ## Module graph visualization
 
 The module graph runs `xeno graph --json` in the active workspace. Arrows point
-from an importer to the module it imports. Entry, error, and warning nodes are
-highlighted; click any module to open its source file. The graph supports pan,
-zoom, and fit controls.
+from an importer to the module it imports. Modules are arranged in columns:
+modules that import nothing are in the rightmost column, and every module is
+placed left of all the modules it imports. Import cycles are drawn as dashed
+arrows that point right to left.
+
+Entry, error, and warning nodes are highlighted. Hover a module to highlight
+its imports and importers; click it to open its source file and list its
+connections in the side panel. The graph supports pan, zoom, and fit controls.
+
+## Development
+
+The extension host code is in `client/src/extension`. The webviews are Svelte
+components in `client/src/webview` and use D3 for layout and pan/zoom. Run
+`pnpm build`, `pnpm typecheck`, and `pnpm test` in `client`.
 
 ## Parser inspection protocol
 

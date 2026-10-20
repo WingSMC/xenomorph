@@ -1,5 +1,14 @@
 # Change Log
 
+## [Unreleased]
+
+- Rewrite the AST and module graph webviews as Svelte components that use D3.
+- Lay out the module graph in layers: modules that import nothing are in the
+  rightmost column, and edge crossings are reduced. Import cycles are dashed.
+- Highlight the imports and importers of the hovered module, and list them
+  for the selected module.
+- Show the AST left to right, and collapse declarations in large documents.
+
 ## [0.1.2]
 
 - Add a manual LSP restart command and automatically restart after the active

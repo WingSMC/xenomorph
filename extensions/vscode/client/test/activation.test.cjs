@@ -127,7 +127,7 @@ test('activation and LSP restart register the reload command without collisions'
         return sourceModule.exports;
     }
 
-    const extension = loadSource(path.resolve(__dirname, '../src/extension.ts'));
+    const extension = loadSource(path.resolve(__dirname, '../src/extension/extension.ts'));
     try {
         extension.activate({ subscriptions });
         await new Promise(setImmediate);

@@ -6,9 +6,9 @@
     "version": "0.2.0",
     "publisher": "WingSMC",
     "scripts": {
-        "build": "vite build",
-        "test": "node --test test/*.test.cjs",
-        "typecheck": "tsc --noEmit"
+        "build": "vite build && vite build -c vite.webview.config.ts",
+        "test": "node --test test/*.test.cjs test/*.test.mts",
+        "typecheck": "tsc -p tsconfig.json && svelte-check --tsconfig tsconfig.webview.json"
     },
     "repository": {
         "type": "git",
@@ -19,13 +19,23 @@
         "vscode": "^1.75.0"
     },
     "dependencies": {
-        "glob": "^13.0.6",
+        "d3-hierarchy": "^3.1.2",
+        "d3-selection": "^3.0.0",
+        "d3-shape": "^3.2.0",
+        "d3-zoom": "^3.0.0",
+        "svelte": "^5.57.2",
         "vscode-languageclient": "^9.0.1"
     },
     "devDependencies": {
+        "@sveltejs/vite-plugin-svelte": "^7.3.1",
+        "@types/d3-hierarchy": "^3.1.7",
+        "@types/d3-selection": "^3.0.12",
+        "@types/d3-shape": "^3.2.0",
+        "@types/d3-zoom": "^3.0.9",
         "@types/node": "^22.19.15",
         "@types/vscode": "^1.98.0",
         "@vscode/test-electron": "^2.4.1",
+        "svelte-check": "^4.7.7",
         "typescript": "^6.0.2",
         "vite": "^8.0.3"
     }

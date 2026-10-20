@@ -2,34 +2,30 @@ import { builtinModules } from 'node:module';
 import { resolve } from 'node:path';
 import { defineConfig } from 'vite';
 
-const external = [
-    'vscode',
-    ...builtinModules,
-    ...builtinModules.map((m) => `node:${m}`),
-];
-
+// Bundles the extension host code (Node, CommonJS). The webview is built
+// separately by vite.webview.config.ts.
 export default defineConfig({
     resolve: {
-        extensions: ['.ts', '.js'],
         conditions: ['node'],
         mainFields: ['module', 'main'],
     },
     build: {
         outDir: 'out',
-        sourcemap: false,
+        emptyOutDir: false,
         minify: true,
-        emptyOutDir: true,
         target: 'node18',
         lib: {
-            entry: resolve(__dirname, 'src/extension.ts'),
+            entry: resolve(__dirname, 'src/extension/extension.ts'),
             formats: ['cjs'],
             fileName: () => 'extension.js',
         },
         rollupOptions: {
-            external,
-            output: {
-                codeSplitting: false,
-            },
+            external: [
+                'vscode',
+                ...builtinModules,
+                ...builtinModules.map((name) => `node:${name}`),
+            ],
+            output: { codeSplitting: false },
         },
     },
 });
