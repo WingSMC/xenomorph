@@ -2,7 +2,11 @@
     import { hierarchy, tree } from 'd3-hierarchy';
     import { linkHorizontal } from 'd3-shape';
     import { SvelteSet } from 'svelte/reactivity';
-    import type { AstNode, AstViewData, InspectPosition } from '../../shared/protocol';
+    import type {
+        AstNode,
+        AstViewData,
+        InspectPosition,
+    } from '../../shared/protocol';
     import PanZoom from '../lib/PanZoom.svelte';
     import Shell from '../lib/Shell.svelte';
     import { post } from '../lib/vscode';
@@ -30,7 +34,9 @@
     const layout = $derived.by(() => {
         const nodes = tree<AstNode>()
             .nodeSize([H + 12, W + 56])(
-                hierarchy(root, (node) => (collapsed.has(node) ? null : node.children)),
+                hierarchy(root, (node) =>
+                    collapsed.has(node) ? null : node.children,
+                ),
             )
             .descendants()
             .map((node) => ({ node, x: node.y, y: node.x }));
@@ -102,7 +108,8 @@
             </p>
         {:else}
             <p class="muted">
-                Click a node to reveal its source. Double-click a parent to collapse or expand it.
+                Click a node to reveal its source. Double-click a parent to
+                collapse or expand it.
             </p>
         {/if}
 
@@ -134,7 +141,10 @@
                 {@const parent = layout.position.get(node.parent)!}
                 <path
                     class="edge"
-                    d={link({ source: [parent.x + W / 2, parent.y], target: [x - W / 2, y] })}
+                    d={link({
+                        source: [parent.x + W / 2, parent.y],
+                        target: [x - W / 2, y],
+                    })}
                 />
             {/if}
         {/each}
@@ -149,16 +159,27 @@
                 aria-label={node.kind}
                 onclick={() => select(node)}
                 ondblclick={() => toggle(node)}
-                onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && select(node)}
+                onkeydown={(e) =>
+                    (e.key === 'Enter' || e.key === ' ') && select(node)}
             >
-                <title>{node.label ? `${node.kind}: ${node.label}` : node.kind}</title>
+                <title
+                    >{node.label
+                        ? `${node.kind}: ${node.label}`
+                        : node.kind}</title
+                >
                 <rect width={W} height={H} rx="4" />
-                <text class="kind" x={W / 2} y={node.label ? 18 : 26}>{truncate(node.kind, 24)}</text>
+                <text class="kind" x={W / 2} y={node.label ? 18 : 26}
+                    >{truncate(node.kind, 24)}</text
+                >
                 {#if node.label}
-                    <text class="label" x={W / 2} y="34">{truncate(node.label, 26)}</text>
+                    <text class="label" x={W / 2} y="34"
+                        >{truncate(node.label, 26)}</text
+                    >
                 {/if}
                 {#if node.children.length && node !== root}
-                    <text class="toggle" x={W - 10} y="14">{collapsed.has(node) ? '+' : '−'}</text>
+                    <text class="toggle" x={W - 10} y="14"
+                        >{collapsed.has(node) ? '+' : '−'}</text
+                    >
                 {/if}
             </g>
         {/each}

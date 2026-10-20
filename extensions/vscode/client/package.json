@@ -3,7 +3,7 @@
     "description": "VSCode client for Xenomorph language server",
     "author": "WingSMC",
     "license": "MIT",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "publisher": "WingSMC",
     "scripts": {
         "build": "vite build && vite build -c vite.webview.config.ts",

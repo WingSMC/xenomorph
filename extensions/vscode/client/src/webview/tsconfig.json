@@ -1,0 +1,15 @@
+{
+    "compilerOptions": {
+        "target": "ESNext",
+        "module": "ESNext",
+        "moduleResolution": "Bundler",
+        "allowJs": true,
+        "resolveJsonModule": true,
+        "isolatedModules": true,
+        "verbatimModuleSyntax": true,
+        "noEmit": true,
+        "skipLibCheck": true
+    },
+    "include": ["**/*.svelte", "**/*.ts", "**/*.js"],
+    "exclude": ["node_modules"]
+}
