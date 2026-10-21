@@ -88,7 +88,7 @@ checksum = "4d6867f1565b3aad85681f1015055b087fcfd840d6aeee6eee7f2da317603695"
 dependencies = [
  "autocfg",
  "libm",
- "num-bigint 0.4.8",
+ "num-bigint",
  "num-integer",
  "num-traits",
 ]
@@ -612,16 +612,6 @@ name = "num-bigint"
 version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
-dependencies = [
- "num-integer",
- "num-traits",
-]
-
-[[package]]
-name = "num-bigint"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93e7820bc0a80a0238e650327316f929ba18d5be054b647490a3a6a339f3e7c0"
 dependencies = [
  "num-integer",
  "num-traits",
@@ -1280,7 +1270,7 @@ dependencies = [
  "bigdecimal",
  "libloading",
  "notify",
- "num-bigint 0.4.8",
+ "num-bigint",
  "serde",
  "serde_json",
  "toml",
@@ -1299,7 +1289,7 @@ dependencies = [
 name = "xenomorph_json_schema"
 version = "0.2.0"
 dependencies = [
- "num-bigint 0.5.1",
+ "num-bigint",
  "serde_json",
  "xenomorph_common",
 ]
@@ -1329,10 +1319,19 @@ name = "xenomorph_plugin_api"
 version = "0.2.0"
 dependencies = [
  "bigdecimal",
- "num-bigint 0.4.8",
+ "num-bigint",
  "postcard",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "xenomorph_pydantic"
+version = "0.2.0"
+dependencies = [
+ "bigdecimal",
+ "num-bigint",
+ "xenomorph_common",
 ]
 
 [[package]]

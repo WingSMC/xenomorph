@@ -11,5 +11,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 xenomorph_common = { path = "../../common" }
-num-bigint = "0.5.1"
+num-bigint = "0.4"
 serde_json = { version = "1.0", features = ["arbitrary_precision"] }

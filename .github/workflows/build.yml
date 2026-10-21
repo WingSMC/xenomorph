@@ -54,7 +54,7 @@ jobs:
               run: >-
                   cargo build --release --locked --target "${{ matrix.target }}"
                   -p xenomorph_parser -p xenomorph_lsp
-                  -p xenomorph_java -p xenomorph_json_schema -p xenomorph_typescript
+                  -p xenomorph_java -p xenomorph_json_schema -p xenomorph_typescript -p xenomorph_pydantic
             # Tar preserves the executable permissions when downloaded from Actions artifacts.
             - name: Archive programs and plugins
               env:
@@ -70,7 +70,8 @@ jobs:
                     "xeno${EXE_SUFFIX}" "xenomorph_lsp${EXE_SUFFIX}" \
                     "${LIB_PREFIX}xenomorph_java${LIB_SUFFIX}" \
                     "${LIB_PREFIX}xenomorph_json_schema${LIB_SUFFIX}" \
-                    "${LIB_PREFIX}xenomorph_typescript${LIB_SUFFIX}"
+                    "${LIB_PREFIX}xenomorph_typescript${LIB_SUFFIX}" \
+                    "${LIB_PREFIX}xenomorph_pydantic${LIB_SUFFIX}"
             - uses: actions/upload-artifact@v6
               with:
                   name: xenomorph-${{ github.ref_name }}-${{ matrix.target }}

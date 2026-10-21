@@ -48,7 +48,7 @@ jobs:
               run: >-
                   cargo build --release --locked --target aarch64-apple-darwin
                   -p xenomorph_parser -p xenomorph_lsp
-                  -p xenomorph_java -p xenomorph_json_schema -p xenomorph_typescript
+                  -p xenomorph_java -p xenomorph_json_schema -p xenomorph_typescript -p xenomorph_pydantic
             - name: Archive programs and plugins
               env:
                   RELEASE_TAG: ${{ inputs.tag }}
@@ -57,7 +57,8 @@ jobs:
                   tar -czf "artifacts/xenomorph-${RELEASE_TAG}-aarch64-apple-darwin.tar.gz" \
                     -C target/aarch64-apple-darwin/release \
                     xeno xenomorph_lsp \
-                    libxenomorph_java.dylib libxenomorph_json_schema.dylib libxenomorph_typescript.dylib
+                    libxenomorph_java.dylib libxenomorph_json_schema.dylib libxenomorph_typescript.dylib \
+                    libxenomorph_pydantic.dylib
             - uses: actions/upload-artifact@v6
               with:
                   name: xenomorph-${{ inputs.tag }}-aarch64-apple-darwin

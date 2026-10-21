@@ -15,6 +15,7 @@ data shapes and relations, independent of language or framework.
 
 - [Plugin API, ownership, and reload](docs/PLUGINS.md)
 - [Java generator](plugins/java/README.md)
+- [Pydantic generator](plugins/pydantic/README.md)
 
 ## Config (`xenomorph.toml`)
 
@@ -134,7 +135,7 @@ do not match every package version. Successful builds upload these artifacts
 to the workflow run:
 
 - A `.tar.gz` for each of Windows x64 and Linux x64 containing
-  `xeno`, `xenomorph_lsp`, and the Java, JSON Schema, and TypeScript plugin
+  `xeno`, `xenomorph_lsp`, and the Java, JSON Schema, Pydantic, and TypeScript plugin
   libraries (`.dll` or `.so`). Archives preserve executable permissions.
 - The platform-independent `xenomorph-<version>.vsix` VS Code extension.
 

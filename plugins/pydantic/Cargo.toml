@@ -1,0 +1,15 @@
+[package]
+name = "xenomorph_pydantic"
+version = "0.2.0"
+edition = "2021"
+
+[package.metadata]
+msvc-def-file = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+xenomorph_common = { path = "../../common" }
+num-bigint = "0.4"
+bigdecimal = "0.4"

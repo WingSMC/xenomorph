@@ -80,6 +80,12 @@ pub type User = { name: string }
     @java::Lombok(java::Value, java::Builder);
 ```
 
+With the Pydantic plugin enabled:
+
+```xen
+pub type User = { name: string } @pydantic::extra("allow");
+```
+
 Migrate existing plugin references such as `symbol` and `@Lombok(Data)` to
 `TS::symbol` and `@java::Lombok(java::Data)`. Rebuild plugins with the
 updated SDK; the description payload now includes the required namespace.
@@ -108,7 +114,8 @@ static MATCHERS: &[CustomDeclarationMatcher] = &[
 // provide_custom_declarations: Some(|| MATCHERS),
 ```
 
-For `#java raw code#;`, the lexer emits one opaque block token. The parser
+For `#java raw code#;` (the java plugin doesn't actually have a custom declaration matcher)
+ the lexer emits one opaque block token. The parser
 requires a valid identifier and the semicolon. The host selects the registered
 matcher before indexing declarations or resolving imports. The request includes
 the original source, module path, absolute file path, and byte ranges for the
