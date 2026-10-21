@@ -10,11 +10,9 @@ use xenomorph_common::parser::{
 use xenomorph_common::plugins::XenoPlugin;
 use xenomorph_common::semantic::{
     is_type_utility, simple_to_owned_type, type_to_owned_type, unsupported_target_type_diagnostic,
-    AnalyzerListener,
-    OwnedField, OwnedLiteral, OwnedSet, OwnedType, ScopeInfo, TypeDefinition, TypeHierarchy,
-    XenoAnnotation,
-    XenoAnnotationKind, XenoConstraint, XenoParam, XenoParent, XenoTrait, XenoTraitKind,
-    XenoType as SemanticType, ANY_TARGET_PARAM,
+    AnalyzerListener, OwnedField, OwnedLiteral, OwnedSet, OwnedType, ScopeInfo, TypeDefinition,
+    TypeHierarchy, XenoAnnotation, XenoAnnotationKind, XenoConstraint, XenoParam, XenoParent,
+    XenoTrait, XenoTraitKind, XenoType as SemanticType, ANY_TARGET_PARAM,
 };
 use xenomorph_common::utils::extract_documentation;
 use xenomorph_common::{TokenData, XenoDiagSeverity, XenoDiagnostic};
@@ -474,7 +472,9 @@ impl JavaGenerator {
         }
         let body = definition.body.as_ref()?;
         match body {
-            OwnedType::Set(set) if set.values.is_none() => Some(self.owned_type_to_java(body, imports)),
+            OwnedType::Set(set) if set.values.is_none() => {
+                Some(self.owned_type_to_java(body, imports))
+            }
             // A literal set is a value type; one without an enum (booleans)
             // takes the scalar type of its members.
             OwnedType::Set(set) => common_java_owned_literal_type(
@@ -636,9 +636,7 @@ impl JavaGenerator {
         visiting.push(key);
         let members = items
             .iter()
-            .map(|item| {
-                self.class_backed_member(definition.module_path.as_deref(), item, visiting)
-            })
+            .map(|item| self.class_backed_member(definition.module_path.as_deref(), item, visiting))
             .collect::<Option<Vec<_>>>();
         visiting.pop();
         let mut unique = Vec::new();
@@ -1360,9 +1358,7 @@ impl JavaGenerator {
 
         let matches = match value_type {
             "String" => "constant.value.equals(value)",
-            "BigInteger" | "BigDecimal" => {
-                "value != null && constant.value.compareTo(value) == 0"
-            }
+            "BigInteger" | "BigDecimal" => "value != null && constant.value.compareTo(value) == 0",
             _ => "constant.value == value",
         };
         let to_string = if numeric {
@@ -1539,7 +1535,8 @@ impl JavaGenerator {
             } => self.named_owned_type_to_java(
                 name,
                 arguments,
-                self.type_hierarchy.get_type_in(module_path.as_deref(), name),
+                self.type_hierarchy
+                    .get_type_in(module_path.as_deref(), name),
                 imports,
             ),
         }
@@ -2655,11 +2652,9 @@ mod tests {
         assert!(constants.contains("public class Xenomorph {"));
         assert!(constants.contains("public static final Short[] Sizes = {1, 300};"));
         assert!(!generator.files.iter().any(|(name, _)| name == "Sizes"));
-        assert!(generator
-            .files
-            .iter()
-            .any(|(name, contents)| name == "Holder"
-                && contents.contains("private Short[] sizes;")));
+        assert!(generator.files.iter().any(
+            |(name, contents)| name == "Holder" && contents.contains("private Short[] sizes;")
+        ));
     }
 
     fn generated<'a>(generator: &'a JavaGenerator, name: &str) -> &'a str {
@@ -2690,12 +2685,16 @@ mod tests {
         assert!(kind.contains(
             "    @SerializedName(\"Decision Table Testing\")\n    DECISION_TABLE_TESTING(\"Decision Table Testing\"),\n"
         ));
-        assert!(kind.contains("    @SerializedName(\"camelCase\")\n    CAMEL_CASE(\"camelCase\"),\n"));
+        assert!(
+            kind.contains("    @SerializedName(\"camelCase\")\n    CAMEL_CASE(\"camelCase\"),\n")
+        );
         assert!(kind.contains("    @SerializedName(\"a-b\")\n    A_B(\"a-b\");\n"));
         assert!(kind.contains("    private final String value;"));
         assert!(kind.contains("    public String getValue() {"));
         assert!(kind.contains("    public static Kind fromValue(String value) {"));
-        assert!(kind.contains("throw new IllegalArgumentException(\"Unknown Kind value: \" + value);"));
+        assert!(
+            kind.contains("throw new IllegalArgumentException(\"Unknown Kind value: \" + value);")
+        );
         assert!(kind.contains("    public static boolean contains(String value) {"));
         assert!(kind.contains("if (constant.value.equals(value)) {"));
         assert!(kind.contains("    public String toString() {\n        return value;"));
@@ -2792,7 +2791,8 @@ mod tests {
         assert!(msg.contains("@Deprecated\npublic interface Msg extends Any {\n}\n"));
         assert!(generated(&generator, "Any").contains("public interface Any {\n}\n"));
         assert!(generated(&generator, "SaveMsg").contains("public class SaveMsg implements Msg {"));
-        assert!(generated(&generator, "ProblemMsg").contains("public class ProblemMsg implements Msg {"));
+        assert!(generated(&generator, "ProblemMsg")
+            .contains("public class ProblemMsg implements Msg {"));
         assert!(generated(&generator, "Other").contains("public class Other implements Any {"));
         assert!(generated(&generator, "A").contains("public class A {"));
 
@@ -2984,9 +2984,13 @@ mod tests {
 
         assert!(errors.is_empty(), "{errors:#?}");
         let class = generated(&generator, "Payload");
-        assert!(class.contains("    @SerializedName(\"protected\")\n    @NonNull\n    private String protected_;"));
-        assert!(class.contains("    @SerializedName(\"class\")\n    @NonNull\n    private Integer class_;"));
-        assert!(generated(&generator, "Mode").contains("    @SerializedName(\"public\")\n    public_(1);"));
+        assert!(class.contains(
+            "    @SerializedName(\"protected\")\n    @NonNull\n    private String protected_;"
+        ));
+        assert!(class
+            .contains("    @SerializedName(\"class\")\n    @NonNull\n    private Integer class_;"));
+        assert!(generated(&generator, "Mode")
+            .contains("    @SerializedName(\"public\")\n    public_(1);"));
     }
 
     #[test]

@@ -2379,7 +2379,10 @@ pub fn literal_to_owned(literal: &Literal, source: &str) -> OwnedLiteral {
 /// wins over the same optional type, other types become an intersection.
 fn merge_struct_fields(merged: &mut Vec<OwnedField>, fields: Vec<OwnedField>) {
     for field in fields {
-        let Some(existing) = merged.iter_mut().find(|existing| existing.name == field.name) else {
+        let Some(existing) = merged
+            .iter_mut()
+            .find(|existing| existing.name == field.name)
+        else {
             merged.push(field);
             continue;
         };
