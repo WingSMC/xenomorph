@@ -1615,8 +1615,20 @@ impl PydanticGenerator {
         match ty {
             OwnedType::Named { name, arguments } => self.render_named(ty, name, arguments),
             OwnedType::Qualified {
-                name, arguments, ..
-            } => self.render_reference(name, arguments),
+                module_path,
+                name,
+                arguments,
+            } => {
+                let name = match module_path.as_deref() {
+                    Some(module) if module != self.module_path => {
+                        let path =
+                            python_import_path(&self.module_path, module, self.package.as_deref());
+                        self.symbol(&path, name)
+                    }
+                    _ => name.clone(),
+                };
+                self.render_reference(&name, arguments)
+            }
             OwnedType::Array(inner) => format!("list[{}]", self.render(inner)),
             OwnedType::Optional(inner) => format!("{} | None", self.render(inner)),
             OwnedType::Literal(literal) => {

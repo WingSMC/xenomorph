@@ -192,6 +192,39 @@ fn plugins_generate_from_custom_state_without_synthesized_declarations() {
         " custom code with # signs"
     );
 }
+
+#[test]
+#[ignore = "Build the Pydantic plugin first: cargo build -p xenomorph_pydantic"]
+fn imported_public_python_blocks_are_generated_without_private_blocks() {
+    let workspace = Workspace::new();
+    fs::write(
+        workspace.0.join("index.xen"),
+        "pub import helpers::*; pub type Example = { value: string } @pydantic::before_validator(\".helpers.prepare\");",
+    )
+    .unwrap();
+    fs::write(
+        workspace.0.join("helpers.xen"),
+        "pub #pydantic\ndef prepare(data):\n    return data\n#;\n#pydantic\nPRIVATE = True\n#;",
+    )
+    .unwrap();
+    let mut config = workspace.config(&plugin_directory(), &["xenomorph_pydantic"]);
+    let mut options = toml::map::Map::new();
+    options.insert("output".into(), ConfigValue::String("generated".into()));
+    config
+        .plugins
+        .config
+        .insert("pydantic".into(), ConfigValue::Table(options));
+    let _registry = XenoRegistry::load_workspace_with_config(config, true).unwrap();
+    let helpers = fs::read_to_string(workspace.0.join("generated/helpers.py")).unwrap();
+    assert!(
+        helpers.contains("def prepare(data):\n    return data"),
+        "{helpers}"
+    );
+    assert!(!helpers.contains("PRIVATE"), "{helpers}");
+    let entry = fs::read_to_string(workspace.0.join("generated/index.py")).unwrap();
+    assert!(entry.contains("from .helpers import prepare"), "{entry}");
+}
+
 #[test]
 #[ignore = "Build workspace cdylibs first: cargo build --workspace"]
 fn custom_matchers_cannot_return_diagnostics_outside_their_block() {

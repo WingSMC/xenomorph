@@ -259,8 +259,10 @@ pub #pydantic
 #;
 ```
 
-Generation keeps only `pub` custom blocks of the entry module, like it does for
-the other plugins. An empty block causes a warning.
+Generation keeps `pub` custom blocks in the entry module and its imported
+modules. Private blocks are omitted. A module containing only public Python
+helpers can be included with `pub import helpers::*;`; validators can then
+refer to functions in that generated module. An empty block causes a warning.
 
 ## Limitations
 

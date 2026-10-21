@@ -56,7 +56,7 @@
                     "patterns": [
                         {
                             "name": "comment.block.documentation.xenomorph",
-                            "match": "^\\s*\\*.*$"
+                            "match": "^\\s*\\*(?!/)(?:(?!\\*/).)*"
                         }
                     ]
                 }

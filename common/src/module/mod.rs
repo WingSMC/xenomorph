@@ -1005,7 +1005,7 @@ impl XenoRegistry {
                     || match d {
                         Declaration::Type { name, .. } => reachable
                             .contains(&(path.into(), name.text(module.borrow_source()).into())),
-                        Declaration::Custom { .. } => path == self.entry && d.public().is_some(),
+                        Declaration::Custom { .. } => d.public().is_some(),
                         Declaration::Import { .. } => true,
                     }
             })

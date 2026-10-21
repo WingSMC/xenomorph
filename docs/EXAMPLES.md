@@ -66,7 +66,7 @@ type SmallIntegers = set<u8> [1, 2, 3,];
 type EmptyInterfaces = set<InterfaceName> [];
 ```
 
-A prefill accepts literals rather than type identifiers. Collection concatenation, difference.
+A prefill accepts literals rather than type identifiers.
 
 <!-- TODO: set operations -->
 

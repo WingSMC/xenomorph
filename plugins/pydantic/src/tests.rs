@@ -175,6 +175,41 @@ fn default_extra_applies_unless_overridden() {
 }
 
 #[test]
+fn flattened_fields_import_their_qualified_dependencies() {
+    let (output, errors) = generate_with(
+        "type Extra = { enabled: bool }; type Result = &Base & Extra;",
+        |generator| {
+            let source = "pub type Tag = { name: string }; pub type Base = { tags: ?Tag[] };";
+            let tokens = Lexer::tokenize(source).unwrap();
+            let (ast, diagnostics) = Parser::parse(&tokens, source);
+            assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+            generator
+                .type_hierarchy
+                .register_module("test", vec!["other".into()]);
+            generator.type_hierarchy.register_module("other", vec![]);
+            for declaration in ast {
+                if let Declaration::Type {
+                    name, generics, ty, ..
+                } = declaration
+                {
+                    generator.type_hierarchy.insert_declaration(
+                        "other",
+                        name.text(source),
+                        TypeDeclarationInfo::from_ast(generics.as_deref(), &ty.0, source),
+                    );
+                }
+            }
+        },
+    );
+    assert!(errors.is_empty(), "{errors:#?}");
+    assert!(output.contains("from .other import Tag\n"), "{output}");
+    assert!(
+        output.contains("    tags: list[Tag] | None = None\n"),
+        "{output}"
+    );
+}
+
+#[test]
 fn enums_follow_the_xenomorph_wire_format() {
     let output = generate(
         "type Status = enum { Ready: 1, Failed: 2 }; type Shape = enum { Circle: f64, Square: ?u8 };",
