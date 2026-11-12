@@ -51,6 +51,54 @@ fn generate(source: &str) -> String {
     output
 }
 
+/// Exercise the actual generated source when Python 3.12+ and Pydantic v2
+/// are installed. Generator-only tests remain usable without Python.
+fn assert_python(output: &str, assertions: &str) {
+    assert_python_with_setup(output, "", assertions);
+}
+
+fn assert_python_with_setup(output: &str, setup: &str, assertions: &str) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let python = if cfg!(windows) { "py" } else { "python3" };
+    let available = Command::new(python)
+        .args([
+            "-c",
+            "import sys, pydantic; assert sys.version_info >= (3, 12); assert pydantic.__version__.startswith('2.')",
+        ])
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        eprintln!("Skipping Python runtime assertions: Python 3.12+ and Pydantic v2 are required.");
+        return;
+    }
+    let mut child = Command::new(python)
+        .args([
+            "-c",
+            &format!("{setup}\nimport sys; exec(compile(sys.stdin.read(), '<generated>', 'exec'))"),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let code = format!("{output}\n{assertions}\n");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(code.as_bytes())
+        .unwrap();
+    let result = child.wait_with_output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}\n{}\n{code}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr),
+    );
+}
+
 fn analyze(source: &str) -> Vec<XenoDiagnostic> {
     let tokens = Lexer::tokenize(source).unwrap();
     let (ast, _) = Parser::parse(&tokens, source);
@@ -340,6 +388,307 @@ fn pydantic_validators_and_deprecation() {
 }
 
 #[test]
+fn defaults_are_preserved_in_reusable_type_annotations() {
+    let output = generate(concat!(
+        "pub type DefaultFalse = bool @default(false); ",
+        "pub type DefaultTrue = bool @default(true); ",
+        "type Flags = { describe_images: DefaultFalse, some_flag: DefaultTrue };",
+    ));
+    assert!(
+        output.contains("type DefaultFalse = Annotated[bool, Field(default=False)]\n"),
+        "{output}"
+    );
+    assert!(
+        output.contains("type DefaultTrue = Annotated[bool, Field(default=True)]\n"),
+        "{output}"
+    );
+    assert_python(
+        &output,
+        r#"
+assert DefaultFalse.__value__.__metadata__[0].default is False
+assert DefaultTrue.__value__.__metadata__[0].default is True
+flags = Flags()
+assert flags.describe_images is False
+assert flags.some_flag is True
+assert Flags(describe_images=True, some_flag=False).model_dump() == {
+    'describe_images': True, 'some_flag': False,
+}
+"#,
+    );
+}
+
+#[test]
+fn explicit_aliases_accept_both_names_and_expose_a_serialized_property() {
+    let output = generate(concat!(
+        "pub type SignalType = set [\"input\", \"output\", \"other\", \"keyword\"] ",
+        "@default(\"input\") @pydantic::alias(\"type\"); ",
+        "type Classification = SignalType; ",
+        "pub type SignalInformation = { var_type: Classification } ",
+        "@pydantic::before_validator(\"..shared.pydantic_validators.signal_input\");",
+    ));
+    assert!(
+        provide_annotations()
+            .iter()
+            .any(|annotation| annotation.name == "alias"),
+        "@pydantic::alias must be registered"
+    );
+    assert!(
+        output.contains("AliasChoices(\"var_type\", \"type\")"),
+        "{output}"
+    );
+    assert!(
+        output.contains("@computed_field(alias=\"type\")\n    @property\n"),
+        "{output}"
+    );
+    assert!(!output.contains("model_serializer"), "{output}");
+    assert!(
+        output.contains("def type(self) -> Classification:"),
+        "{output}"
+    );
+    assert!(output.contains("return self.var_type"), "{output}");
+    assert!(output.contains("return signal_input(data)"), "{output}");
+}
+
+#[test]
+fn alias_runtime_preserves_source_fields_validators_and_serialization() {
+    let output = generate(concat!(
+        "type SignalType = set [\"input\", \"output\"] @default(\"input\") @pydantic::alias(\"type\"); ",
+        "type Classification = SignalType; ",
+        "type Signal = { var_type: Classification, other: ?string } ",
+        "@pydantic::extra(\"forbid\") @pydantic::alias_generator(\"camel\") ",
+        "@pydantic::before_validator(\"__main__.signal_input\");",
+    ));
+    assert_python_with_setup(
+        &output,
+        r#"
+def signal_input(data):
+    if isinstance(data, dict) and 'var_type' in data:
+        return {**data, 'type': data['var_type']}
+    return data
+"#,
+        r#"
+import json
+from pydantic import ValidationError
+
+assert Signal().var_type == Signal().type == 'input'
+assert 'type' in Signal.model_computed_fields
+assert 'type' not in Signal.model_fields
+assert Signal.model_json_schema(mode='serialization')['properties']['type']['readOnly'] is True
+for payload in ({'type': 'output'}, {'var_type': 'output'},
+                {'var_type': 'output', 'type': 'input'}):
+    original = dict(payload)
+    signal = Signal.model_validate(payload)
+    assert payload == original
+    assert signal.var_type == signal.type == 'output'
+    expected = {'var_type': 'output', 'type': 'output', 'other': None}
+    assert signal.model_dump() == expected
+    assert signal.model_dump(by_alias=True) == expected
+    assert json.loads(signal.model_dump_json()) == expected
+    assert Signal.model_validate(expected).model_dump() == expected
+    assert signal.model_dump(include={'var_type'}) == {'var_type': 'output'}
+    assert signal.model_dump(include={'type'}) == {'type': 'output'}
+    assert signal.model_dump(exclude={'var_type', 'type'}) == {'other': None}
+    assert signal.model_dump(exclude={'type'}) == {'var_type': 'output', 'other': None}
+    assert 'type' not in signal.__dict__
+    signal.var_type = 'input'
+    assert signal.type == 'input'
+    assert signal.model_dump()['type'] == 'input'
+    assert json.loads(signal.model_dump_json())['type'] == 'input'
+    try:
+        signal.type = 'output'
+    except AttributeError:
+        pass
+    else:
+        raise AssertionError('computed alias must be read-only')
+
+for payload in ({'type': 'invalid'}, {'var_type': 'invalid'}, {'unexpected': 1}):
+    try:
+        Signal.model_validate(payload)
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError(f'accepted invalid input: {payload!r}')
+"#,
+    );
+}
+
+#[test]
+fn computed_aliases_keep_explicit_names_and_serialize_current_values() {
+    let output = generate(concat!(
+        "type Timestamp = datetime @pydantic::alias(\"time_stamp\"); ",
+        "type Label = string @pydantic::alias(\"wire-name\"); ",
+        "type Event = { created: Timestamp, label: Label } @pydantic::alias_generator(\"camel\");",
+    ));
+    assert!(
+        output.contains("@computed_field(alias=\"time_stamp\")\n    @property\n"),
+        "{output}"
+    );
+    assert_python(
+        &output,
+        r#"
+import json
+from datetime import datetime
+
+timestamp = datetime(2026, 11, 12, 8, 30)
+event = Event(time_stamp=timestamp, **{'wire-name': 'example'})
+assert event.created == event.time_stamp == timestamp
+assert event.model_dump() == {
+    'created': timestamp, 'time_stamp': timestamp, 'label': 'example', 'wire-name': 'example',
+}
+assert event.model_dump(by_alias=True) == event.model_dump()
+serialized = json.loads(event.model_dump_json(by_alias=True))
+assert serialized['created'] == serialized['time_stamp'] == '2026-11-12T08:30:00'
+assert 'timeStamp' not in serialized
+event.created = datetime(2026, 11, 13, 9, 0)
+serialized = json.loads(event.model_dump_json())
+assert serialized['created'] == serialized['time_stamp'] == '2026-11-13T09:00:00'
+assert Event.model_validate_json(event.model_dump_json()).created == event.created
+assert event.model_dump(include={'time_stamp'}) == {'time_stamp': event.created}
+assert event.model_dump(exclude={'label'}) == {'created': event.created, 'time_stamp': event.created}
+"#,
+    );
+}
+
+#[test]
+fn nullable_and_structured_defaults_remain_in_alias_metadata() {
+    let output = generate(concat!(
+        "type MaybePort = ?u16 @default(null); ",
+        "type Host = ?string @minlen(1) @default(\"localhost\"); ",
+        "type Tags = string[] @default([\"a\"]); ",
+        "type Env = Dict<string, integer> @default({ x: 1 }); ",
+        "type Fallback = Host; ",
+        "type Model = { port: MaybePort, host: Fallback, tags: Tags, env: Env };",
+    ));
+    assert!(output.contains("type MaybePort = Annotated[Annotated[int, Field(ge=0, le=65535)] | None, Field(default=None)]\n"), "{output}");
+    assert!(output.contains("type Host = Annotated[Annotated[str, Field(min_length=1)] | None, Field(default=\"localhost\")]\n"), "{output}");
+    assert!(
+        output.contains("type Tags = Annotated[list[str], Field(default=[\"a\"])]\n"),
+        "{output}"
+    );
+    assert!(
+        output.contains("type Env = Annotated[dict[str, int], Field(default={\"x\": 1})]\n"),
+        "{output}"
+    );
+    assert_python(
+        &output,
+        r#"
+assert MaybePort.__value__.__metadata__[0].default is None
+assert Host.__value__.__metadata__[0].default == 'localhost'
+first, second = Model(), Model()
+assert first.port is None
+assert first.host == 'localhost'
+assert first.tags == ['a']
+assert first.env == {'x': 1}
+first.tags.append('b')
+first.env['x'] = 2
+assert second.tags == ['a']
+assert second.env == {'x': 1}
+assert Model(host=None).host is None
+"#,
+    );
+}
+
+#[test]
+fn alias_metadata_is_scoped_in_imports_and_flattened_intersections() {
+    let (output, errors) = generate_with(
+        "type Extra = { enabled: bool }; type Copy = &Base&Extra;",
+        |generator| {
+            generator
+                .type_hierarchy
+                .register_module("test", vec!["other".into()]);
+            generator
+                .type_hierarchy
+                .register_module("other", vec!["shared".into()]);
+            generator.type_hierarchy.register_module("shared", vec![]);
+            for (module, source) in [
+                (
+                    "shared",
+                    "type SignalType = string @default(\"input\") @pydantic::alias(\"type\");",
+                ),
+                (
+                    "other",
+                    "type Classification = ?SignalType; type Base = { var_type: Classification };",
+                ),
+            ] {
+                let tokens = Lexer::tokenize(source).unwrap();
+                let (ast, diagnostics) = Parser::parse(&tokens, source);
+                assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+                for declaration in ast {
+                    if let Declaration::Type {
+                        name, generics, ty, ..
+                    } = declaration
+                    {
+                        generator.type_hierarchy.insert_declaration(
+                            module,
+                            name.text(source),
+                            TypeDeclarationInfo::from_ast(generics.as_deref(), &ty.0, source),
+                        );
+                        generator.type_hierarchy.set_declaration_annotations(
+                            module,
+                            name.text(source),
+                            xenomorph_common::semantic::declaration_annotations(&ty.1, source),
+                        );
+                    }
+                }
+            }
+        },
+    );
+    assert!(errors.is_empty(), "{errors:#?}\n{output}");
+    assert!(
+        output.contains("from .other import Classification\n"),
+        "{output}"
+    );
+    assert!(
+        output.contains("default=\"input\", validation_alias=AliasChoices(\"var_type\", \"type\")"),
+        "{output}"
+    );
+    assert!(
+        output.contains("def type(self) -> Classification:"),
+        "{output}"
+    );
+}
+
+#[test]
+fn nearer_alias_decorators_override_inherited_names() {
+    let output = generate(concat!(
+        "type Base = string @pydantic::alias(\"first\"); ",
+        "type Override = Base @pydantic::alias(\"second\"); ",
+        "type Model = { field: ?Override };",
+    ));
+    assert!(
+        output.contains("AliasChoices(\"field\", \"second\")"),
+        "{output}"
+    );
+    assert!(!output.contains("def first("), "{output}");
+    assert_python(
+        &output,
+        r#"
+assert Model().second is None
+assert Model(second='x').field == 'x'
+assert Model(field='x').model_dump() == {'field': 'x', 'second': 'x'}
+"#,
+    );
+}
+
+#[test]
+fn conflicting_aliases_are_reported_instead_of_shadowing_fields() {
+    for source in [
+        "type T = string @pydantic::alias(\"other\"); type M = { field: T, other: string };",
+        "type T = string @pydantic::alias(\"duplicate\"); type M = { first: T, second: T };",
+        "type T = string @pydantic::alias(\"model_dump\"); type M = { field: T };",
+    ] {
+        let (_, errors) = generate_with(source, |_| {});
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.severity == XenoDiagSeverity::Err
+                    && error.message.contains("conflicts")),
+            "{errors:#?}"
+        );
+    }
+}
+
+#[test]
 fn default_annotation_sets_field_defaults() {
     let output = generate(concat!(
         "type Port = u16 @default(8080); ",
@@ -352,7 +701,7 @@ fn default_annotation_sets_field_defaults() {
         "type S = { port: Port, host: ?Host, ratio: Ratio, debug: Debug, other: MaybePort, server: ServerPort, name: Name, plain: ?string };",
     ));
     assert!(
-        output.contains("type Port = Annotated[int, Field(ge=0, le=65535)]\n"),
+        output.contains("type Port = Annotated[int, Field(ge=0, le=65535, default=8080)]\n"),
         "{output}"
     );
     assert!(output.contains("    port: Port = 8080\n"), "{output}");

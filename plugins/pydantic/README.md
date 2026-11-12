@@ -87,7 +87,8 @@ A field is optional if its type is `?T`, `null`, a union with an optional or
 
 `@default(value)` on an alias sets the default of every struct field of that
 type, also through optional types and alias chains. It replaces the `None`
-default of optional fields. The alias itself does not get the default:
+default of optional fields. The alias carries the default in its `Annotated`
+metadata:
 
 ```xen
 type Port = u16 @default(8080);
@@ -96,10 +97,21 @@ type Server = { port: Port, host: Host };
 ```
 
 ```python
+type Port = Annotated[int, Field(ge=0, le=65535, default=8080)]
+type Host = Annotated[str | None, Field(default="localhost")]
+
+
 class Server(BaseModel):
     port: Port = 8080
     host: Host = "localhost"
 ```
+
+The generator also keeps defaults on model fields: Pydantic does not reliably
+propagate field metadata through PEP 695 named aliases. Some Pydantic versions
+warn about `default` metadata inside named aliases; the field-level default
+ensures that generated models still behave correctly. For nullable aliases,
+defaults wrap the whole union while validation constraints stay on the
+non-null member.
 
 Lists and dicts render as Python literals; Pydantic copies them per instance.
 A struct default on a model type becomes a factory:
@@ -129,6 +141,38 @@ original name is kept as the JSON alias:
 The plugin also renames fields that shadow `BaseModel` attributes, such as
 `json` or `copy`. A model with a renamed field gets `populate_by_name=True`.
 Serialize with `model_dump(by_alias=True)` to write the original names.
+
+### Explicit compatibility aliases
+
+`@pydantic::alias("name")` on a type adds an alternative name to every model
+field of that type, including through optional types, alias chains, and
+imported or flattened fields:
+
+```xen
+pub type SignalType = set ["input", "output", "other", "keyword"]
+    @default("input")
+    @pydantic::alias("type");
+pub type SignalInformation = { var_type: SignalType };
+```
+
+The generated model keeps `var_type` as its stored field and accepts either
+`var_type` or `type` as input (`AliasChoices("var_type", "type")`). If both
+are supplied, `var_type` wins. A read-only `.type` property returns the current
+`.var_type` value. The property is decorated with `@computed_field` above
+`@property`: only `var_type` is stored, and every access or serialization reads
+its current value. There is no cached copy to synchronize.
+
+`model_dump()` and `model_dump_json()` emit both names with the same value,
+also with `by_alias=True`. The serialization JSON Schema marks `type` as
+read-only. Existing model validators still run. Computed fields follow
+Pydantic's native include/exclude behavior: use
+`exclude={"var_type", "type"}` to omit both names, or exclude either separately.
+
+The closest alias decorator in a type's alias chain wins. An alias that is
+not a Python identifier, or is a Python keyword, still works in input and
+output but does not get a dot-access property. Aliases that collide with
+another field, another compatibility alias, or reserved model attributes
+produce a generation error instead of silently replacing a field.
 
 ### Builtin types
 

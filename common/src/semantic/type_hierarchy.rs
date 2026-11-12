@@ -1308,6 +1308,37 @@ impl TypeHierarchy {
         )
     }
 
+    /// Resolves a model's shape without expanding non-struct field aliases.
+    /// Target generators can then retain the aliases' validation and field
+    /// metadata. Semantic evaluation continues to use transparent aliases.
+    pub fn struct_shape_preserving_aliases(
+        &self,
+        candidate: &OwnedType,
+    ) -> Result<Option<StructShape>, TypeEvaluationError> {
+        let mut hierarchy = self.clone();
+        for definition in self
+            .types
+            .values()
+            .filter(|definition| definition.transparent_alias)
+        {
+            let ty = OwnedType::Qualified {
+                module_path: definition.module_path.clone(),
+                name: definition.name.clone(),
+                arguments: vec![],
+            };
+            if matches!(self.struct_shape(&ty), Ok(None)) {
+                let key = TypeKey {
+                    module_path: definition.module_path.clone(),
+                    name: definition.name.clone(),
+                };
+                if let Some(definition) = Arc::make_mut(&mut hierarchy.types).get_mut(&key) {
+                    Arc::make_mut(definition).transparent_alias = false;
+                }
+            }
+        }
+        hierarchy.struct_shape(candidate)
+    }
+
     fn resolve_literal_sum(
         &self,
         candidate: &OwnedType,
