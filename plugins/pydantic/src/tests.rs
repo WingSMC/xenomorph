@@ -24,6 +24,11 @@ fn generator_for(source: &str) -> (PydanticGenerator, Vec<Declaration>) {
                 name.text(source),
                 TypeDeclarationInfo::from_ast(generics.as_deref(), &ty.0, source),
             );
+            generator.type_hierarchy.set_declaration_annotations(
+                "test",
+                name.text(source),
+                xenomorph_common::semantic::declaration_annotations(&ty.1, source),
+            );
         }
     }
     (generator, ast)
@@ -56,6 +61,27 @@ fn analyze(source: &str) -> Vec<XenoDiagnostic> {
         analyzer.on_before_decl(declaration, &mut errors);
     }
     errors
+}
+
+#[test]
+fn dict_members_allow_extra_keys_and_usetype_overrides() {
+    let output = generate(concat!(
+        "type Base = { id: string }; ",
+        "type Open = &Base&Dict<string, i32>; ",
+        "type Picked = &Partial<Base>&Dict<string, bool>; ",
+        "type Raw = &Base&Dict<string, any> @pydantic::usetype(\"dict[str, object]\");",
+    ));
+    assert!(output.contains("class Open(BaseModel):\n    model_config = ConfigDict(extra=\"allow\")\n\n    id: str\n"), "{output}");
+    assert!(
+        output
+            .contains("class Picked(BaseModel):\n    model_config = ConfigDict(extra=\"allow\")\n"),
+        "{output}"
+    );
+    assert!(!output.contains("__pydantic_extra__"), "{output}");
+    assert!(
+        output.contains("type Raw = dict[str, object]\n"),
+        "{output}"
+    );
 }
 
 #[test]
@@ -311,6 +337,72 @@ fn pydantic_validators_and_deprecation() {
     assert!(output.contains(
         "    @model_validator(mode=\"before\")\n    @classmethod\n    def _xeno_before_validator_0(cls, data):\n        return prepare(data)\n"
     ), "{output}");
+}
+
+#[test]
+fn default_annotation_sets_field_defaults() {
+    let output = generate(concat!(
+        "type Port = u16 @default(8080); ",
+        "type Host = string @default(\"localhost\"); ",
+        "type Ratio = f64 @default(0.5); ",
+        "type Debug = bool @default(false); ",
+        "type MaybePort = ?u16 @default(null); ",
+        "type ServerPort = Port; ",
+        "type Name = string @default(\"x\") @deprecated(\"Use Host.\"); ",
+        "type S = { port: Port, host: ?Host, ratio: Ratio, debug: Debug, other: MaybePort, server: ServerPort, name: Name, plain: ?string };",
+    ));
+    assert!(
+        output.contains("type Port = Annotated[int, Field(ge=0, le=65535)]\n"),
+        "{output}"
+    );
+    assert!(output.contains("    port: Port = 8080\n"), "{output}");
+    assert!(
+        output.contains("    host: Host | None = \"localhost\"\n"),
+        "{output}"
+    );
+    assert!(output.contains("    ratio: Ratio = 0.5\n"), "{output}");
+    assert!(output.contains("    debug: Debug = False\n"), "{output}");
+    assert!(output.contains("    other: MaybePort = None\n"), "{output}");
+    assert!(
+        output.contains("    server: ServerPort = 8080\n"),
+        "{output}"
+    );
+    assert!(
+        output.contains("    name: Name = Field(default=\"x\", deprecated=\"Use Host.\")\n"),
+        "{output}"
+    );
+    assert!(
+        output.contains("    plain: str | None = None\n"),
+        "{output}"
+    );
+}
+
+#[test]
+fn structured_defaults_render_lists_dicts_and_model_factories() {
+    let output = generate(concat!(
+        "type Tags = string[] @default([\"a\", \"b\"]); ",
+        "type Empty = string[] @default([]); ",
+        "type Env = Dict<string, i32> @default({ \"x\": 1 }); ",
+        "type Options = { debug: ?bool } @default({}); ",
+        "type Named = { name: ?string } @default({ name: \"x\" }); ",
+        "type S = { tags: Tags, empty: Empty, env: Env, options: Options, named: ?Named };",
+    ));
+    assert!(
+        output.contains("    tags: Tags = [\"a\", \"b\"]\n"),
+        "{output}"
+    );
+    assert!(output.contains("    empty: Empty = []\n"), "{output}");
+    assert!(output.contains("    env: Env = {\"x\": 1}\n"), "{output}");
+    assert!(
+        output.contains("    options: Options = Field(default_factory=Options)\n"),
+        "{output}"
+    );
+    assert!(
+        output.contains(
+            "    named: Named | None = Field(default_factory=lambda: Named.model_validate({\"name\": \"x\"}))\n"
+        ),
+        "{output}"
+    );
 }
 
 #[test]

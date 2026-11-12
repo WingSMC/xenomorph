@@ -7,8 +7,8 @@ use num_bigint::BigInt;
 use serde::{Deserialize, Serialize};
 
 use crate::parser::{
-    integer_fits, parse_fixed_integer_representation, FloatRepresentation, FloatSize,
-    IntegerRepresentation, IntegerSize, Literal, SimpleType, Type,
+    integer_fits, parse_fixed_integer_representation, Annotation, Expr, FloatRepresentation,
+    FloatSize, IntegerRepresentation, IntegerSize, Literal, SimpleType, Type,
 };
 use crate::utils::extract_documentation;
 
@@ -58,11 +58,100 @@ impl TypeDeclarationInfo {
     }
 }
 
+/// A declaration annotation with its type arguments; other arguments are omitted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeclarationAnnotation {
+    pub name: String,
+    pub arguments: Vec<OwnedType>,
+}
+
+pub fn declaration_annotations(
+    annotations: &[Annotation],
+    source: &str,
+) -> Vec<DeclarationAnnotation> {
+    annotations
+        .iter()
+        .map(|annotation| DeclarationAnnotation {
+            name: annotation.ident.text(source).to_string(),
+            arguments: annotation
+                .params
+                .iter()
+                .filter_map(|param| match param {
+                    Expr::Type(ty) => Some(type_to_owned_type(ty, source)),
+                    _ => None,
+                })
+                .collect(),
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OwnedField {
     pub name: String,
     pub ty: OwnedType,
     pub documentation: Option<String>,
+}
+
+/// A struct-shaped type: its fixed fields plus the `Dict<K, V>` members that
+/// type any additional keys.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StructShape {
+    pub fields: Vec<OwnedField>,
+    pub dicts: Vec<OwnedType>,
+}
+
+impl StructShape {
+    fn into_type(mut self) -> OwnedType {
+        if self.fields.is_empty() && !self.dicts.is_empty() {
+            return match self.dicts.len() {
+                1 => self.dicts.pop().expect("one dict"),
+                _ => OwnedType::Intersection(self.dicts),
+            };
+        }
+        let fields = OwnedType::Struct(self.fields);
+        match self.dicts.is_empty() {
+            true => fields,
+            false => OwnedType::Intersection(std::iter::once(fields).chain(self.dicts).collect()),
+        }
+    }
+
+    fn merge(&mut self, other: StructShape) {
+        merge_struct_fields(&mut self.fields, other.fields);
+        for dict in other.dicts {
+            if !self.dicts.contains(&dict) {
+                self.dicts.push(dict);
+            }
+        }
+    }
+
+    /// The type of a key not among the fixed fields, when a `Dict` allows it.
+    pub fn extra_value_type(&self) -> Option<OwnedType> {
+        let mut values = self
+            .dicts
+            .iter()
+            .filter_map(|dict| dict_arguments(dict).map(|(_, value)| value.clone()))
+            .collect::<Vec<_>>();
+        match values.len() {
+            0 => None,
+            1 => values.pop(),
+            _ => Some(OwnedType::Intersection(values)),
+        }
+    }
+}
+
+pub fn dict_arguments(ty: &OwnedType) -> Option<(&OwnedType, &OwnedType)> {
+    match ty {
+        OwnedType::Named { name, arguments }
+        | OwnedType::Qualified {
+            module_path: None,
+            name,
+            arguments,
+        } if name == "Dict" => match arguments.as_slice() {
+            [key, value] => Some((key, value)),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -295,6 +384,7 @@ impl OwnedType {
                 });
                 format!("set{element_type}{values}")
             }
+            Self::Struct(fields) if fields.is_empty() => "{}".to_string(),
             Self::Struct(fields) => format!(
                 "{{ {} }}",
                 fields
@@ -341,6 +431,20 @@ pub struct TypeDefinition {
     pub documentation: Option<String>,
     /// Source-level simple aliases are transparent to target generators.
     pub transparent_alias: bool,
+    #[serde(default)]
+    pub annotations: Vec<DeclarationAnnotation>,
+}
+
+impl TypeDefinition {
+    /// The argument of the declaration's `@{namespace}::usetype(...)`.
+    pub fn use_type(&self, namespace: &str) -> Option<&OwnedType> {
+        let name = format!("{namespace}::usetype");
+        self.annotations
+            .iter()
+            .find(|annotation| annotation.name == name)?
+            .arguments
+            .first()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -603,7 +707,7 @@ impl TypeHierarchy {
                 .iter()
                 .filter_map(|parent| match parent {
                     OwnedConstraint::Type(name) => Some(OwnedType::named(name)),
-                    OwnedConstraint::Trait(_) => None,
+                    OwnedConstraint::Trait(_) | OwnedConstraint::Target => None,
                 })
                 .collect();
             let traits = semantic_type
@@ -611,7 +715,7 @@ impl TypeHierarchy {
                 .iter()
                 .filter_map(|parent| match parent {
                     OwnedConstraint::Trait(name) => Some(name.clone()),
-                    OwnedConstraint::Type(_) => None,
+                    OwnedConstraint::Type(_) | OwnedConstraint::Target => None,
                 })
                 .collect();
             let generic_params = semantic_type
@@ -639,6 +743,7 @@ impl TypeHierarchy {
                 traits,
                 documentation: semantic_type.documentation.clone(),
                 transparent_alias: false,
+                annotations: Vec::new(),
             });
             if self
                 .types
@@ -683,8 +788,24 @@ impl TypeHierarchy {
                 traits: Vec::new(),
                 documentation: None,
                 transparent_alias: declaration.transparent_alias,
+                annotations: Vec::new(),
             }),
         );
+    }
+
+    pub fn set_declaration_annotations(
+        &mut self,
+        module_path: &str,
+        name: &str,
+        annotations: Vec<DeclarationAnnotation>,
+    ) {
+        let key = TypeKey {
+            module_path: Some(module_path.to_string()),
+            name: name.to_string(),
+        };
+        if let Some(definition) = Arc::make_mut(&mut self.types).get_mut(&key) {
+            Arc::make_mut(definition).annotations = annotations;
+        }
     }
 
     pub fn remove_module(&mut self, module: &str) {
@@ -983,69 +1104,154 @@ impl TypeHierarchy {
         let result = match (name, arguments) {
             ("Required", [inner]) => required_type(inner.clone()),
             ("Keyof", [target]) => {
-                let Some(fields) = self.resolve_struct_fields(target, context, resolving)? else {
+                let Some(variants) = self.resolve_struct_variants(target, context, resolving)?
+                else {
                     return Ok(None);
                 };
-                OwnedType::Sum(
-                    fields
-                        .into_iter()
-                        .map(|field| OwnedType::Literal(OwnedLiteral::String(field.name)))
-                        .collect(),
-                )
+                let common = common_struct_shape(variants);
+                let mut keys = common
+                    .fields
+                    .into_iter()
+                    .map(|field| OwnedType::Literal(OwnedLiteral::String(field.name)))
+                    .collect::<Vec<_>>();
+                for (key, _) in common.dicts.iter().filter_map(dict_arguments) {
+                    if !keys.contains(key) {
+                        keys.push(key.clone());
+                    }
+                }
+                OwnedType::Sum(keys)
             }
             ("Pick", [target, keys]) => {
-                let Some(fields) = self.resolve_struct_fields(target, context, resolving)? else {
+                let Some(variants) = self.resolve_struct_variants(target, context, resolving)?
+                else {
                     return Ok(None);
                 };
                 let Some(keys) = self.resolve_string_literal_sum(keys, context, resolving)? else {
                     return Ok(None);
                 };
-                validate_struct_keys("Pick", target, &fields, &keys)?;
+                let common = common_struct_shape(variants);
+                let extra = common.extra_value_type();
+                if extra.is_none() {
+                    validate_struct_keys("Pick", target, &common.fields, &keys)?;
+                }
                 OwnedType::Struct(
-                    fields
-                        .into_iter()
-                        .filter(|field| keys.iter().any(|key| key == &field.name))
+                    keys.iter()
+                        .filter_map(|key| {
+                            common
+                                .fields
+                                .iter()
+                                .find(|field| &field.name == key)
+                                .cloned()
+                                .or_else(|| {
+                                    Some(OwnedField {
+                                        name: key.clone(),
+                                        ty: extra.clone()?,
+                                        documentation: None,
+                                    })
+                                })
+                        })
                         .collect(),
                 )
             }
             ("Omit", [target, keys]) => {
-                let Some(fields) = self.resolve_struct_fields(target, context, resolving)? else {
+                let Some(variants) = self.resolve_struct_variants(target, context, resolving)?
+                else {
                     return Ok(None);
                 };
                 let Some(keys) = self.resolve_string_literal_sum(keys, context, resolving)? else {
                     return Ok(None);
                 };
-                validate_struct_keys("Omit", target, &fields, &keys)?;
-                OwnedType::Struct(
-                    fields
-                        .into_iter()
-                        .filter(|field| !keys.iter().any(|key| key == &field.name))
-                        .collect(),
-                )
+                if variants.iter().all(|variant| variant.dicts.is_empty()) {
+                    let all_fields = variants
+                        .iter()
+                        .flat_map(|variant| variant.fields.iter().cloned())
+                        .collect::<Vec<_>>();
+                    validate_struct_keys("Omit", target, &all_fields, &keys)?;
+                }
+                let mut common = common_struct_shape(variants);
+                common
+                    .fields
+                    .retain(|field| !keys.iter().any(|key| key == &field.name));
+                common.into_type()
             }
             ("Partial", [target]) => {
-                let Some(mut fields) = self.resolve_struct_fields(target, context, resolving)?
+                let Some(variants) = self.resolve_struct_variants(target, context, resolving)?
                 else {
                     return Ok(None);
                 };
-                for field in &mut fields {
-                    field.ty = optional_type(field.ty.clone());
-                }
-                OwnedType::Struct(fields)
+                map_struct_variants(variants, optional_type)
             }
             ("Complete", [target]) => {
-                let Some(mut fields) = self.resolve_struct_fields(target, context, resolving)?
+                let Some(variants) = self.resolve_struct_variants(target, context, resolving)?
                 else {
                     return Ok(None);
                 };
-                for field in &mut fields {
-                    field.ty = required_type(field.ty.clone());
-                }
-                OwnedType::Struct(fields)
+                map_struct_variants(variants, required_type)
             }
             _ => return Ok(None),
         };
         Ok(Some(result))
+    }
+
+    /// The struct alternatives of a struct-shaped type: one for a struct, a
+    /// `Dict` or an intersection of those, several for a sum of struct-shaped
+    /// members.
+    fn resolve_struct_variants(
+        &self,
+        candidate: &OwnedType,
+        context: Option<&str>,
+        resolving: &mut HashSet<String>,
+    ) -> Result<Option<Vec<StructShape>>, TypeEvaluationError> {
+        let evaluated = self.evaluate_type_inner(candidate, context, resolving)?;
+        let body = match evaluated {
+            OwnedType::Struct(_) | OwnedType::Intersection(_) | OwnedType::Sum(_) => evaluated,
+            dict if dict_arguments(&dict).is_some() => dict,
+            other => match self.resolve_declaration_body(&other, context, resolving, Some)? {
+                Some(body) => body,
+                None => return Ok(None),
+            },
+        };
+        match body {
+            OwnedType::Struct(fields) => Ok(Some(vec![StructShape {
+                fields,
+                dicts: Vec::new(),
+            }])),
+            dict if dict_arguments(&dict).is_some() => Ok(Some(vec![StructShape {
+                fields: Vec::new(),
+                dicts: vec![dict],
+            }])),
+            OwnedType::Intersection(items) => {
+                let mut merged = vec![StructShape::default()];
+                for item in &items {
+                    let Some(variants) = self.resolve_struct_variants(item, context, resolving)?
+                    else {
+                        return Ok(None);
+                    };
+                    merged = merged
+                        .iter()
+                        .flat_map(|left| {
+                            variants.iter().map(move |right| {
+                                let mut shape = left.clone();
+                                shape.merge(right.clone());
+                                shape
+                            })
+                        })
+                        .collect();
+                }
+                Ok(Some(merged))
+            }
+            OwnedType::Sum(items) if !items.is_empty() => {
+                let mut variants = Vec::new();
+                for item in &items {
+                    let Some(item) = self.resolve_struct_variants(item, context, resolving)? else {
+                        return Ok(None);
+                    };
+                    variants.extend(item);
+                }
+                Ok(Some(variants))
+            }
+            _ => Ok(None),
+        }
     }
 
     fn resolve_struct_fields(
@@ -1054,39 +1260,48 @@ impl TypeHierarchy {
         context: Option<&str>,
         resolving: &mut HashSet<String>,
     ) -> Result<Option<Vec<OwnedField>>, TypeEvaluationError> {
-        let evaluated = self.evaluate_type_inner(candidate, context, resolving)?;
-        let body = match evaluated {
-            OwnedType::Struct(_) | OwnedType::Intersection(_) => evaluated,
-            other => match self.resolve_declaration_body(&other, context, resolving, Some)? {
-                Some(body) => body,
-                None => return Ok(None),
-            },
-        };
-        match body {
-            OwnedType::Struct(fields) => Ok(Some(fields)),
-            OwnedType::Intersection(items) => {
-                let mut merged: Vec<OwnedField> = Vec::new();
-                for item in &items {
-                    let Some(fields) = self.resolve_struct_fields(item, context, resolving)? else {
-                        return Ok(None);
-                    };
-                    merge_struct_fields(&mut merged, fields);
-                }
-                Ok(Some(merged))
-            }
-            _ => Ok(None),
-        }
+        Ok(self
+            .resolve_struct_shape(candidate, context, resolving)?
+            .filter(|shape| shape.dicts.is_empty())
+            .map(|shape| shape.fields))
+    }
+
+    fn resolve_struct_shape(
+        &self,
+        candidate: &OwnedType,
+        context: Option<&str>,
+        resolving: &mut HashSet<String>,
+    ) -> Result<Option<StructShape>, TypeEvaluationError> {
+        Ok(self
+            .resolve_struct_variants(candidate, context, resolving)?
+            .and_then(|mut variants| match variants.len() {
+                1 => variants.pop(),
+                _ => None,
+            }))
     }
 
     /// Resolves the fields of a struct-shaped type: a struct, a declaration or
     /// utility producing one, or an intersection whose members are all
     /// struct-shaped (fields are merged in member order). `None` when the type
-    /// is not struct-shaped.
+    /// is not struct-shaped or allows extra `Dict` keys.
     pub fn struct_fields(
         &self,
         candidate: &OwnedType,
     ) -> Result<Option<Vec<OwnedField>>, TypeEvaluationError> {
         self.resolve_struct_fields(
+            candidate,
+            self.current_module.as_deref(),
+            &mut HashSet::new(),
+        )
+    }
+
+    /// Like [`Self::struct_fields`], but `Dict` members are kept as the
+    /// shape's extra keys instead of making it non-struct-shaped.
+    pub fn struct_shape(
+        &self,
+        candidate: &OwnedType,
+    ) -> Result<Option<StructShape>, TypeEvaluationError> {
+        self.resolve_struct_shape(
             candidate,
             self.current_module.as_deref(),
             &mut HashSet::new(),
@@ -1103,6 +1318,12 @@ impl TypeHierarchy {
         if matches!(evaluated, OwnedType::Literal(_)) {
             return Ok(Some(vec![evaluated]));
         }
+        if let OwnedType::Set(set) = &evaluated {
+            return Ok(set
+                .values
+                .as_ref()
+                .map(|values| values.iter().cloned().map(OwnedType::Literal).collect()));
+        }
         if let OwnedType::Sum(items) = evaluated {
             return Ok(items
                 .iter()
@@ -1111,6 +1332,10 @@ impl TypeHierarchy {
         }
         self.resolve_declaration_body(&evaluated, context, resolving, |body| match body {
             literal @ OwnedType::Literal(_) => Some(vec![literal]),
+            OwnedType::Set(OwnedSet {
+                values: Some(values),
+                ..
+            }) => Some(values.into_iter().map(OwnedType::Literal).collect()),
             OwnedType::Sum(items)
                 if items
                     .iter()
@@ -1457,6 +1682,10 @@ impl TypeHierarchy {
                 context,
                 visiting,
             ),
+            OwnedType::Set(set) if set.values.is_some() => {
+                let sum = literal_set_sum(set).expect("prefilled set");
+                self.semantic_domain(&sum, context, visiting)
+            }
             OwnedType::Tuple(_) | OwnedType::Set(_) | OwnedType::Array(_) => {
                 self.semantic_domain(&OwnedType::named("array"), context, visiting)
             }
@@ -1527,6 +1756,19 @@ impl TypeHierarchy {
         }
         if key.module_path.is_none() && key.name == "any" {
             return SemanticDomain::Unknown;
+        }
+        if key.module_path.is_none() && super::is_type_utility(&key.name) {
+            return match self.evaluate_named_type(
+                &key.name,
+                arguments,
+                argument_context,
+                Some(None),
+                &mut HashSet::new(),
+            ) {
+                Ok(OwnedType::Named { name, .. }) if name == key.name => SemanticDomain::Unknown,
+                Ok(evaluated) => self.semantic_domain(&evaluated, argument_context, visiting),
+                Err(_) => SemanticDomain::Unknown,
+            };
         }
         let Some(definition) = self.types.get(key) else {
             return SemanticDomain::Unknown;
@@ -1612,6 +1854,10 @@ impl TypeHierarchy {
                     }),
                     _ => false,
                 };
+            }
+            OwnedType::Set(set) if set.values.is_some() => {
+                let sum = literal_set_sum(set).expect("prefilled set");
+                return self.type_implements_trait_inner(&sum, context, required, visited);
             }
             OwnedType::Tuple(_) | OwnedType::Set(_) => {
                 return self.type_implements_trait_inner(
@@ -1741,6 +1987,7 @@ impl TypeHierarchy {
             .collect::<HashMap<_, _>>();
         if definition.body.as_ref().is_some_and(|body| {
             let inspect_body = matches!(body, OwnedType::Sum(_) | OwnedType::Intersection(_))
+                || is_literal_set(body)
                 || matches!(
                     required.kind,
                     OwnedTraitKind::Struct | OwnedTraitKind::Sum(_)
@@ -1798,6 +2045,10 @@ impl TypeHierarchy {
             .evaluate_type(candidate)
             .unwrap_or_else(|_| candidate.clone());
         match &candidate {
+            OwnedType::Set(set) if set.values.is_some() => {
+                let sum = literal_set_sum(set).expect("prefilled set");
+                return self.is_assignable_to(&sum, target);
+            }
             OwnedType::Optional(inner) => {
                 return self.is_assignable_to(inner, target)
                     && self.is_assignable_to(&OwnedType::named("null"), target);
@@ -1808,32 +2059,25 @@ impl TypeHierarchy {
             }
             _ => {}
         }
-        let target = self
-            .evaluate_type(target)
-            .unwrap_or_else(|_| target.clone());
-        match target {
+        let is_value = matches!(
+            &candidate,
+            OwnedType::Literal(_) | OwnedType::Tuple(_) | OwnedType::Struct(_)
+        ) || is_null(&candidate);
+        // A value is typed through its target's aliases, e.g. `8080` is a valid `Port`.
+        let target = if is_value {
+            self.resolve_for_target(target)
+        } else {
+            self.evaluate_type(target)
+                .unwrap_or_else(|_| target.clone())
+        };
+        match &target {
+            OwnedType::Set(set) if set.values.is_some() => {
+                let sum = literal_set_sum(set).expect("prefilled set");
+                self.is_assignable_to(&candidate, &sum)
+            }
             OwnedType::Optional(inner) => {
-                self.is_assignable_to(&candidate, &inner)
+                self.is_assignable_to(&candidate, inner)
                     || self.is_assignable_to(&candidate, &OwnedType::named("null"))
-            }
-            OwnedType::Named { name, .. } => {
-                self.integer_literal_fits_named_type(
-                    &candidate,
-                    &name,
-                    self.current_module.as_deref(),
-                ) || self.is_type_compatible(&candidate, &name)
-            }
-            OwnedType::Qualified {
-                module_path, name, ..
-            } => {
-                let target = TypeKey { module_path, name };
-                self.integer_literal_fits_type(&candidate, &target)
-                    || self.is_type_compatible_inner(
-                        &candidate,
-                        self.current_module.as_deref(),
-                        &target,
-                        &mut HashSet::new(),
-                    )
             }
             OwnedType::Generic {
                 constraint,
@@ -1843,14 +2087,121 @@ impl TypeHierarchy {
                 self.satisfies_constraint(&candidate, constraint, constraint_scope.as_deref())
             }),
             OwnedType::Literal(target) => matches!(&candidate,
-                OwnedType::Literal(value) if value.same_constant_value(&target)),
+                OwnedType::Literal(value) if value.same_constant_value(target)),
             OwnedType::Sum(targets) => targets
                 .iter()
                 .any(|target| self.is_assignable_to(&candidate, target)),
+            _ if matches!(candidate, OwnedType::Tuple(_) | OwnedType::Struct(_)) => {
+                self.is_structure_assignable_to(&candidate, &target)
+            }
             OwnedType::Intersection(targets) => targets
                 .iter()
                 .all(|target| self.is_assignable_to(&candidate, target)),
-            target => candidate == target,
+            OwnedType::Named { name, .. } => {
+                self.integer_literal_fits_named_type(
+                    &candidate,
+                    name,
+                    self.current_module.as_deref(),
+                ) || self.is_type_compatible(&candidate, name)
+                    || self.number_literal_fits_unbounded(&candidate, &target)
+            }
+            OwnedType::Qualified { .. } => {
+                let OwnedType::Qualified {
+                    module_path,
+                    name,
+                    arguments,
+                } = target
+                else {
+                    unreachable!()
+                };
+                let key = TypeKey { module_path, name };
+                if self.integer_literal_fits_type(&candidate, &key)
+                    || self.is_type_compatible_inner(
+                        &candidate,
+                        self.current_module.as_deref(),
+                        &key,
+                        &mut HashSet::new(),
+                    )
+                {
+                    return true;
+                }
+                let target = OwnedType::Qualified {
+                    module_path: key.module_path,
+                    name: key.name,
+                    arguments,
+                };
+                self.number_literal_fits_unbounded(&candidate, &target)
+            }
+            target => &candidate == target,
+        }
+    }
+
+    /// Uncast number literals are exact constants, so they also fit any
+    /// unbounded integer, floating-point or decimal type, e.g. `f64 @min(0)`.
+    fn number_literal_fits_unbounded(&self, candidate: &OwnedType, target: &OwnedType) -> bool {
+        let wider: &[&str] = match candidate {
+            OwnedType::Literal(OwnedLiteral::Integer { cast: None, .. }) => {
+                &["bigint", "f32", "decimal"]
+            }
+            OwnedType::Literal(OwnedLiteral::Float { cast: None, .. }) => &["f32", "decimal"],
+            _ => return false,
+        };
+        wider
+            .iter()
+            .any(|wider| self.is_assignable_to(&OwnedType::named(*wider), target))
+    }
+
+    /// List and struct values: `[]` fits any list, `{}` fits a `Dict` or a
+    /// struct whose fields all accept `null`.
+    fn is_structure_assignable_to(&self, candidate: &OwnedType, target: &OwnedType) -> bool {
+        match (candidate, target) {
+            (OwnedType::Tuple(items), OwnedType::Array(element)) => items
+                .iter()
+                .all(|item| self.is_assignable_to(item, element)),
+            (OwnedType::Tuple(items), OwnedType::Tuple(targets)) => {
+                items.len() == targets.len()
+                    && items
+                        .iter()
+                        .zip(targets)
+                        .all(|(item, target)| self.is_assignable_to(item, target))
+            }
+            (OwnedType::Tuple(items), OwnedType::Set(set)) => {
+                set.element_type.as_deref().is_some_and(|element| {
+                    items
+                        .iter()
+                        .all(|item| self.is_assignable_to(item, element))
+                })
+            }
+            (OwnedType::Tuple(_), OwnedType::Intersection(targets)) => targets
+                .iter()
+                .all(|target| self.is_assignable_to(candidate, target)),
+            (OwnedType::Struct(fields), target) => {
+                let Ok(Some(shape)) = self.struct_shape(target) else {
+                    return false;
+                };
+                let null = OwnedType::named("null");
+                fields.iter().all(|field| {
+                    match shape.fields.iter().find(|known| known.name == field.name) {
+                        Some(known) => self.is_assignable_to(&field.ty, &known.ty),
+                        None => {
+                            !shape.dicts.is_empty() && {
+                                let key =
+                                    OwnedType::Literal(OwnedLiteral::String(field.name.clone()));
+                                shape.dicts.iter().all(|dict| {
+                                    dict_arguments(dict).is_some_and(|(key_type, value)| {
+                                        self.is_assignable_to(&key, key_type)
+                                            && self.is_assignable_to(&field.ty, value)
+                                    })
+                                })
+                            }
+                        }
+                    }
+                }) && shape.fields.iter().all(|known| {
+                    fields.iter().any(|field| field.name == known.name)
+                        || self.is_assignable_to(&null, &known.ty)
+                })
+            }
+            _ => false,
         }
     }
 
@@ -1949,6 +2300,10 @@ impl TypeHierarchy {
                     visited,
                 );
             }
+            OwnedType::Set(set) if set.values.is_some() => {
+                let sum = literal_set_sum(set).expect("prefilled set");
+                return self.is_type_compatible_inner(&sum, context, target, visited);
+            }
             OwnedType::Tuple(_) | OwnedType::Set(_) => {
                 return self.is_type_compatible_inner(
                     &OwnedType::named("array"),
@@ -2046,7 +2401,9 @@ impl TypeHierarchy {
             .map(|(parameter, argument)| (parameter.name.as_str(), argument))
             .collect::<HashMap<_, _>>();
         if definition.body.as_ref().is_some_and(|body| {
-            if !matches!(body, OwnedType::Sum(_) | OwnedType::Intersection(_)) {
+            if !matches!(body, OwnedType::Sum(_) | OwnedType::Intersection(_))
+                && !is_literal_set(body)
+            {
                 return false;
             }
             let body = substitute_owned_type(body, &substitutions);
@@ -2267,6 +2624,21 @@ impl TypeHierarchy {
     }
 }
 
+/// A prefilled set is a value type: one of its literals, like a literal sum.
+fn literal_set_sum(set: &OwnedSet) -> Option<OwnedType> {
+    set.values
+        .as_ref()
+        .map(|values| OwnedType::Sum(values.iter().cloned().map(OwnedType::Literal).collect()))
+}
+
+fn is_literal_set(candidate: &OwnedType) -> bool {
+    matches!(candidate, OwnedType::Set(set) if set.values.is_some())
+}
+
+fn is_null(candidate: &OwnedType) -> bool {
+    matches!(candidate, OwnedType::Named { name, arguments } if name == "null" && arguments.is_empty())
+}
+
 pub fn type_parents(ty: &Type, source: &str) -> Vec<OwnedType> {
     match ty {
         Type::Simple(simple) => vec![simple_to_owned_type(simple, source)],
@@ -2275,6 +2647,7 @@ pub fn type_parents(ty: &Type, source: &str) -> Vec<OwnedType> {
             .map(|item| simple_to_owned_type(item, source))
             .collect(),
         Type::Sum(_) => vec![OwnedType::named("any")],
+        Type::Set(set) if set.values.is_some() => vec![OwnedType::named("any")],
         Type::Tuple(_) | Type::Set(_) => vec![OwnedType::named("array")],
         Type::Struct(_) => vec![OwnedType::named("Dict")],
         Type::Enum(_) => vec![OwnedType::named("any")],
@@ -2406,6 +2779,81 @@ fn merge_struct_fields(merged: &mut Vec<OwnedField>, fields: Vec<OwnedField>) {
         } else {
             combined
         };
+    }
+}
+
+/// TypeScript `keyof` semantics for a union: only keys of every variant, with
+/// the union of their types. A key missing from a variant is still common
+/// when that variant's `Dict` allows it.
+fn common_struct_shape(mut variants: Vec<StructShape>) -> StructShape {
+    if variants.len() <= 1 {
+        return variants.pop().unwrap_or_default();
+    }
+    let mut names = Vec::new();
+    for variant in &variants {
+        for field in &variant.fields {
+            if !names.contains(&field.name) {
+                names.push(field.name.clone());
+            }
+        }
+    }
+    let fields = names
+        .into_iter()
+        .filter_map(|name| {
+            let mut documentation = None;
+            let mut types = Vec::new();
+            for variant in &variants {
+                let ty = match variant.fields.iter().find(|field| field.name == name) {
+                    Some(field) => {
+                        documentation = documentation.or_else(|| field.documentation.clone());
+                        field.ty.clone()
+                    }
+                    None => variant.extra_value_type()?,
+                };
+                if !types.contains(&ty) {
+                    types.push(ty);
+                }
+            }
+            Some(OwnedField {
+                name,
+                ty: match types.len() {
+                    1 => types.pop()?,
+                    _ => OwnedType::Sum(types),
+                },
+                documentation,
+            })
+        })
+        .collect();
+    let dicts = variants[0]
+        .dicts
+        .iter()
+        .filter(|dict| {
+            variants[1..]
+                .iter()
+                .all(|variant| variant.dicts.contains(dict))
+        })
+        .cloned()
+        .collect();
+    StructShape { fields, dicts }
+}
+
+/// Homomorphic utilities distribute over a union of structs.
+fn map_struct_variants(
+    variants: Vec<StructShape>,
+    map: impl Fn(OwnedType) -> OwnedType,
+) -> OwnedType {
+    let mut structs = variants
+        .into_iter()
+        .map(|mut shape| {
+            for field in &mut shape.fields {
+                field.ty = map(field.ty.clone());
+            }
+            shape.into_type()
+        })
+        .collect::<Vec<_>>();
+    match structs.len() {
+        1 => structs.pop().expect("one variant"),
+        _ => OwnedType::Sum(structs),
     }
 }
 
@@ -2941,6 +3389,143 @@ mod tests {
                 OwnedType::Optional(Box::new(OwnedType::named("string"))),
             )])
         );
+    }
+
+    #[test]
+    fn utilities_over_struct_unions_follow_typescript_semantics() {
+        let mut hierarchy = utility_hierarchy();
+        hierarchy.insert_declaration(
+            "test",
+            "A",
+            declaration(OwnedType::Struct(vec![
+                field("kind", string_literal("a")),
+                field("a", OwnedType::named("string")),
+            ])),
+        );
+        hierarchy.insert_declaration(
+            "test",
+            "B",
+            declaration(OwnedType::Struct(vec![
+                field("kind", string_literal("b")),
+                field("b", OwnedType::named("u8")),
+            ])),
+        );
+        hierarchy.insert_declaration(
+            "test",
+            "Union",
+            declaration(OwnedType::Sum(vec![
+                OwnedType::named("A"),
+                OwnedType::named("B"),
+            ])),
+        );
+        hierarchy.insert_declaration(
+            "test",
+            "Combined",
+            declaration(OwnedType::Intersection(vec![
+                OwnedType::named("Union"),
+                OwnedType::named("User"),
+            ])),
+        );
+        let combined = || OwnedType::named("Combined");
+
+        assert_eq!(
+            evaluate(&hierarchy, "Omit", vec![combined(), string_literal("a")]),
+            OwnedType::Struct(vec![
+                field(
+                    "kind",
+                    OwnedType::Sum(vec![string_literal("a"), string_literal("b")])
+                ),
+                field("id", OwnedType::named("string")),
+                field(
+                    "name",
+                    OwnedType::Optional(Box::new(OwnedType::named("string")))
+                ),
+            ])
+        );
+        assert_eq!(
+            evaluate(&hierarchy, "Keyof", vec![OwnedType::named("Union")]),
+            OwnedType::Sum(vec![string_literal("kind")])
+        );
+        assert!(hierarchy
+            .evaluate_type(&OwnedType::Named {
+                name: "Pick".to_string(),
+                arguments: vec![combined(), string_literal("a")],
+            })
+            .is_err());
+        assert!(matches!(
+            evaluate(&hierarchy, "Partial", vec![combined()]),
+            OwnedType::Sum(variants) if variants.len() == 2
+        ));
+    }
+
+    #[test]
+    fn dict_members_behave_like_struct_index_signatures() {
+        let mut hierarchy = utility_hierarchy();
+        let dict = OwnedType::Named {
+            name: "Dict".to_string(),
+            arguments: vec![OwnedType::named("string"), OwnedType::named("u8")],
+        };
+        hierarchy.insert_declaration(
+            "test",
+            "Open",
+            declaration(OwnedType::Intersection(vec![
+                OwnedType::named("User"),
+                dict.clone(),
+            ])),
+        );
+        let open = || OwnedType::named("Open");
+
+        assert_eq!(hierarchy.struct_fields(&open()).unwrap(), None);
+        assert_eq!(
+            hierarchy.struct_shape(&open()).unwrap(),
+            Some(StructShape {
+                fields: vec![
+                    field("id", OwnedType::named("string")),
+                    field(
+                        "name",
+                        OwnedType::Optional(Box::new(OwnedType::named("string")))
+                    ),
+                ],
+                dicts: vec![dict.clone()],
+            })
+        );
+        assert_eq!(
+            evaluate(&hierarchy, "Omit", vec![open(), string_literal("id")]),
+            OwnedType::Intersection(vec![
+                OwnedType::Struct(vec![field(
+                    "name",
+                    OwnedType::Optional(Box::new(OwnedType::named("string")))
+                )]),
+                dict.clone(),
+            ])
+        );
+        assert_eq!(
+            evaluate(
+                &hierarchy,
+                "Pick",
+                vec![
+                    open(),
+                    OwnedType::Sum(vec![string_literal("id"), string_literal("extra")])
+                ],
+            ),
+            OwnedType::Struct(vec![
+                field("id", OwnedType::named("string")),
+                field("extra", OwnedType::named("u8")),
+            ])
+        );
+        assert_eq!(
+            evaluate(&hierarchy, "Keyof", vec![open()]),
+            OwnedType::Sum(vec![
+                string_literal("id"),
+                string_literal("name"),
+                OwnedType::named("string"),
+            ])
+        );
+        assert!(matches!(
+            evaluate(&hierarchy, "Partial", vec![open()]),
+            OwnedType::Intersection(items) if items.len() == 2 && items[1] == dict
+        ));
+        assert_eq!(evaluate(&hierarchy, "Partial", vec![dict.clone()]), dict);
     }
 
     #[test]

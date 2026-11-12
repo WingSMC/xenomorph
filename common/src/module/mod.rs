@@ -19,6 +19,13 @@ use crate::semantic::{
 use crate::utils::calculate_hash;
 use crate::XenoDiagSeverity;
 
+/// Graph-wide facts shared by every module revalidated in one update.
+struct UpdateScope {
+    owners: BTreeMap<String, BTreeSet<String>>,
+    static_types: HashSet<String>,
+    reachable: HashSet<(String, String)>,
+}
+
 /// Information about a single module (one .xen file).
 /// Owns the current source and every source-indexed artifact.
 pub struct ModuleData {
@@ -238,6 +245,11 @@ impl ModuleData {
                                     self.source.text(),
                                 ))
                             }),
+                            annotations: crate::semantic::declaration_annotations(
+                                &ty.1,
+                                self.source.text(),
+                            )
+                            .into(),
                         },
                     ))
                 }
@@ -654,6 +666,13 @@ impl XenoRegistry {
                 d.name.clone(),
                 (*d.semantic).clone(),
             );
+            if !d.annotations.is_empty() {
+                hierarchy.set_declaration_annotations(
+                    &module_path,
+                    &d.name,
+                    d.annotations.to_vec(),
+                );
+            }
         }
         drop(index);
         self.index
@@ -722,7 +741,7 @@ impl XenoRegistry {
             }
             affected
         };
-        let owners = self.collision_owners();
+        let scope = self.update_scope();
         self.refresh_bindings();
         let (order, blocked) = self.graph_order();
         // Kahn's remaining vertices are cycles and every importer of a cycle.
@@ -730,7 +749,7 @@ impl XenoRegistry {
             let handle = self.module_cache.read().unwrap().get(&path).cloned();
             if let Some(handle) = handle {
                 let mut module = handle.write().unwrap();
-                self.update_collisions(&mut module, &path, &owners);
+                self.update_collisions(&mut module, &path, &scope);
                 module.analyzer_errors.clear();
                 module.module_errors = self.validate_imports(&module, &path);
                 let location = module.borrow_ast().iter().find_map(|d| match d {
@@ -763,17 +782,16 @@ impl XenoRegistry {
                 || affected.contains(&path)
                 || was_blocked
             {
-                self.revalidate_cached_module(&path, &owners);
+                self.revalidate_cached_module(&path, &scope);
             }
         }
-        self.refresh_usage_diagnostics();
+        self.refresh_usage_diagnostics(&scope.reachable);
     }
 
     /// Recompute cheap usage hints across the graph even when semantic scans
     /// are reused. Changing entry exports can change usage in unchanged files.
-    fn refresh_usage_diagnostics(&self) {
+    fn refresh_usage_diagnostics(&self, reachable: &HashSet<(String, String)>) {
         let index = self.index.read().unwrap().clone();
-        let reachable = bindings::reachable(&index, &self.entry);
         let handles = self.module_cache.read().unwrap().clone();
         for (path, handle) in handles {
             let mut module = handle.write().unwrap();
@@ -785,7 +803,7 @@ impl XenoRegistry {
                 module.borrow_source(),
                 &path,
                 &self.imported_types(&index, &path),
-                Some(&reachable),
+                Some(reachable),
             );
             let diagnostics: Vec<_> = diagnostics
                 .into_iter()
@@ -843,7 +861,7 @@ impl XenoRegistry {
         let index = self.index.read().unwrap();
         Self::transitive_importers(&index, changed_module)
     }
-    fn collision_owners(&self) -> BTreeMap<String, BTreeSet<String>> {
+    fn update_scope(&self) -> UpdateScope {
         let index = self.index.read().unwrap();
         let reachable = bindings::reachable(&index, &self.entry);
         let mut owners: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -857,32 +875,34 @@ impl XenoRegistry {
                 owners.entry(name.clone()).or_default().insert(path.clone());
             }
         }
-        owners
+        UpdateScope {
+            owners,
+            static_types: self.metadata.types.keys().cloned().collect(),
+            reachable,
+        }
     }
-    fn update_collisions(
-        &self,
-        module: &mut ModuleData,
-        path: &str,
-        owners: &BTreeMap<String, BTreeSet<String>>,
-    ) {
-        let static_types = self.metadata.types.keys().cloned().collect();
-        let reachable = self.reachable_declarations();
+    fn update_collisions(&self, module: &mut ModuleData, path: &str, scope: &UpdateScope) {
         let ast: Vec<_> = module
             .borrow_ast()
             .iter()
             .filter(|d| {
                 !self.analyzer.generation_mode
                     || match d {
-                        Declaration::Type { name, .. } => reachable
+                        Declaration::Type { name, .. } => scope
+                            .reachable
                             .contains(&(path.into(), name.text(module.borrow_source()).into())),
                         _ => false,
                     }
             })
             .cloned()
             .collect();
-        let diagnostics =
-            NameCollisionValidator::new(path, module.borrow_source(), owners, &static_types)
-                .validate(&ast);
+        let diagnostics = NameCollisionValidator::new(
+            path,
+            module.borrow_source(),
+            &scope.owners,
+            &scope.static_types,
+        )
+        .validate(&ast);
         module.collision_errors = diagnostics
             .into_iter()
             .map(|d| module.diagnostic(d, ErrorPhase::Analyzer))
@@ -890,11 +910,11 @@ impl XenoRegistry {
     }
     pub fn refresh_name_collision_diagnostics(&self) -> Vec<ModulePath> {
         let _update = self.coordinator.lock().unwrap();
-        let owners = self.collision_owners();
+        let scope = self.update_scope();
         let handles = self.module_cache.read().unwrap().clone();
         let mut paths = vec![];
         for (path, handle) in handles {
-            self.update_collisions(&mut handle.write().unwrap(), &path, &owners);
+            self.update_collisions(&mut handle.write().unwrap(), &path, &scope);
             paths.push(path);
         }
         paths.sort();
@@ -954,17 +974,13 @@ impl XenoRegistry {
         }
         out
     }
-    fn revalidate_cached_module(
-        &self,
-        path: &str,
-        owners: &BTreeMap<String, BTreeSet<String>>,
-    ) -> bool {
+    fn revalidate_cached_module(&self, path: &str, update: &UpdateScope) -> bool {
         let handle = self.module_cache.read().unwrap().get(path).cloned();
         let Some(handle) = handle else {
             return false;
         };
         let mut module = handle.write().unwrap();
-        self.update_collisions(&mut module, path, owners);
+        self.update_collisions(&mut module, path, update);
         let index = self.index.read().unwrap();
         let mut hierarchy = self.hierarchy.read().unwrap().clone();
         hierarchy.set_current_module(path);
@@ -974,7 +990,7 @@ impl XenoRegistry {
             abs_path: module.abs_path.clone(),
             own_types: module.declarations.keys().cloned().collect(),
             imported_types: self.imported_types(&index, path),
-            builtin_types: self.metadata.types.keys().cloned().collect(),
+            builtin_types: update.static_types.iter().cloned().collect(),
             known_annotations: self.metadata.annotations.keys().cloned().collect(),
             type_hierarchy: hierarchy,
             annotations: self.metadata.annotations.clone(),
@@ -989,14 +1005,15 @@ impl XenoRegistry {
                 .imports
                 .iter()
                 .all(|p| !Self::has_fatal_diagnostics(&self.get_all_errors_for(p)));
-        let analysis_only = Analyzer::with_metadata(false, self.metadata.clone())
-            .expect("validated registry metadata");
-        let analyzer = if generation_allowed {
+        let analysis_only;
+        let analyzer = if generation_allowed || !self.analyzer.generation_mode {
             &self.analyzer
         } else {
+            analysis_only = Analyzer::with_metadata(false, self.metadata.clone())
+                .expect("validated registry metadata");
             &analysis_only
         };
-        let reachable = self.reachable_declarations();
+        let reachable = &update.reachable;
         let ast: Vec<_> = module
             .borrow_ast()
             .iter()
@@ -1016,7 +1033,7 @@ impl XenoRegistry {
             module.borrow_source(),
             &scope,
             &self.plugins,
-            Some(&reachable),
+            Some(reachable),
         );
         module.analyzer_errors = diagnostics
             .into_iter()
@@ -1226,7 +1243,7 @@ impl XenoRegistry {
         if removed {
             self.refresh_name_collision_diagnostics();
             let _update = self.coordinator.lock().unwrap();
-            self.refresh_usage_diagnostics();
+            self.refresh_usage_diagnostics(&self.reachable_declarations());
         }
     }
 
@@ -1615,6 +1632,52 @@ mod tests {
             analyze(&cache, "test"),
             vec![
                 "Types 'u8' and 'string' cannot be intersected because their intersection is NEVER."
+            ]
+        );
+    }
+
+    #[test]
+    fn type_utilities_intersect_with_structs() {
+        let source = r#"type Base = { a: string, b: u8, c: bool };
+            type Keys = |"a"|"b";
+            type KeySet = set ["a", "b"];
+            type Extra = { d: string };
+            type Generic<T> = { e: T };
+            type Combined = &Base&Extra;
+            pub type Omitted = &Omit<Base, Keys>&Extra;
+            pub type OmittedSet = &Omit<Base, KeySet>&Extra;
+            pub type Partials = &Partial<Base>&Generic<string>;
+            pub type Picked = &Partial<Pick<Base, Keys>>&Omit<Combined, "d">;
+            pub type Nested = &Combined&Partials;
+            pub type Completed = &Complete<Partial<Base>>&Extra;
+            pub type Impossible = &Partial<Base>&string;"#;
+        let mut cache = HashMap::new();
+        cache.insert("test".to_string(), parsed_module("test", source));
+
+        assert_eq!(
+            analyze(&cache, "test"),
+            vec!["Types 'Partial<Base>' and 'string' cannot be intersected because their intersection is NEVER."]
+        );
+    }
+
+    #[test]
+    fn literal_sets_behave_like_literal_sums() {
+        let source = r#"type Command = set ["save", "open"];
+            type Numbers = set [1, 2];
+            type Flags = set [true, false];
+            pub type ByCommand = Dict<Command, string>;
+            pub type ByNumber = Dict<Numbers, string>;
+            pub type ByFlag = Dict<Flags, string>;
+            pub type Text = &Command&string;
+            pub type Impossible = &Command&u8;"#;
+        let mut cache = HashMap::new();
+        cache.insert("test".to_string(), parsed_module("test", source));
+
+        assert_eq!(
+            analyze(&cache, "test"),
+            vec![
+                "Generic argument 'Flags' for 'Dict.K' does not satisfy constraint 'KeyTrait'.",
+                "Types 'Command' and 'u8' cannot be intersected because their intersection is NEVER.",
             ]
         );
     }
@@ -2168,7 +2231,7 @@ mod tests {
         assert_eq!(
             errors
                 .iter()
-                .filter(|error| error.contains("expects NumberLiteral"))
+                .filter(|error| error.contains("expects a value of type 'number'"))
                 .count(),
             3,
             "{errors:#?}"
@@ -2193,6 +2256,90 @@ mod tests {
             .iter()
             .all(|error| error
                 == "Annotation '@multipleof' argument 'value' must be greater than zero."));
+    }
+
+    #[test]
+    fn default_value_is_typed_by_the_annotated_type() {
+        let valid = concat!(
+            "pub type Port = u16 @default(8080); ",
+            "pub type Host = string @default(\"localhost\"); ",
+            "pub type Ratio = f64 @default(0.5); ",
+            "pub type Whole = f64 @default(1); ",
+            "pub type Flag = bool @default(true); ",
+            "pub type Maybe = ?string @default(null); ",
+            "pub type Mode = |\"a\"|\"b\" @default(\"b\"); ",
+            "pub type Alias = Port @default(80); ",
+            "pub type Tags = string[] @default([]); ",
+            "pub type Pair = [u8, string] @default([1, \"x\"]); ",
+            "pub type Counts = Dict<string, i32> @default({}); ",
+            "pub type Options = { name: ?string, port: ?Port } @default({}); ",
+            "pub type Preset = { name: string, port: ?Port } @default({ name: \"x\" });",
+        );
+        let mut cache = HashMap::new();
+        cache.insert("test".to_string(), parsed_module("test", valid));
+        assert!(cache["test"].borrow_parser_errors().is_empty());
+        let errors = analyze(&cache, "test");
+        assert!(errors.is_empty(), "{errors:#?}");
+
+        let invalid = concat!(
+            "pub type Port = u8 @default(300); ",
+            "pub type Host = string @default(1); ",
+            "pub type Text = string @default(null); ",
+            "pub type Mode = |\"a\"|\"b\" @default(\"c\"); ",
+            "pub type Tags = string[] @default([1]); ",
+            "pub type Name = string @default([]); ",
+            "pub type Strict = { name: string } @default({}); ",
+            "pub type Extra = { name: ?string } @default({ other: 1 }); ",
+            "pub type Counts = Dict<string, i32> @default({ a: \"x\" }); ",
+            "pub type Ref = string @default(Port);",
+        );
+        let mut cache = HashMap::new();
+        cache.insert("test".to_string(), parsed_module("test", invalid));
+        assert!(cache["test"].borrow_parser_errors().is_empty());
+        let errors = analyze(&cache, "test");
+        assert_eq!(errors.len(), 10, "{errors:#?}");
+        assert!(errors.contains(
+            &"Annotation '@default' argument 'value' expects a value of type 'u8', got '300'."
+                .to_string()
+        ));
+        assert!(errors.contains(
+            &"Annotation '@default' argument 'value' expects a value of type 'string', got identifier."
+                .to_string()
+        ));
+    }
+
+    #[test]
+    fn value_parameters_are_typed_by_the_type_system() {
+        let valid = concat!(
+            "pub type Small = u8 @min(1) @max(200); ",
+            "pub type Ratio = f64 @gt(0) @lt(0.5); ",
+            "pub type Maybe = ?i8 @min(-5); ",
+            "pub type Name = string @minlen(1) @maxlen(20);",
+        );
+        let mut cache = HashMap::new();
+        cache.insert("test".to_string(), parsed_module("test", valid));
+        let errors = analyze(&cache, "test");
+        assert!(errors.is_empty(), "{errors:#?}");
+
+        let invalid = concat!(
+            "pub type Small = u8 @max(300); ",
+            "pub type Unsigned = u32 @min(-1); ",
+            "pub type Whole = i32 @multipleof(0.5); ",
+            "pub type Maybe = ?i8 @min(null); ",
+            "pub type Name = string @minlen(-1);",
+        );
+        let mut cache = HashMap::new();
+        cache.insert("test".to_string(), parsed_module("test", invalid));
+        let errors = analyze(&cache, "test");
+        assert_eq!(errors.len(), 5, "{errors:#?}");
+        assert!(errors.contains(
+            &"Annotation '@max' argument 'value' expects a value of type 'u8', got '300'."
+                .to_string()
+        ));
+        assert!(errors.contains(
+            &"Annotation '@minlen' argument 'value' expects a value of type 'u64', got '-1'."
+                .to_string()
+        ));
     }
 
     #[test]
@@ -2516,6 +2663,39 @@ mod update_tests {
                 ("other".into(), "Used".into())
             ])
         );
+        fs::remove_dir_all(&registry.root).unwrap();
+    }
+
+    #[test]
+    fn reachability_follows_type_utility_arguments() {
+        let registry = registry();
+        fs::write(
+            registry.root.join("other.xen"),
+            r#"pub type Base = { a: string, b: u8 }; pub type Keys = set ["a"]; pub type Extra = { c: bool };"#,
+        )
+        .unwrap();
+        let errors = registry.load_module_from_source(
+            &registry.root.join("index.xen"),
+            "import other::{Base, Keys, Extra}; pub type Root = &Omit<Base, Keys>&Partial<Extra>;"
+                .into(),
+        );
+        assert!(
+            !errors.iter().any(|d| d.severity == XenoDiagSeverity::Err),
+            "{errors:?}"
+        );
+        assert_eq!(
+            registry.reachable_declarations(),
+            HashSet::from([
+                ("index".into(), "Root".into()),
+                ("other".into(), "Base".into()),
+                ("other".into(), "Keys".into()),
+                ("other".into(), "Extra".into())
+            ])
+        );
+        assert!(registry
+            .get_all_errors_for("other")
+            .iter()
+            .all(|d| !d.tags.contains(&crate::XenoDiagnosticTag::Unnecessary)));
         fs::remove_dir_all(&registry.root).unwrap();
     }
 

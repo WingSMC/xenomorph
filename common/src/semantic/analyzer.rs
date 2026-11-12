@@ -427,6 +427,13 @@ impl Analyzer {
                     declaration.name.clone(),
                     (*declaration.semantic).clone(),
                 );
+                if !declaration.annotations.is_empty() {
+                    type_hierarchy.set_declaration_annotations(
+                        module_path,
+                        &declaration.name,
+                        declaration.annotations.to_vec(),
+                    );
+                }
             }
         }
 

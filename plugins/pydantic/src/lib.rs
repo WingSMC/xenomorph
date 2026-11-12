@@ -19,10 +19,10 @@ use xenomorph_common::parser::{
 use xenomorph_common::plugins::protocol::CustomDeclarationRequest;
 use xenomorph_common::plugins::{CustomDeclarationMatcher, CustomDeclarationResult, XenoPlugin};
 use xenomorph_common::semantic::{
-    simple_to_owned_type, type_to_owned_type, unsupported_target_type_diagnostic, AnalyzerListener,
-    OwnedField, OwnedLiteral, OwnedType, ScopeInfo, TypeHierarchy, XenoAnnotation,
-    XenoAnnotationKind, XenoConstraint, XenoParam, ANY_TARGET_PARAM, LITERAL_VALUE_PARAM,
-    STRING_LITERAL, STRING_VALUE_PARAM, STRUCT,
+    simple_to_owned_type, type_to_owned_type, unsupported_target_type_diagnostic,
+    use_type_override, AnalyzerListener, OwnedField, OwnedLiteral, OwnedType, ScopeInfo,
+    TypeHierarchy, XenoAnnotation, XenoAnnotationKind, XenoConstraint, XenoParam, ANY_TARGET_PARAM,
+    LITERAL_VALUE_PARAM, STRING_LITERAL, STRING_VALUE_PARAM, STRUCT, USETYPE,
 };
 use xenomorph_common::utils::extract_documentation;
 use xenomorph_common::{TokenData, XenoDiagSeverity, XenoDiagnostic};
@@ -164,6 +164,7 @@ static ANNOTATIONS: &[&XenoAnnotation] = &[
     &BEFORE_VALIDATOR,
     &PLAIN_VALIDATOR,
     &WRAP_VALIDATOR,
+    &USETYPE,
 ];
 
 fn provide_annotations() -> &'static [&'static XenoAnnotation] {
@@ -565,6 +566,38 @@ fn python_string(value: &str) -> String {
     }
     output.push('"');
     output
+}
+
+/// The Python expression of a `@default` value: a literal, `null`, or a
+/// list or struct of those.
+fn python_value(value: &OwnedType) -> Option<String> {
+    Some(match value {
+        OwnedType::Literal(OwnedLiteral::String(value)) => python_string(value),
+        OwnedType::Literal(OwnedLiteral::Integer { value, .. }) => value.to_string(),
+        OwnedType::Literal(OwnedLiteral::Float { value, .. }) => value.to_string(),
+        OwnedType::Literal(OwnedLiteral::Boolean(value)) => python_bool(*value).to_string(),
+        OwnedType::Named { name, arguments } if name == "null" && arguments.is_empty() => {
+            "None".into()
+        }
+        OwnedType::Tuple(items) => {
+            let items = items.iter().map(python_value).collect::<Option<Vec<_>>>()?;
+            format!("[{}]", items.join(", "))
+        }
+        OwnedType::Struct(fields) => {
+            let fields = fields
+                .iter()
+                .map(|field| {
+                    Some(format!(
+                        "{}: {}",
+                        python_string(&field.name),
+                        python_value(&field.ty)?
+                    ))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            format!("{{{}}}", fields.join(", "))
+        }
+        _ => return None,
+    })
 }
 
 fn python_bool(value: bool) -> &'static str {
@@ -1043,10 +1076,24 @@ impl PydanticGenerator {
         ty: &Type,
         annotations: &[Annotation],
     ) -> (String, Vec<String>) {
+        if let Some(Expr::Type(override_type)) =
+            use_type_override(annotations, NAMESPACE, &self.source)
+        {
+            return match override_type {
+                Type::Simple(SimpleType::Literal(Literal::String(code, _))) => (
+                    self.alias_expression(name, params, docs, code.clone(), annotations),
+                    vec![],
+                ),
+                other => (self.alias(name, params, docs, other, annotations), vec![]),
+            };
+        }
         match ty {
             Type::Struct(fields) => {
                 let fields = self.ast_fields(fields);
-                (self.model(name, params, docs, &fields, annotations), vec![])
+                (
+                    self.model(name, params, docs, &fields, false, annotations),
+                    vec![],
+                )
             }
             Type::Enum(variants) => self.enumeration(name, params, docs, variants, annotations),
             Type::Intersection(_) => self.struct_shaped(name, params, docs, ty, annotations),
@@ -1060,7 +1107,8 @@ impl PydanticGenerator {
     }
 
     /// Intersections and struct utilities become models with their resolved
-    /// fields; anything else falls back to an alias.
+    /// fields; `Dict` members type the model's extra keys. Anything else falls
+    /// back to an alias.
     fn struct_shaped(
         &self,
         name: &str,
@@ -1070,8 +1118,18 @@ impl PydanticGenerator {
         annotations: &[Annotation],
     ) -> (String, Vec<String>) {
         let owned = type_to_owned_type(ty, &self.source);
-        match self.type_hierarchy.struct_fields(&owned) {
-            Ok(Some(fields)) => (self.model(name, params, docs, &fields, annotations), vec![]),
+        match self.type_hierarchy.struct_shape(&owned) {
+            Ok(Some(shape)) => (
+                self.model(
+                    name,
+                    params,
+                    docs,
+                    &shape.fields,
+                    !shape.dicts.is_empty(),
+                    annotations,
+                ),
+                vec![],
+            ),
             Ok(None) => (self.alias(name, params, docs, ty, annotations), vec![]),
             Err(error) => {
                 self.report(XenoDiagSeverity::Err, error.to_string());
@@ -1104,6 +1162,7 @@ impl PydanticGenerator {
         params: &[String],
         docs: Option<&str>,
         fields: &[OwnedField],
+        allows_extra: bool,
         annotations: &[Annotation],
     ) -> String {
         let mut config = FieldArgs::default();
@@ -1167,7 +1226,9 @@ impl PydanticGenerator {
             }
         }
         if !config.0.iter().any(|(key, _)| key == "extra") {
-            if let Some(extra) = &self.default_extra {
+            if allows_extra {
+                config.set("extra", python_string("allow"));
+            } else if let Some(extra) = &self.default_extra {
                 config.set("extra", python_string(extra));
             }
         }
@@ -1241,7 +1302,9 @@ impl PydanticGenerator {
         let rendered = self.render(ty);
         let optional = self.is_optional(ty, 0);
         let mut args = FieldArgs::default();
-        if optional {
+        if let Some((key, value)) = self.default_value(ty, 0) {
+            args.set(key, value);
+        } else if optional {
             args.set("default", "None".into());
         }
         if python_name != wire_name {
@@ -1255,7 +1318,9 @@ impl PydanticGenerator {
         }
         match args.0.as_slice() {
             [] => format!("    {python_name}: {rendered}\n"),
-            [(key, _)] if key == "default" => format!("    {python_name}: {rendered} = None\n"),
+            [(key, value)] if key == "default" => {
+                format!("    {python_name}: {rendered} = {value}\n")
+            }
             _ => {
                 let field = self.symbol("pydantic", "Field");
                 format!(
@@ -1264,6 +1329,67 @@ impl PydanticGenerator {
                 )
             }
         }
+    }
+
+    /// The `Field` argument for the nearest `@default` on the field type's
+    /// alias chain, e.g. `type Port = u16 @default(8080);`. Struct values of
+    /// a model type become a factory, since Pydantic does not validate defaults.
+    fn default_value(&self, ty: &OwnedType, depth: usize) -> Option<(&'static str, String)> {
+        if depth > 32 {
+            return None;
+        }
+        match ty {
+            OwnedType::Optional(inner) => self.default_value(inner, depth + 1),
+            OwnedType::Named { name, .. } | OwnedType::Qualified { name, .. } => {
+                let definition = self.type_hierarchy.get_type(name)?;
+                let annotation = definition
+                    .annotations
+                    .iter()
+                    .find(|annotation| annotation.name == "default");
+                match annotation.and_then(|annotation| annotation.arguments.first()) {
+                    Some(value @ OwnedType::Struct(fields)) => match self.model_class(ty, 0) {
+                        Some(model) if fields.is_empty() => Some(("default_factory", model)),
+                        Some(model) => Some((
+                            "default_factory",
+                            format!("lambda: {model}.model_validate({})", python_value(value)?),
+                        )),
+                        None => Some(("default", python_value(value)?)),
+                    },
+                    Some(value) => Some(("default", python_value(value)?)),
+                    None => match &definition.body {
+                        Some(body @ (OwnedType::Named { .. } | OwnedType::Qualified { .. })) => {
+                            self.default_value(body, depth + 1)
+                        }
+                        _ => None,
+                    },
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// The generated model class a struct-shaped type resolves to, if any.
+    fn model_class(&self, ty: &OwnedType, depth: usize) -> Option<String> {
+        if depth > 32 {
+            return None;
+        }
+        let (OwnedType::Named { name, .. } | OwnedType::Qualified { name, .. }) = ty else {
+            return None;
+        };
+        let body = self.type_hierarchy.get_type(name)?.body.as_ref()?;
+        let is_model = match body {
+            OwnedType::Struct(_) => true,
+            OwnedType::Intersection(_) => true,
+            OwnedType::Named { name, arguments } if STRUCT_UTILITIES.contains(&name.as_str()) => {
+                !arguments.is_empty()
+            }
+            OwnedType::Named { .. } | OwnedType::Qualified { .. } => {
+                return self.model_class(body, depth + 1);
+            }
+            _ => false,
+        };
+        (is_model && matches!(self.type_hierarchy.struct_shape(ty), Ok(Some(_))))
+            .then(|| self.render(ty))
     }
 
     fn deprecated_reference(&self, ty: &OwnedType) -> Option<&str> {
@@ -1471,6 +1597,23 @@ impl PydanticGenerator {
         if optional {
             expression.push_str(" | None");
         }
+        format!(
+            "{}{expression}\n",
+            self.alias_header(name, params, docs, deprecated.as_deref())
+        )
+    }
+
+    fn alias_expression(
+        &self,
+        name: &str,
+        params: &[String],
+        docs: Option<&str>,
+        base: String,
+        annotations: &[Annotation],
+    ) -> String {
+        let mut args = FieldArgs::default();
+        let (metadata, deprecated) = self.alias_metadata(annotations, &mut args);
+        let expression = self.annotated(base, &args, metadata);
         format!(
             "{}{expression}\n",
             self.alias_header(name, params, docs, deprecated.as_deref())

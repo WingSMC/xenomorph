@@ -121,12 +121,15 @@ pub(super) fn reachable(
 ) -> HashSet<(String, String)> {
     let mut pending = exported_declarations(index, entry);
     let mut seen = HashSet::new();
+    let mut scopes: HashMap<String, Vec<DeclarationInfo>> = HashMap::new();
     while let Some(declaration) = pending.pop() {
         if !seen.insert((declaration.module_path.clone(), declaration.name.clone())) {
             continue;
         }
         if let Some(summary) = index.get(&declaration.module_path) {
-            let scope = in_scope(index, &declaration.module_path);
+            let scope = scopes
+                .entry(declaration.module_path.clone())
+                .or_insert_with(|| in_scope(index, &declaration.module_path));
             for name in summary
                 .dependencies
                 .get(&declaration.name)

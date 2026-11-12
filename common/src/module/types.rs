@@ -54,4 +54,5 @@ pub struct DeclarationInfo {
     pub name_len: u32,
     /// Semantic metadata collected before validation starts.
     pub semantic: std::sync::Arc<TypeDeclarationInfo>,
+    pub annotations: std::sync::Arc<[crate::semantic::DeclarationAnnotation]>,
 }

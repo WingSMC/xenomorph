@@ -1,7 +1,7 @@
 use crate::semantic::{
     XenoConstraint, ANNOTATION, ANY, BOOL_LITERAL, EXPRESSION, HAS_LENGTH, IDENTIFIER,
     INTEGER_LITERAL, LITERAL, NUMBER_LITERAL, NUMERIC, REGEX_LITERAL, STRING, STRING_LITERAL,
-    TYPE_REFERENCE,
+    TYPE_REFERENCE, U64,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -83,6 +83,17 @@ pub static INTEGER_VALUE_PARAM: XenoParam = XenoParam {
     constraint: XenoConstraint::Trait(&INTEGER_LITERAL),
     optional: false,
 };
+/// A value of the annotated type, e.g. `u8 @max(200)` but not `u8 @max(300)`.
+pub static TARGET_VALUE_PARAM: XenoParam = XenoParam {
+    name: "value",
+    constraint: XenoConstraint::Target,
+    optional: false,
+};
+pub static LENGTH_VALUE_PARAM: XenoParam = XenoParam {
+    name: "value",
+    constraint: XenoConstraint::Type(&U64),
+    optional: false,
+};
 pub static REGEX_PATTERN_PARAM: XenoParam = XenoParam {
     name: "pattern",
     constraint: XenoConstraint::Trait(&REGEX_LITERAL),
@@ -99,11 +110,42 @@ pub static CONDITION_PARAM: XenoParam = XenoParam {
     optional: false,
 };
 
+static USETYPE_PARAM: XenoParam = XenoParam {
+    name: "type",
+    constraint: XenoConstraint::Trait(&EXPRESSION),
+    optional: false,
+};
+
+/// Registered by every generator plugin under its own namespace.
+pub static USETYPE: XenoAnnotation = XenoAnnotation {
+    name: "usetype",
+    documentation: Some(
+        "Replaces the declaration with another type in this target only. A type argument is mapped like any other type; a string literal is emitted verbatim as target code.",
+    ),
+    kind: XenoAnnotationKind::Meta,
+    params: &[&ANY_TARGET_PARAM, &USETYPE_PARAM],
+    variadic: false,
+};
+
+/// The argument of a declaration's `@{namespace}::usetype(...)`.
+pub fn use_type_override<'a>(
+    annotations: &'a [crate::parser::Annotation],
+    namespace: &str,
+    source: &str,
+) -> Option<&'a crate::parser::Expr> {
+    let name = format!("{namespace}::usetype");
+    annotations
+        .iter()
+        .find(|annotation| annotation.ident.text(source) == name)?
+        .params
+        .first()
+}
+
 pub static MIN: XenoAnnotation = XenoAnnotation {
     name: "min",
     documentation: Some("Specifies the minimum value for a numeric type."),
     kind: XenoAnnotationKind::Validation,
-    params: &[&NUMERIC_TARGET_PARAM, &NUMBER_VALUE_PARAM],
+    params: &[&NUMERIC_TARGET_PARAM, &TARGET_VALUE_PARAM],
     variadic: false,
 };
 
@@ -111,7 +153,7 @@ pub static MAX: XenoAnnotation = XenoAnnotation {
     name: "max",
     documentation: Some("Specifies the maximum value for a numeric type."),
     kind: XenoAnnotationKind::Validation,
-    params: &[&NUMERIC_TARGET_PARAM, &NUMBER_VALUE_PARAM],
+    params: &[&NUMERIC_TARGET_PARAM, &TARGET_VALUE_PARAM],
     variadic: false,
 };
 
@@ -119,7 +161,7 @@ pub static GT: XenoAnnotation = XenoAnnotation {
     name: "gt",
     documentation: Some("Specifies that some numeric value must be greater than the parameter."),
     kind: XenoAnnotationKind::Validation,
-    params: &[&NUMERIC_TARGET_PARAM, &NUMBER_VALUE_PARAM],
+    params: &[&NUMERIC_TARGET_PARAM, &TARGET_VALUE_PARAM],
     variadic: false,
 };
 
@@ -127,7 +169,7 @@ pub static LT: XenoAnnotation = XenoAnnotation {
     name: "lt",
     documentation: Some("Specifies that some numeric value must be less than the parameter."),
     kind: XenoAnnotationKind::Validation,
-    params: &[&NUMERIC_TARGET_PARAM, &NUMBER_VALUE_PARAM],
+    params: &[&NUMERIC_TARGET_PARAM, &TARGET_VALUE_PARAM],
     variadic: false,
 };
 
@@ -137,7 +179,7 @@ pub static MULTIPLEOF: XenoAnnotation = XenoAnnotation {
         "Requires a numeric value to be an integer multiple of a positive increment. Integer and decimal increments are supported, e.g. `0.1` for tenth increments.",
     ),
     kind: XenoAnnotationKind::Validation,
-    params: &[&NUMERIC_TARGET_PARAM, &NUMBER_VALUE_PARAM],
+    params: &[&NUMERIC_TARGET_PARAM, &TARGET_VALUE_PARAM],
     variadic: false,
 };
 
@@ -145,7 +187,7 @@ pub static LEN: XenoAnnotation = XenoAnnotation {
     name: "len",
     documentation: Some("Specifies the exact length for a string or list type."),
     kind: XenoAnnotationKind::Validation,
-    params: &[&HAS_LENGTH_TARGET_PARAM, &INTEGER_VALUE_PARAM],
+    params: &[&HAS_LENGTH_TARGET_PARAM, &LENGTH_VALUE_PARAM],
     variadic: false,
 };
 
@@ -153,7 +195,7 @@ pub static MINLEN: XenoAnnotation = XenoAnnotation {
     name: "minlen",
     documentation: Some("Specifies the minimum length for a string or list type."),
     kind: XenoAnnotationKind::Validation,
-    params: &[&HAS_LENGTH_TARGET_PARAM, &INTEGER_VALUE_PARAM],
+    params: &[&HAS_LENGTH_TARGET_PARAM, &LENGTH_VALUE_PARAM],
     variadic: false,
 };
 
@@ -161,7 +203,7 @@ pub static MAXLEN: XenoAnnotation = XenoAnnotation {
     name: "maxlen",
     documentation: Some("Specifies the maximum length for a string or list type."),
     kind: XenoAnnotationKind::Validation,
-    params: &[&HAS_LENGTH_TARGET_PARAM, &INTEGER_VALUE_PARAM],
+    params: &[&HAS_LENGTH_TARGET_PARAM, &LENGTH_VALUE_PARAM],
     variadic: false,
 };
 
@@ -189,6 +231,22 @@ pub static DEPRECATION_REASON_PARAM: XenoParam = XenoParam {
     name: "reason",
     constraint: XenoConstraint::Trait(&STRING_LITERAL),
     optional: true,
+};
+
+pub static DEFAULT: XenoAnnotation = XenoAnnotation {
+    name: "default",
+    documentation: Some(
+        "Declares the default value of a type as metadata. Accepts a value of the annotated type: a literal, `null`, or a list or struct of those such as `[]` or `{}`. Does not affect validation; generators apply it to fields of this type.",
+    ),
+    kind: XenoAnnotationKind::Meta,
+    params: &[&ANY_TARGET_PARAM, &DEFAULT_VALUE_PARAM],
+    variadic: false,
+};
+
+pub static DEFAULT_VALUE_PARAM: XenoParam = XenoParam {
+    name: "value",
+    constraint: XenoConstraint::Target,
+    optional: false,
 };
 
 pub static IF: XenoAnnotation = XenoAnnotation {
@@ -228,6 +286,7 @@ pub static BUILTIN_ANNOTATIONS: &[&XenoAnnotation] = &[
     &MAXLEN,
     &MATCH,
     &DEPRECATED,
+    &DEFAULT,
     &IF,
     &ELSEIF,
     &ELSE,

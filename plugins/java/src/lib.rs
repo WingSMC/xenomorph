@@ -10,9 +10,9 @@ use xenomorph_common::parser::{
 use xenomorph_common::plugins::XenoPlugin;
 use xenomorph_common::semantic::{
     is_type_utility, simple_to_owned_type, type_to_owned_type, unsupported_target_type_diagnostic,
-    AnalyzerListener, OwnedField, OwnedLiteral, OwnedSet, OwnedType, ScopeInfo, TypeDefinition,
-    TypeHierarchy, XenoAnnotation, XenoAnnotationKind, XenoConstraint, XenoParam, XenoParent,
-    XenoTrait, XenoTraitKind, XenoType as SemanticType, ANY_TARGET_PARAM,
+    use_type_override, AnalyzerListener, OwnedField, OwnedLiteral, OwnedSet, OwnedType, ScopeInfo,
+    TypeDefinition, TypeHierarchy, XenoAnnotation, XenoAnnotationKind, XenoConstraint, XenoParam,
+    XenoType as SemanticType, ANY_TARGET_PARAM, EXPRESSION, USETYPE,
 };
 use xenomorph_common::utils::extract_documentation;
 use xenomorph_common::{TokenData, XenoDiagSeverity, XenoDiagnostic};
@@ -35,42 +35,103 @@ static PLUGIN: XenoPlugin = XenoPlugin {
     register_analyzer: None,
 };
 
-static LOMBOK_TRAIT: XenoTrait = XenoTrait {
-    name: "LombokDecorator",
-    documentation: Some("Implemented only by supported Java Lombok decorator names."),
-    kind: XenoTraitKind::Semantic,
-    parents: None,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LombokOption {
+    Bool,
+    String,
+    AccessLevel,
+}
+
+const ACCESS_LEVELS: &[&str] = &[
+    "PUBLIC",
+    "MODULE",
+    "PROTECTED",
+    "PACKAGE",
+    "PRIVATE",
+    "NONE",
+];
+
+struct LombokSpec {
+    annotation: XenoAnnotation,
+    /// Java annotation elements; a bare literal argument sets `value`.
+    options: &'static [(&'static str, LombokOption)],
+}
+
+static LOMBOK_OPTIONS_PARAM: XenoParam = XenoParam {
+    name: "options",
+    constraint: XenoConstraint::Trait(&EXPRESSION),
+    optional: true,
 };
 
-static LOMBOK_PARENT: &[XenoParent] = &[XenoParent::Trait(&LOMBOK_TRAIT)];
-
-macro_rules! lombok_type {
-    ($constant:ident, $name:literal) => {
-        static $constant: SemanticType = SemanticType {
-            name: $name,
-            documentation: Some(concat!("Java Lombok `@", $name, "` decorator.")),
-            generic_params: None,
-            parents: Some(LOMBOK_PARENT),
+macro_rules! lombok_annotation {
+    ($constant:ident, $name:literal, {}) => {
+        static $constant: LombokSpec = LombokSpec {
+            annotation: XenoAnnotation {
+                name: $name,
+                documentation: Some(concat!(
+                    "Adds Lombok `@",
+                    $name,
+                    "` to the generated Java class."
+                )),
+                kind: XenoAnnotationKind::Meta,
+                params: &[&ANY_TARGET_PARAM],
+                variadic: false,
+            },
+            options: &[],
+        };
+    };
+    ($constant:ident, $name:literal, { $($option:ident: $kind:ident),+ $(,)? }) => {
+        static $constant: LombokSpec = LombokSpec {
+            annotation: XenoAnnotation {
+                name: $name,
+                documentation: Some(concat!(
+                    "Adds Lombok `@",
+                    $name,
+                    "` to the generated Java class. Optional elements mirror Lombok's: `{ ",
+                    $(stringify!($option), ": ", stringify!($kind), ", ",)+
+                    "}`. AccessLevel values are strings such as \"PROTECTED\"."
+                )),
+                kind: XenoAnnotationKind::Meta,
+                params: &[&ANY_TARGET_PARAM, &LOMBOK_OPTIONS_PARAM],
+                variadic: false,
+            },
+            options: &[$((stringify!($option), LombokOption::$kind)),+],
         };
     };
 }
 
-lombok_type!(ACCESSORS, "Accessors");
-lombok_type!(ALL_ARGS_CONSTRUCTOR, "AllArgsConstructor");
-lombok_type!(BUILDER, "Builder");
-lombok_type!(DATA, "Data");
-lombok_type!(EQUALS_AND_HASH_CODE, "EqualsAndHashCode");
-lombok_type!(GETTER, "Getter");
-lombok_type!(NON_NULL, "NonNull");
-lombok_type!(NO_ARGS_CONSTRUCTOR, "NoArgsConstructor");
-lombok_type!(REQUIRED_ARGS_CONSTRUCTOR, "RequiredArgsConstructor");
-lombok_type!(SETTER, "Setter");
-lombok_type!(SINGULAR, "Singular");
-lombok_type!(TO_STRING, "ToString");
-lombok_type!(VALUE, "Value");
-lombok_type!(WITH, "With");
+lombok_annotation!(ACCESSORS, "Accessors", {
+    fluent: Bool, chain: Bool, makeFinal: Bool, prefix: String,
+});
+lombok_annotation!(ALL_ARGS_CONSTRUCTOR, "AllArgsConstructor", {
+    staticName: String, access: AccessLevel,
+});
+lombok_annotation!(BUILDER, "Builder", {
+    builderMethodName: String, buildMethodName: String, builderClassName: String,
+    toBuilder: Bool, access: AccessLevel, setterPrefix: String,
+});
+lombok_annotation!(DATA, "Data", { staticConstructor: String });
+lombok_annotation!(EQUALS_AND_HASH_CODE, "EqualsAndHashCode", {
+    callSuper: Bool, doNotUseGetters: Bool, onlyExplicitlyIncluded: Bool,
+});
+lombok_annotation!(GETTER, "Getter", { value: AccessLevel, lazy: Bool });
+lombok_annotation!(NON_NULL, "NonNull", {});
+lombok_annotation!(NO_ARGS_CONSTRUCTOR, "NoArgsConstructor", {
+    staticName: String, access: AccessLevel, force: Bool,
+});
+lombok_annotation!(REQUIRED_ARGS_CONSTRUCTOR, "RequiredArgsConstructor", {
+    staticName: String, access: AccessLevel,
+});
+lombok_annotation!(SETTER, "Setter", { value: AccessLevel });
+lombok_annotation!(SINGULAR, "Singular", { value: String, ignoreNullCollections: Bool });
+lombok_annotation!(TO_STRING, "ToString", {
+    includeFieldNames: Bool, callSuper: Bool, doNotUseGetters: Bool,
+    onlyExplicitlyIncluded: Bool,
+});
+lombok_annotation!(VALUE, "Value", { staticConstructor: String });
+lombok_annotation!(WITH, "With", { value: AccessLevel });
 
-static LOMBOK_TYPES: &[&SemanticType] = &[
+static LOMBOK_ANNOTATIONS: &[&LombokSpec] = &[
     &ACCESSORS,
     &ALL_ARGS_CONSTRUCTOR,
     &BUILDER,
@@ -87,30 +148,39 @@ static LOMBOK_TYPES: &[&SemanticType] = &[
     &WITH,
 ];
 
-static LOMBOK_PARAM: XenoParam = XenoParam {
-    name: "decorator",
-    constraint: XenoConstraint::Trait(&LOMBOK_TRAIT),
-    optional: false,
+static ANNOTATIONS: &[&XenoAnnotation] = &[
+    &ACCESSORS.annotation,
+    &ALL_ARGS_CONSTRUCTOR.annotation,
+    &BUILDER.annotation,
+    &DATA.annotation,
+    &EQUALS_AND_HASH_CODE.annotation,
+    &GETTER.annotation,
+    &NO_ARGS_CONSTRUCTOR.annotation,
+    &NON_NULL.annotation,
+    &REQUIRED_ARGS_CONSTRUCTOR.annotation,
+    &SETTER.annotation,
+    &SINGULAR.annotation,
+    &TO_STRING.annotation,
+    &VALUE.annotation,
+    &WITH.annotation,
+    &USETYPE,
+];
+
+static JSON_ELEMENT: SemanticType = SemanticType {
+    name: "JsonElement",
+    documentation: Some("Gson `com.google.gson.JsonElement`: any JSON value."),
+    generic_params: None,
+    parents: None,
 };
 
-static LOMBOK_ANNOTATION: XenoAnnotation = XenoAnnotation {
-    name: "Lombok",
-    documentation: Some(
-        "Attaches one or more supported Lombok decorators to the generated Java DTO, e.g. `@java::Lombok(java::Data, java::Builder)`.",
-    ),
-    kind: XenoAnnotationKind::Meta,
-    params: &[&ANY_TARGET_PARAM, &LOMBOK_PARAM],
-    variadic: true,
-};
-
-static LOMBOK_ANNOTATIONS: &[&XenoAnnotation] = &[&LOMBOK_ANNOTATION];
+static PROVIDED_TYPES: &[&SemanticType] = &[&JSON_ELEMENT];
 
 fn provide_types() -> &'static [&'static SemanticType] {
-    LOMBOK_TYPES
+    PROVIDED_TYPES
 }
 
 fn provide_annotations() -> &'static [&'static XenoAnnotation] {
-    LOMBOK_ANNOTATIONS
+    ANNOTATIONS
 }
 
 fn provide_config_schema() -> &'static str {
@@ -307,6 +377,20 @@ impl<'src> AnalyzerListener<'src> for JavaGenerator {
             } = decl
             {
                 let type_name = name.text(&self.source);
+                if use_type_override(&t.1, NAME, &self.source).is_some() {
+                    continue;
+                }
+                if self.intersects_struct_with_dict(&t.0) {
+                    errors.push(XenoDiagnostic {
+                        tags: vec![],
+                        location: *name,
+                        message: format!(
+                            "Java cannot represent '{type_name}' because it intersects a struct with a Dict. Replace it with @java::usetype(java::JsonElement)."
+                        ),
+                        severity: XenoDiagSeverity::Err,
+                    });
+                    continue;
+                }
                 if let Some(literal_enum) = self
                     .type_hierarchy
                     .get_type(type_name)
@@ -401,10 +485,13 @@ impl<'src> AnalyzerListener<'src> for JavaGenerator {
 
     fn on_before_annotation(
         &mut self,
-        _name: &TokenData,
-        _args: &[Expr],
-        _errors: &mut Vec<XenoDiagnostic>,
+        name: &TokenData,
+        args: &[Expr],
+        errors: &mut Vec<XenoDiagnostic>,
     ) {
+        if let Err(diagnostic) = lombok_decorator(name, args, &self.source) {
+            errors.push(diagnostic);
+        }
         self.annotation_depth += 1;
     }
 
@@ -505,7 +592,10 @@ impl JavaGenerator {
     /// Prefilled sets and sums of literals become Java enums when every
     /// literal shares one string or numeric Java type.
     fn literal_enum(&self, definition: &TypeDefinition) -> Option<LiteralEnum> {
-        if definition.module_path.is_none() || !definition.generic_params.is_empty() {
+        if definition.module_path.is_none()
+            || !definition.generic_params.is_empty()
+            || definition.use_type(NAME).is_some()
+        {
             return None;
         }
         let (element, literals) = match definition.body.as_ref()? {
@@ -626,6 +716,7 @@ impl JavaGenerator {
         if items.is_empty()
             || definition.module_path.is_none()
             || !definition.generic_params.is_empty()
+            || definition.use_type(NAME).is_some()
         {
             return None;
         }
@@ -669,7 +760,10 @@ impl JavaGenerator {
                 .get_type_in(module_path.as_deref(), name)?,
             _ => return None,
         };
-        if definition.module_path.is_none() || !definition.generic_params.is_empty() {
+        if definition.module_path.is_none()
+            || !definition.generic_params.is_empty()
+            || definition.use_type(NAME).is_some()
+        {
             return None;
         }
         let key = declaration_key(definition);
@@ -697,6 +791,9 @@ impl JavaGenerator {
     /// Whether the declaration generates a Java class from struct fields:
     /// a struct, a struct-shaped intersection, or a struct utility.
     fn generates_class(&self, definition: &TypeDefinition) -> bool {
+        if definition.use_type(NAME).is_some() {
+            return false;
+        }
         let struct_shaped = || {
             matches!(
                 self.type_hierarchy.struct_fields(&OwnedType::Qualified {
@@ -921,6 +1018,22 @@ impl JavaGenerator {
             .ok()?
     }
 
+    fn intersects_struct_with_dict(&self, ty: &Type) -> bool {
+        let struct_shaped = match ty {
+            Type::Intersection(_) => true,
+            Type::Simple(SimpleType::Identifier(identifier, Some(_))) => {
+                is_type_utility(identifier.text(&self.source))
+            }
+            _ => false,
+        };
+        struct_shaped
+            && matches!(
+                self.type_hierarchy
+                    .struct_shape(&type_to_owned_type(ty, &self.source)),
+                Ok(Some(shape)) if !shape.dicts.is_empty()
+            )
+    }
+
     fn generate_owned_class(
         &self,
         metadata: DeclarationMetadata<'_>,
@@ -1128,23 +1241,23 @@ impl JavaGenerator {
         let mut annotations: Vec<String> = Vec::new();
 
         if self.blanket_data {
-            push_unique(&mut annotations, "Data");
+            push_decorator(&mut annotations, "Data");
         }
         if self.blanket_value {
-            push_unique(&mut annotations, "Value");
+            push_decorator(&mut annotations, "Value");
         }
         if self.blanket_builder {
-            push_unique(&mut annotations, "Builder");
+            push_decorator(&mut annotations, "Builder");
         }
         for decorator in type_lombok_decorators {
-            push_unique(&mut annotations, decorator);
+            push_decorator(&mut annotations, decorator);
         }
 
         // `@Data` and `@Value` already bundle getters (and setters for
         // `@Data`), so only add explicit accessors when neither is present.
         let has_accessor_bundle = annotations
             .iter()
-            .any(|a| a == "Data" || a == "Value" || a == "Getter" || a == "Setter");
+            .any(|a| matches!(decorator_base(a), "Data" | "Value" | "Getter" | "Setter"));
         if !has_accessor_bundle {
             push_unique(&mut annotations, "Getter");
             push_unique(&mut annotations, "Setter");
@@ -1468,9 +1581,57 @@ impl JavaGenerator {
 
     /// The concrete type a field carries once aliases and utilities are
     /// resolved, e.g. `Required<D>` becomes `D` without its optionality.
+    /// Declarations with `@java::usetype` are kept so they can be replaced.
     fn resolved_type(&self, ty: &SimpleType) -> OwnedType {
-        self.type_hierarchy
-            .resolve_for_target(&simple_to_owned_type(ty, &self.source))
+        self.resolve_keeping_overrides(&simple_to_owned_type(ty, &self.source))
+    }
+
+    fn resolve_keeping_overrides(&self, ty: &OwnedType) -> OwnedType {
+        match ty {
+            OwnedType::Optional(inner) => {
+                OwnedType::Optional(Box::new(self.resolve_keeping_overrides(inner)))
+            }
+            OwnedType::Array(inner) => {
+                OwnedType::Array(Box::new(self.resolve_keeping_overrides(inner)))
+            }
+            _ if self.use_type_of(ty).is_some() => ty.clone(),
+            _ => self.type_hierarchy.resolve_for_target(ty),
+        }
+    }
+
+    fn use_type_of(&self, ty: &OwnedType) -> Option<&OwnedType> {
+        let definition = match ty {
+            OwnedType::Named { name, .. } => self.type_hierarchy.get_type(name)?,
+            OwnedType::Qualified {
+                module_path, name, ..
+            } => self
+                .type_hierarchy
+                .get_type_in(module_path.as_deref(), name)?,
+            _ => return None,
+        };
+        definition.use_type(NAME)
+    }
+
+    /// A string override is Java code; a fully qualified class name is imported.
+    fn use_type_to_java(
+        &self,
+        override_type: &OwnedType,
+        imports: &mut BTreeSet<String>,
+    ) -> String {
+        let OwnedType::Literal(OwnedLiteral::String(code)) = override_type else {
+            return self.owned_type_to_java(override_type, imports);
+        };
+        let qualified = code.contains('.')
+            && code.split('.').all(|segment| {
+                !segment.is_empty() && segment.chars().all(|c| c.is_alphanumeric() || c == '_')
+            });
+        match (qualified, code.rsplit_once('.')) {
+            (true, Some((_, simple))) => {
+                imports.insert(code.clone());
+                simple.to_string()
+            }
+            _ => code.clone(),
+        }
     }
 
     /// Optionality can come from the `?` prefix or from a resolved alias or
@@ -1549,6 +1710,9 @@ impl JavaGenerator {
         definition: Option<&TypeDefinition>,
         imports: &mut BTreeSet<String>,
     ) -> String {
+        if let Some(override_type) = definition.and_then(|definition| definition.use_type(NAME)) {
+            return self.use_type_to_java(override_type, imports);
+        }
         if name == "array" {
             imports.insert("java.util.List".to_string());
             let element = arguments
@@ -1651,6 +1815,10 @@ fn native_type_to_java(name: &str, imports: &mut BTreeSet<String>) -> Option<Str
         }
         "NEVER" => "Void".to_string(),
         "any" | "null" => "Object".to_string(),
+        "java::JsonElement" => {
+            imports.insert("com.google.gson.JsonElement".to_string());
+            "JsonElement".to_string()
+        }
         _ => return None,
     })
 }
@@ -1659,41 +1827,159 @@ fn has_native_java_mapping(name: &str) -> bool {
     native_type_to_java(name, &mut BTreeSet::new()).is_some()
 }
 
-/// Collects the decorator names from all `@Lombok(...)` annotations attached to
-/// a type or field, e.g. `@Lombok(ToString, EqualsAndHashCode)` → `["ToString",
-/// "EqualsAndHashCode"]`.
+/// Renders `@java::Data`-style annotations as Java decorators, e.g.
+/// `@java::Builder({ toBuilder: true })` → `Builder(toBuilder = true)`.
 fn collect_lombok_decorators(annotations: &[Annotation], source: &str) -> Vec<String> {
     let mut decorators = Vec::new();
     for annotation in annotations {
-        if annotation.ident.text(source) != "java::Lombok" {
-            continue;
-        }
-        for arg in &annotation.params {
-            if let Some(decorator) = decorator_name(arg, source) {
-                push_unique(&mut decorators, &decorator);
-            }
+        if let Ok(Some(decorator)) = lombok_decorator(&annotation.ident, &annotation.params, source)
+        {
+            push_decorator(&mut decorators, &decorator);
         }
     }
     decorators
 }
 
-/// Renders a single `@Lombok(...)` argument as a Java decorator name.
-fn decorator_name(arg: &Expr, source: &str) -> Option<String> {
-    match arg {
-        Expr::Type(Type::Simple(SimpleType::Identifier(identifier, _))) => identifier
-            .text(source)
-            .strip_prefix("java::")
-            .map(str::to_string),
+/// `Ok(None)` for annotations that are not Lombok decorators.
+fn lombok_decorator(
+    ident: &TokenData,
+    args: &[Expr],
+    source: &str,
+) -> Result<Option<String>, XenoDiagnostic> {
+    let Some(name) = ident.text(source).strip_prefix("java::") else {
+        return Ok(None);
+    };
+    let Some(spec) = LOMBOK_ANNOTATIONS
+        .iter()
+        .find(|spec| spec.annotation.name == name)
+    else {
+        return Ok(None);
+    };
+    let error = |location: TokenData, message: String| XenoDiagnostic {
+        tags: vec![],
+        location,
+        message,
+        severity: XenoDiagSeverity::Err,
+    };
+    let option_kind = |key: &str| {
+        spec.options
+            .iter()
+            .find(|(option, _)| *option == key)
+            .map(|(_, kind)| *kind)
+    };
+    let expected = |kind: LombokOption| match kind {
+        LombokOption::Bool => "a boolean literal".to_string(),
+        LombokOption::String => "a string literal".to_string(),
+        LombokOption::AccessLevel => format!("one of \"{}\"", ACCESS_LEVELS.join("\", \"")),
+    };
+    let value_of = |key: &str, kind: LombokOption, value: &SimpleType| {
+        let (location, rendered) = match value {
+            SimpleType::Literal(literal) => {
+                (literal.token(), lombok_option_value(kind, literal, source))
+            }
+            _ => (value.get_last_token(), None),
+        };
+        rendered.ok_or_else(|| {
+            error(
+                location,
+                format!("@java::{name} element '{key}' expects {}.", expected(kind)),
+            )
+        })
+    };
+
+    let elements = match args {
+        [] => Vec::new(),
+        [Expr::Type(Type::Struct(fields))] => {
+            let mut elements: Vec<(String, String)> = Vec::new();
+            for (key, value, _) in fields {
+                let key_text = key.text(source);
+                let Some(kind) = option_kind(key_text) else {
+                    return Err(error(
+                        *key,
+                        format!(
+                            "@java::{name} has no element '{key_text}'. Expected one of: {}.",
+                            spec.options
+                                .iter()
+                                .map(|(option, _)| *option)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    ));
+                };
+                elements.push((key_text.to_string(), value_of(key_text, kind, value)?));
+            }
+            elements
+        }
+        [Expr::Type(Type::Simple(value))] if option_kind("value").is_some() => {
+            let kind = option_kind("value").unwrap_or(LombokOption::String);
+            vec![("value".to_string(), value_of("value", kind, value)?)]
+        }
+        _ if spec.options.is_empty() => {
+            return Err(error(*ident, format!("@java::{name} takes no arguments.")))
+        }
+        _ => {
+            return Err(error(
+                *ident,
+                format!("@java::{name} expects its Lombok elements as {{ element: value, ... }}."),
+            ))
+        }
+    };
+
+    Ok(Some(match elements.as_slice() {
+        [] => name.to_string(),
+        [(key, value)] if key == "value" => format!("{name}({value})"),
+        _ => format!(
+            "{name}({})",
+            elements
+                .iter()
+                .map(|(key, value)| format!("{key} = {value}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }))
+}
+
+fn lombok_option_value(kind: LombokOption, literal: &Literal, source: &str) -> Option<String> {
+    let text = literal.token().text(source);
+    match (kind, literal) {
+        (LombokOption::Bool, Literal::Boolean(_, _)) => Some(text.to_string()),
+        (LombokOption::String, Literal::String(_, _)) => Some(text.to_string()),
+        (LombokOption::AccessLevel, Literal::String(_, _)) => {
+            let level = text.trim_matches('"');
+            ACCESS_LEVELS
+                .contains(&level)
+                .then(|| format!("AccessLevel.{level}"))
+        }
         _ => None,
+    }
+}
+
+fn decorator_base(decorator: &str) -> &str {
+    decorator.split('(').next().unwrap_or(decorator)
+}
+
+/// A later decorator replaces an earlier one with the same Lombok name.
+fn push_decorator(decorators: &mut Vec<String>, decorator: &str) {
+    let base = decorator_base(decorator);
+    match decorators
+        .iter_mut()
+        .find(|existing| decorator_base(existing) == base)
+    {
+        Some(existing) => *existing = decorator.to_string(),
+        None => decorators.push(decorator.to_string()),
     }
 }
 
 /// Registers the `lombok.*` import for a decorator, using its top-level name so
 /// nested decorators like `ToString.Exclude` import `lombok.ToString`.
 fn register_lombok_import(imports: &mut BTreeSet<String>, decorator: &str) {
-    let top = decorator.split('.').next().unwrap_or(decorator);
+    let base = decorator_base(decorator);
+    let top = base.split('.').next().unwrap_or(base);
     if !top.is_empty() {
         imports.insert(format!("lombok.{top}"));
+    }
+    if decorator.contains("AccessLevel.") {
+        imports.insert("lombok.AccessLevel".to_string());
     }
 }
 
@@ -3519,7 +3805,7 @@ mod tests {
 
     #[test]
     fn qualified_lombok_annotations_emit_java_decorator_names() {
-        let source = "type Example = { value: string } @java::Lombok(java::Value, java::Builder);";
+        let source = "type Example = { value: string } @java::Value @java::Builder;";
         let ast = parse(source);
         let Declaration::Type { ty, .. } = &ast[0] else {
             panic!("type declaration")
@@ -3552,15 +3838,79 @@ mod tests {
     }
 
     #[test]
-    fn lombok_types_own_the_lombok_trait() {
-        assert!(LOMBOK_TYPES
+    fn lombok_decorators_are_plugin_annotations() {
+        assert!(LOMBOK_ANNOTATIONS.iter().all(|lombok| ANNOTATIONS
             .iter()
-            .all(|semantic_type| semantic_type.implements(&LOMBOK_TRAIT)));
-        assert!(xenomorph_common::semantic::BUILTIN_TYPES
+            .any(|annotation| annotation.name == lombok.annotation.name)));
+        assert!(PROVIDED_TYPES
             .iter()
-            .filter(|semantic_type| semantic_type.name != "NEVER")
-            .all(|semantic_type| !semantic_type.implements(&LOMBOK_TRAIT)));
-        assert!(xenomorph_common::semantic::NEVER.implements(&LOMBOK_TRAIT));
+            .all(|semantic_type| semantic_type.name == JSON_ELEMENT.name));
+    }
+
+    #[test]
+    fn lombok_annotations_take_java_elements() {
+        let source = concat!(
+            "type Example = { value: string } ",
+            "@java::Builder({ toBuilder: true, builderMethodName: \"create\", access: \"PACKAGE\" }) ",
+            "@java::Getter(\"PROTECTED\") ",
+            "@java::Data({ staticConstructor: \"of\" });",
+        );
+        let ast = parse(source);
+        let Declaration::Type { ty, .. } = &ast[0] else {
+            panic!("type declaration")
+        };
+        assert_eq!(
+            collect_lombok_decorators(&ty.1, source),
+            vec![
+                "Builder(toBuilder = true, builderMethodName = \"create\", access = AccessLevel.PACKAGE)",
+                "Getter(AccessLevel.PROTECTED)",
+                "Data(staticConstructor = \"of\")",
+            ]
+        );
+        let mut generator = generator_with_declarations(&ast, source);
+        generator.blanket_data = true;
+        generator.on_before_ast(&ast, &mut Vec::new());
+        let class = generated(&generator, "Example");
+        assert!(class.contains("import lombok.AccessLevel;"), "{class}");
+        assert!(
+            class.contains("@Data(staticConstructor = \"of\")\n"),
+            "{class}"
+        );
+        assert_eq!(class.matches("@Data").count(), 1, "{class}");
+        assert!(
+            class.contains("@Getter(AccessLevel.PROTECTED)\n"),
+            "{class}"
+        );
+        assert!(!class.contains("@Setter"), "{class}");
+    }
+
+    #[test]
+    fn invalid_lombok_elements_are_reported() {
+        let source = "type A = { a: string } @java::Builder({ toBilder: true }); type B = { b: string } @java::Getter(\"SECRET\"); type C = { c: string } @java::NonNull(true);";
+        let ast = parse(source);
+        let messages = ast
+            .iter()
+            .filter_map(|declaration| match declaration {
+                Declaration::Type { ty, .. } => Some(&ty.1),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|annotation| {
+                lombok_decorator(&annotation.ident, &annotation.params, source).err()
+            })
+            .map(|diagnostic| {
+                (
+                    diagnostic.location.text(source).to_string(),
+                    diagnostic.message,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(messages.len(), 3, "{messages:?}");
+        assert_eq!(messages[0].0, "toBilder");
+        assert!(messages[0].1.contains("toBuilder"), "{messages:?}");
+        assert_eq!(messages[1].0, "\"SECRET\"");
+        assert!(messages[1].1.contains("PROTECTED"), "{messages:?}");
+        assert_eq!(messages[2].0, "java::NonNull");
     }
 
     fn token(value: &str) -> TokenData {
@@ -3600,8 +3950,58 @@ mod tests {
                     name.text(source),
                     TypeDeclarationInfo::from_ast(generics.as_deref(), &ty.0, source),
                 );
+                generator.type_hierarchy.set_declaration_annotations(
+                    "test",
+                    name.text(source),
+                    xenomorph_common::semantic::declaration_annotations(&ty.1, source),
+                );
             }
         }
         generator
+    }
+
+    #[test]
+    fn usetype_replaces_the_declaration_and_its_references() {
+        let source = concat!(
+            "type Base = { id: string }; ",
+            "type Open = &Base&Dict<string, any> @java::usetype(java::JsonElement); ",
+            "type Raw = &Base&Dict<string, any> @java::usetype(\"com.acme.Raw\"); ",
+            "type Holder = { open: Open, maybe: ?Open, many: Open[], raw: Raw };",
+        );
+        let ast = parse(source);
+        let mut generator = generator_with_declarations(&ast, source);
+        let mut errors = Vec::new();
+
+        generator.on_before_ast(&ast, &mut errors);
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(generator
+            .files
+            .iter()
+            .all(|(name, _)| name != "Open" && name != "Raw"));
+        let holder = generated(&generator, "Holder");
+        assert!(holder.contains("import com.google.gson.JsonElement;"));
+        assert!(holder.contains("import com.acme.Raw;"));
+        assert!(holder.contains("private JsonElement open;"));
+        assert!(holder.contains("private JsonElement maybe;"));
+        assert!(holder.contains("private List<JsonElement> many;"));
+        assert!(holder.contains("private Raw raw;"));
+    }
+
+    #[test]
+    fn struct_and_dict_intersections_are_refused() {
+        let source = "type Base = { id: string }; type Open = &Base&Dict<string, any>;";
+        let ast = parse(source);
+        let mut generator = generator_with_declarations(&ast, source);
+        let mut errors = Vec::new();
+
+        generator.on_before_ast(&ast, &mut errors);
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].location.text(source), "Open");
+        assert!(errors[0]
+            .message
+            .contains("@java::usetype(java::JsonElement)"));
+        assert!(generator.files.iter().all(|(name, _)| name != "Open"));
     }
 }

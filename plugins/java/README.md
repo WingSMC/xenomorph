@@ -84,7 +84,7 @@ public class SomethingTuple {
 }
 ```
 
-The exact Lombok annotations and accessors depend on the plugin configuration and any Xenomorph `@java::Lombok(java::Value, ...)` annotations.
+The exact Lombok annotations and accessors depend on the plugin configuration and any Xenomorph Lombok annotations such as `@java::Value` or `@java::Builder({ toBuilder: true, access: "PACKAGE" })`. Each takes the same optional elements as its Lombok counterpart, written as a struct; `AccessLevel` values are strings such as `"PROTECTED"`, and `@java::Getter("PROTECTED")`-style shorthand sets `value`.
 
 ## Struct utilities and intersections
 

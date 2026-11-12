@@ -49,7 +49,7 @@ pub fn format_owned_annotation_documentation(
         documentation.push_str(&format!(
             "\n\n**Applicable {}:** `{}`",
             match target.constraint {
-                OwnedConstraint::Type(_) => "type",
+                OwnedConstraint::Type(_) | OwnedConstraint::Target => "type",
                 OwnedConstraint::Trait(_) => "trait",
             },
             target.constraint.name()

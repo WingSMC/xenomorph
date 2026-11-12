@@ -176,10 +176,15 @@ pub struct GenericParam {
     pub constraint: Option<XenoConstraint>,
 }
 
+/// Display name of [`XenoConstraint::Target`] in annotation signatures.
+pub const TARGET_CONSTRAINT_NAME: &str = "Self";
+
 #[derive(Debug, Clone, Copy)]
 pub enum XenoConstraint {
     Type(&'static XenoType),
     Trait(&'static XenoTrait),
+    /// A value of the annotated type; valid only for explicit annotation parameters.
+    Target,
 }
 
 impl XenoConstraint {
@@ -187,6 +192,7 @@ impl XenoConstraint {
         match self {
             Self::Type(required) => required.name,
             Self::Trait(required) => required.name,
+            Self::Target => TARGET_CONSTRAINT_NAME,
         }
     }
 }
@@ -412,7 +418,7 @@ static U32: XenoType = XenoType {
     parents: Some(&[XenoParent::Type(&U64), XenoParent::Type(&I64)]),
 };
 
-static U64: XenoType = XenoType {
+pub static U64: XenoType = XenoType {
     name: "u64",
     documentation: Some("The u64 type represents a 64-bit unsigned integer."),
     generic_params: None,

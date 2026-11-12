@@ -77,7 +77,8 @@ With the Java plugin enabled:
 
 ```xen
 pub type User = { name: string }
-    @java::Lombok(java::Value, java::Builder);
+    @java::Value
+    @java::Builder({ toBuilder: true });
 ```
 
 With the Pydantic plugin enabled:
@@ -87,7 +88,7 @@ pub type User = { name: string } @pydantic::extra("allow");
 ```
 
 Migrate existing plugin references such as `symbol` and `@Lombok(Data)` to
-`TS::symbol` and `@java::Lombok(java::Data)`. Rebuild plugins with the
+`TS::symbol` and `@java::Data`. Rebuild plugins with the
 updated SDK; the description payload now includes the required namespace.
 
 ## Custom declaration matchers

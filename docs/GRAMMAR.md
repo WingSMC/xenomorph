@@ -324,20 +324,30 @@ performed by a plugin. Annotation order is retained in the AST.
 
 | Annotation                                        | Applicable target            | Explicit arguments           |
 | ------------------------------------------------- | ---------------------------- | ---------------------------- |
-| `@min(value)`, `@max(value)`                      | `Numeric`                    | One numeric literal          |
-| `@gt(value)`, `@lt(value)`                        | `Numeric`                    | One numeric literal          |
-| `@multipleof(value)`                              | `Numeric`                    | One positive numeric literal |
-| `@len(value)`, `@minlen(value)`, `@maxlen(value)` | `HasLength`                  | One integer literal          |
+| `@min(value)`, `@max(value)`                      | `Numeric`                    | One value of the target type |
+| `@gt(value)`, `@lt(value)`                        | `Numeric`                    | One value of the target type |
+| `@multipleof(value)`                              | `Numeric`                    | One positive target value    |
+| `@len(value)`, `@minlen(value)`, `@maxlen(value)` | `HasLength`                  | One `u64` value              |
 | `@match(pattern)`                                 | `string` and its descendants | One regex literal            |
 | `@deprecated(reason)`                             | Any type                     | Optional string literal      |
+| `@default(value)`                                 | Any type                     | One value of the target type |
 | `@if(condition, expression)`                      | Any type                     | Two expressions              |
 | `@elseif(condition, expression)`                  | Any type                     | Two expressions              |
 | `@else(expression)`                               | Any type                     | One expression               |
 
 Targets are checked against the registered type or trait constraint. For example,
 `@minlen` applies to values implementing `HasLength`, including strings and
-arrays. Numeric annotations accept integer and decimal literals, including
-compatible numeric casts.
+arrays. Value arguments are typed by the type system: a parameter declared as
+`Self` accepts a value assignable to the annotated type, so `u8 @max(300)` is
+an error. An integer literal also fits float and decimal targets.
+
+`@default(value)` records the default value of a type. The value must be a
+literal, `null`, or a list or struct of those, assignable to the annotated
+type, for example `type Port = u16 @default(8080);`, `string[] @default([])`,
+`Dict<string, i32> @default({})`, or `{}` for a struct whose fields are all
+optional. It does not change validation. Generators
+apply it to fields of that type; the Pydantic plugin uses it as the field
+default.
 
 `@multipleof(0.1)` describes increments of one tenth; `@multipleof(10)` describes
 increments of ten. The argument must be greater than zero and is stored exactly.

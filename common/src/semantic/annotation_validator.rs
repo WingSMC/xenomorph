@@ -4,7 +4,7 @@ use crate::{
     parser::{Declaration, Expr, Literal, SimpleType, Type, XenoType as AstType},
     semantic::{
         simple_to_owned_type, type_to_owned_type, AnalyzerListener, OwnedAnnotation,
-        OwnedConstraint, OwnedTrait, OwnedTraitKind, OwnedType, ScopeInfo,
+        OwnedConstraint, OwnedTrait, OwnedTraitKind, OwnedType, ScopeInfo, XenoAnnotationKind,
     },
     TokenData, XenoDiagnostic,
 };
@@ -13,6 +13,7 @@ pub struct AnnotationValidator<'context> {
     scope: &'context ScopeInfo,
     source: &'context str,
     type_stack: Vec<Vec<OwnedType>>,
+    declared_types: Vec<OwnedType>,
     generic_params: HashMap<String, Option<String>>,
     annotation_depth: usize,
 }
@@ -23,6 +24,7 @@ impl<'context> AnnotationValidator<'context> {
             scope,
             source,
             type_stack: Vec::new(),
+            declared_types: Vec::new(),
             generic_params: HashMap::new(),
             annotation_depth: 0,
         }
@@ -133,17 +135,19 @@ impl<'context> AnnotationValidator<'context> {
         annotation: &OwnedAnnotation,
         name: &TokenData,
         errors: &mut Vec<XenoDiagnostic>,
-    ) {
+    ) -> bool {
         if self.annotation_depth > 0 {
-            return;
+            return true;
         }
 
         let Some(target) = annotation.target_parameter() else {
-            return;
+            return true;
         };
 
+        let mut applicable = true;
         for candidate in self.current_types() {
             if !self.type_matches_constraint(candidate, &target.constraint) {
+                applicable = false;
                 errors.push(XenoDiagnostic {
                     tags: vec![],
                     location: (*name),
@@ -158,11 +162,13 @@ impl<'context> AnnotationValidator<'context> {
                 });
             }
         }
+        applicable
     }
 
     fn validate_args(
         &self,
         annotation: &OwnedAnnotation,
+        target: Option<&OwnedType>,
         name: &TokenData,
         args: &[Expr],
         errors: &mut Vec<XenoDiagnostic>,
@@ -197,17 +203,16 @@ impl<'context> AnnotationValidator<'context> {
             let Some(param) = annotation.parameter_at(index) else {
                 continue;
             };
-            if !self.arg_matches_constraint(arg, &param.constraint) {
+            if let Err(got) = self.check_arg(target, arg, &param.constraint) {
                 errors.push(XenoDiagnostic {
                     tags: vec![],
                     severity: crate::XenoDiagSeverity::Err,
                     location: Self::expr_location(arg),
                     message: format!(
-                        "Annotation '@{}' argument '{}' expects {}, got {}.",
+                        "Annotation '@{}' argument '{}' expects {}, got {got}.",
                         annotation.name,
                         param.name,
-                        param.constraint.name(),
-                        Self::arg_type_name(arg)
+                        Self::expected_name(target, &param.constraint),
                     ),
                 });
             } else if annotation.name == "multipleof" {
@@ -234,35 +239,116 @@ impl<'context> AnnotationValidator<'context> {
         }
     }
 
+    /// The type a `Self` parameter is checked against. Validators constrain
+    /// the present value of an optional type; metadata describes the type as
+    /// declared, so `?T @default(null)` is valid.
+    fn target_type(&self, annotation: &OwnedAnnotation) -> Option<&OwnedType> {
+        if self.annotation_depth > 0 {
+            return None;
+        }
+        match annotation.kind {
+            XenoAnnotationKind::Meta | XenoAnnotationKind::Transformation => {
+                self.declared_types.last()
+            }
+            XenoAnnotationKind::Validation | XenoAnnotationKind::ComplexValidation => {
+                self.current_types().first()
+            }
+        }
+    }
+
+    fn expected_name(target: Option<&OwnedType>, constraint: &OwnedConstraint) -> String {
+        match constraint {
+            OwnedConstraint::Trait(name) => name.clone(),
+            OwnedConstraint::Type(name) => format!("a value of type '{name}'"),
+            OwnedConstraint::Target => format!(
+                "a value of type '{}'",
+                target.map_or_else(|| constraint.name().to_string(), OwnedType::display_name)
+            ),
+        }
+    }
+
+    /// Checks one argument; the error describes what was written instead.
+    fn check_arg(
+        &self,
+        target: Option<&OwnedType>,
+        arg: &Expr,
+        required: &OwnedConstraint,
+    ) -> Result<(), String> {
+        let mismatch = || Err(Self::arg_type_name(arg).to_string());
+        match required {
+            OwnedConstraint::Trait(required) => {
+                match self.scope.type_hierarchy.get_trait(required) {
+                    Some(required) if self.arg_matches_trait(arg, required) => Ok(()),
+                    _ => mismatch(),
+                }
+            }
+            OwnedConstraint::Type(required) => match self.arg_value(arg) {
+                Some(value) => self.check_value(&value, &OwnedType::named(required.as_str())),
+                // A type-constrained parameter still accepts a descending type reference.
+                None => match arg {
+                    Expr::Type(Type::Simple(simple))
+                        if self.scope.descends_from_semantic_type(
+                            &simple_to_owned_type(simple, self.source),
+                            required,
+                        ) =>
+                    {
+                        Ok(())
+                    }
+                    _ => mismatch(),
+                },
+            },
+            OwnedConstraint::Target => match (self.arg_value(arg), target) {
+                (Some(value), Some(target)) => self.check_value(&value, target),
+                (Some(_), None) => Ok(()),
+                (None, _) => mismatch(),
+            },
+        }
+    }
+
+    fn check_value(&self, value: &OwnedType, target: &OwnedType) -> Result<(), String> {
+        if self.scope.type_hierarchy.is_assignable_to(value, target) {
+            Ok(())
+        } else {
+            Err(format!("'{}'", value.display_name()))
+        }
+    }
+
+    /// The literal type of a written value: a literal, `null`, or a list or
+    /// struct of those, e.g. `[]` or `{ port: 80 }`.
+    fn arg_value(&self, arg: &Expr) -> Option<OwnedType> {
+        let Expr::Type(ty) = arg else {
+            return None;
+        };
+        let is_value = match ty {
+            Type::Simple(simple) => self.is_simple_value(simple),
+            Type::Tuple(items) => items.iter().all(|item| self.is_simple_value(item)),
+            Type::Struct(fields) => fields.iter().all(|(_, ty, _)| self.is_simple_value(ty)),
+            _ => false,
+        };
+        is_value.then(|| type_to_owned_type(ty, self.source))
+    }
+
+    fn is_simple_value(&self, simple: &SimpleType) -> bool {
+        match simple {
+            SimpleType::Literal(_) => true,
+            SimpleType::Identifier(identifier, None) => identifier.text(self.source) == "null",
+            _ => false,
+        }
+    }
+
     fn type_matches_constraint(&self, candidate: &OwnedType, required: &OwnedConstraint) -> bool {
         match required {
             OwnedConstraint::Type(required) => {
                 self.scope.descends_from_semantic_type(candidate, required)
             }
             OwnedConstraint::Trait(required) => self.scope.implements_trait(candidate, required),
-        }
-    }
-
-    fn arg_matches_constraint(&self, arg: &Expr, required: &OwnedConstraint) -> bool {
-        match required {
-            OwnedConstraint::Type(required) => match arg {
-                Expr::Type(Type::Simple(simple)) => self.scope.descends_from_semantic_type(
-                    &simple_to_owned_type(simple, self.source),
-                    required,
-                ),
-                _ => false,
-            },
-            OwnedConstraint::Trait(required) => self
-                .scope
-                .type_hierarchy
-                .get_trait(required)
-                .is_some_and(|required| self.arg_matches_trait(arg, required)),
+            OwnedConstraint::Target => true,
         }
     }
 
     fn constraint_kind(constraint: &OwnedConstraint) -> &'static str {
         match constraint {
-            OwnedConstraint::Type(_) => "type",
+            OwnedConstraint::Type(_) | OwnedConstraint::Target => "type",
             OwnedConstraint::Trait(_) => "trait",
         }
     }
@@ -369,6 +455,9 @@ impl<'context> AnnotationValidator<'context> {
 impl<'src, 'context> AnalyzerListener<'src> for AnnotationValidator<'context> {
     fn on_before_type(&mut self, ty: &AstType, _errors: &mut Vec<XenoDiagnostic>) {
         self.type_stack.push(self.resolve_types(ty));
+        let declared = type_to_owned_type(&ty.0, self.source);
+        self.declared_types
+            .push(self.resolve_generic_references(declared));
     }
 
     fn on_before_decl(&mut self, declaration: &Declaration, _errors: &mut Vec<XenoDiagnostic>) {
@@ -397,6 +486,7 @@ impl<'src, 'context> AnalyzerListener<'src> for AnnotationValidator<'context> {
 
     fn on_after_type(&mut self, _ty: &AstType, _errors: &mut Vec<XenoDiagnostic>) {
         self.type_stack.pop();
+        self.declared_types.pop();
     }
 
     fn on_before_annotation(
@@ -406,8 +496,13 @@ impl<'src, 'context> AnalyzerListener<'src> for AnnotationValidator<'context> {
         errors: &mut Vec<XenoDiagnostic>,
     ) {
         if let Some(annotation) = self.scope.find_annotation(name.text(self.source)) {
-            self.validate_applicability(annotation, name, errors);
-            self.validate_args(annotation, name, args, errors);
+            let applicable = self.validate_applicability(annotation, name, errors);
+            let target = if applicable {
+                self.target_type(annotation)
+            } else {
+                None
+            };
+            self.validate_args(annotation, target, name, args, errors);
         }
         self.annotation_depth += 1;
     }

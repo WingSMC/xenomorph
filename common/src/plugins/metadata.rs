@@ -98,6 +98,7 @@ impl Builder<'_> {
         Ok(match constraint {
             XenoConstraint::Type(ty) => OwnedConstraint::Type(self.ty(ty, false)?),
             XenoConstraint::Trait(tr) => OwnedConstraint::Trait(self.tr(tr)?),
+            XenoConstraint::Target => OwnedConstraint::Target,
         })
     }
 

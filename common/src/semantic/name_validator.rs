@@ -10,6 +10,9 @@ pub struct NameValidator<'context> {
     scope: &'context ScopeInfo,
     source: &'context str,
     generic_params: HashMap<String, Option<String>>,
+    /// Depth of `usetype` annotations being walked. Their arguments name
+    /// target-language types, so they are not xenomorph names.
+    opaque_depth: usize,
 }
 
 impl<'context> NameValidator<'context> {
@@ -18,6 +21,7 @@ impl<'context> NameValidator<'context> {
             scope,
             source,
             generic_params: HashMap::new(),
+            opaque_depth: 0,
         }
     }
 
@@ -240,6 +244,9 @@ impl<'src, 'context> AnalyzerListener<'src> for NameValidator<'context> {
     }
 
     fn on_simple_type(&mut self, ty: &SimpleType, errors: &mut Vec<XenoDiagnostic>) {
+        if self.opaque_depth > 0 {
+            return;
+        }
         match ty.inner() {
             SimpleType::Identifier(id, arguments) | SimpleType::Array(id, arguments) => {
                 if !self.validate_known_type(id, errors) {
@@ -267,6 +274,9 @@ impl<'src, 'context> AnalyzerListener<'src> for NameValidator<'context> {
     }
 
     fn on_before_set(&mut self, set: &SetType, errors: &mut Vec<XenoDiagnostic>) {
+        if self.opaque_depth > 0 {
+            return;
+        }
         let values = set.values.as_deref().unwrap_or_default();
         // An untyped prefill adopts its first value's narrowest type, so a
         // wider member forces an explicit `set<T>`.
@@ -326,13 +336,29 @@ impl<'src, 'context> AnalyzerListener<'src> for NameValidator<'context> {
         _args: &[Expr],
         errors: &mut Vec<XenoDiagnostic>,
     ) {
-        if !self.scope.has_annotation(name.text(self.source)) {
+        let text = name.text(self.source);
+        if text == "usetype" || text.ends_with("::usetype") {
+            self.opaque_depth += 1;
+        }
+        if !self.scope.has_annotation(text) {
             errors.push(XenoDiagnostic {
                 tags: vec![],
                 location: (*name),
-                message: format!("Unknown annotation '@{}'", name.text(self.source)),
+                message: format!("Unknown annotation '@{}'", text),
                 severity: crate::XenoDiagSeverity::Warn,
             });
+        }
+    }
+
+    fn on_after_annotation(
+        &mut self,
+        name: &TokenData,
+        _args: &[Expr],
+        _errors: &mut Vec<XenoDiagnostic>,
+    ) {
+        let text = name.text(self.source);
+        if text == "usetype" || text.ends_with("::usetype") {
+            self.opaque_depth -= 1;
         }
     }
 }

@@ -21,11 +21,11 @@ package = "models"
 extra = "forbid"
 ```
 
-| Setting   | Type   | Purpose                                                                                                                                                                                     |
-| --------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `output`  | string | Target directory for generated `.py` files. Relative paths start at the workspace root. Module subdirectories are created below this directory. If omitted, output is written next to each source module. |
+| Setting   | Type   | Purpose                                                                                                                                                                                                                       |
+| --------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `output`  | string | Target directory for generated `.py` files. Relative paths start at the workspace root. Module subdirectories are created below this directory. If omitted, output is written next to each source module.                     |
 | `package` | string | Dotted Python package that contains `output`, such as `app.models`. If set, cross-module imports are absolute (`from app.models.shared.ids import UserId`). If omitted, they are relative (`from .shared.ids import UserId`). |
-| `extra`   | string | Default `extra` behaviour of every generated model: `"allow"`, `"ignore"`, or `"forbid"`. `@pydantic::extra` overrides it per model. If omitted, Pydantic's default (`"ignore"`) applies.   |
+| `extra`   | string | Default `extra` behaviour of every generated model: `"allow"`, `"ignore"`, or `"forbid"`. `@pydantic::extra` overrides it per model. If omitted, Pydantic's default (`"ignore"`) applies.                                     |
 
 ### Requirements
 
@@ -39,15 +39,15 @@ extra = "forbid"
 
 The plugin generates these Python constructs:
 
-| Xenomorph declaration                               | Python output                                                          |
-| --------------------------------------------------- | ---------------------------------------------------------------------- |
-| Struct `{ ... }`                                    | `class Name(BaseModel)`                                                |
-| Intersection of structs, `Pick`, `Omit`, `Partial`, `Complete` | `class Name(BaseModel)` with the resolved fields             |
-| Generic struct `type Page<T> = { ... }`             | `class Page[T](BaseModel)`                                             |
-| Enum of integer values                              | `class Name(IntEnum)`                                                  |
-| Enum with a float value                             | `class Name(Enum)`                                                     |
-| Other enum                                          | A discriminated union of variant models (see [Enums](#enums))          |
-| Any other type                                      | `type Name = ...` alias                                                |
+| Xenomorph declaration                                          | Python output                                                 |
+| -------------------------------------------------------------- | ------------------------------------------------------------- |
+| Struct `{ ... }`                                               | `class Name(BaseModel)`                                       |
+| Intersection of structs, `Pick`, `Omit`, `Partial`, `Complete` | `class Name(BaseModel)` with the resolved fields              |
+| Generic struct `type Page<T> = { ... }`                        | `class Page[T](BaseModel)`                                    |
+| Enum of integer values                                         | `class Name(IntEnum)`                                         |
+| Enum with a float value                                        | `class Name(Enum)`                                            |
+| Other enum                                                     | A discriminated union of variant models (see [Enums](#enums)) |
+| Any other type                                                 | `type Name = ...` alias                                       |
 
 Each module also has an `__all__` list of its `pub` declarations. The
 documentation comment of a declaration becomes a docstring (models) or a
@@ -83,17 +83,48 @@ A field is optional if its type is `?T`, `null`, a union with an optional or
 `model_dump()` keeps absent optional fields as `None`. Use
 `model_dump(exclude_none=True)` to omit them again.
 
+### Default values
+
+`@default(value)` on an alias sets the default of every struct field of that
+type, also through optional types and alias chains. It replaces the `None`
+default of optional fields. The alias itself does not get the default:
+
+```xen
+type Port = u16 @default(8080);
+type Host = ?string @default("localhost");
+type Server = { port: Port, host: Host };
+```
+
+```python
+class Server(BaseModel):
+    port: Port = 8080
+    host: Host = "localhost"
+```
+
+Lists and dicts render as Python literals; Pydantic copies them per instance.
+A struct default on a model type becomes a factory:
+
+```xen
+type Options = { debug: ?bool } @default({});
+type Named = { name: ?string } @default({ name: "x" });
+```
+
+```python
+    options: Options = Field(default_factory=Options)
+    named: Named = Field(default_factory=lambda: Named.model_validate({"name": "x"}))
+```
+
 ### Field names
 
 A field name that is not a valid Python attribute name is renamed. The
 original name is kept as the JSON alias:
 
-| Xenomorph field          | Python field                               |
-| ------------------------ | ------------------------------------------ |
-| `"first-name": string`   | `first_name: str = Field(alias="first-name")` |
-| `class: string`          | `class_: str = Field(alias="class")`       |
-| `_id: uuid`              | `id: UUID = Field(alias="_id")`            |
-| `model_type: string`     | `f_model_type: str = Field(alias="model_type")` |
+| Xenomorph field        | Python field                                    |
+| ---------------------- | ----------------------------------------------- |
+| `"first-name": string` | `first_name: str = Field(alias="first-name")`   |
+| `class: string`        | `class_: str = Field(alias="class")`            |
+| `_id: uuid`            | `id: UUID = Field(alias="_id")`                 |
+| `model_type: string`   | `f_model_type: str = Field(alias="model_type")` |
 
 The plugin also renames fields that shadow `BaseModel` attributes, such as
 `json` or `copy`. A model with a renamed field gets `populate_by_name=True`.
@@ -101,42 +132,42 @@ Serialize with `model_dump(by_alias=True)` to write the original names.
 
 ### Builtin types
 
-| Xenomorph                                   | Python                                    |
-| ------------------------------------------- | ----------------------------------------- |
-| `string`                                    | `str`                                     |
-| `char`                                      | `str` with length 1                       |
-| `hostname`, `semver`                        | `str` with a pattern                      |
-| `bool`                                      | `bool`                                    |
-| `number`, `f32`, `f64`                      | `float`                                   |
-| `integer`, `bigint`                         | `int`                                     |
-| `u8` … `u128`, `i8` … `i128`                | `int` with `ge` and `le` bounds           |
-| `decimal`                                   | `Decimal`                                 |
-| `uuid`                                      | `UUID`                                    |
-| `email`                                     | `EmailStr`                                |
-| `url`                                       | `AnyUrl`                                  |
-| `ip`, `ipv4`, `ipv6`                        | `IPvAnyAddress`, `IPv4Address`, `IPv6Address` |
-| `date`, `datetime`, `duration`              | `date`, `datetime`, `timedelta`           |
-| `binary`                                    | `Base64Bytes`                             |
-| `regex`                                     | `re.Pattern[str]`                         |
-| `any`                                       | `Any`                                     |
-| `null`                                      | `None`                                    |
-| `T[]`, `set<T>`, `[A, B]`, `Dict<K, V>`     | `list[T]`, `set[T]`, `tuple[A, B]`, `dict[K, V]` |
-| Literals and `set ["a", "b"]`               | `Literal[...]`                            |
-| `\|A\|B`                                    | `A \| B`                                  |
+| Xenomorph                               | Python                                           |
+| --------------------------------------- | ------------------------------------------------ |
+| `string`                                | `str`                                            |
+| `char`                                  | `str` with length 1                              |
+| `hostname`, `semver`                    | `str` with a pattern                             |
+| `bool`                                  | `bool`                                           |
+| `number`, `f32`, `f64`                  | `float`                                          |
+| `integer`, `bigint`                     | `int`                                            |
+| `u8` … `u128`, `i8` … `i128`            | `int` with `ge` and `le` bounds                  |
+| `decimal`                               | `Decimal`                                        |
+| `uuid`                                  | `UUID`                                           |
+| `email`                                 | `EmailStr`                                       |
+| `url`                                   | `AnyUrl`                                         |
+| `ip`, `ipv4`, `ipv6`                    | `IPvAnyAddress`, `IPv4Address`, `IPv6Address`    |
+| `date`, `datetime`, `duration`          | `date`, `datetime`, `timedelta`                  |
+| `binary`                                | `Base64Bytes`                                    |
+| `regex`                                 | `re.Pattern[str]`                                |
+| `any`                                   | `Any`                                            |
+| `null`                                  | `None`                                           |
+| `T[]`, `set<T>`, `[A, B]`, `Dict<K, V>` | `list[T]`, `set[T]`, `tuple[A, B]`, `dict[K, V]` |
+| Literals and `set ["a", "b"]`           | `Literal[...]`                                   |
+| `\|A\|B`                                | `A \| B`                                         |
 
 ### Native validators
 
-| Xenomorph       | Pydantic `Field` constraint     |
-| --------------- | ------------------------------- |
-| `@min(x)`       | `ge=x`                          |
-| `@max(x)`       | `le=x`                          |
-| `@gt(x)`        | `gt=x`                          |
-| `@lt(x)`        | `lt=x`                          |
-| `@multipleof(x)`| `multiple_of=x`                 |
-| `@len(n)`       | `min_length=n, max_length=n`    |
-| `@minlen(n)`    | `min_length=n`                  |
-| `@maxlen(n)`    | `max_length=n`                  |
-| `@match(/re/)`  | `pattern="re"`                  |
+| Xenomorph        | Pydantic `Field` constraint  |
+| ---------------- | ---------------------------- |
+| `@min(x)`        | `ge=x`                       |
+| `@max(x)`        | `le=x`                       |
+| `@gt(x)`         | `gt=x`                       |
+| `@lt(x)`         | `lt=x`                       |
+| `@multipleof(x)` | `multiple_of=x`              |
+| `@len(n)`        | `min_length=n, max_length=n` |
+| `@minlen(n)`     | `min_length=n`               |
+| `@maxlen(n)`     | `max_length=n`               |
+| `@match(/re/)`   | `pattern="re"`               |
 
 A validator cannot loosen a builtin bound. For example, `u8 @min(18)` becomes
 `Annotated[int, Field(ge=18, le=255)]`, and `i8 @min(-500)` keeps `ge=-128`.
@@ -196,16 +227,16 @@ The plugin adds these annotations in the `pydantic` namespace.
 These annotations apply only to struct-like declarations. They set entries in
 the model's `model_config = ConfigDict(...)`.
 
-| Annotation                              | `ConfigDict` entry                                     |
-| --------------------------------------- | ------------------------------------------------------ |
-| `@pydantic::extra("allow")`             | `extra="allow"`. Also `"ignore"` or `"forbid"`.        |
-| `@pydantic::frozen`                     | `frozen=True`                                          |
-| `@pydantic::populate_by_name`           | `populate_by_name=True`                                |
-| `@pydantic::validate_assignment`        | `validate_assignment=True`                             |
-| `@pydantic::use_enum_values`            | `use_enum_values=True`                                 |
-| `@pydantic::str_strip_whitespace`       | `str_strip_whitespace=True`                            |
-| `@pydantic::alias_generator("camel")`   | `alias_generator=to_camel`. Also `"pascal"` or `"snake"`. |
-| `@pydantic::config("key", value)`       | `key=value` for any other `ConfigDict` key             |
+| Annotation                            | `ConfigDict` entry                                        |
+| ------------------------------------- | --------------------------------------------------------- |
+| `@pydantic::extra("allow")`           | `extra="allow"`. Also `"ignore"` or `"forbid"`.           |
+| `@pydantic::frozen`                   | `frozen=True`                                             |
+| `@pydantic::populate_by_name`         | `populate_by_name=True`                                   |
+| `@pydantic::validate_assignment`      | `validate_assignment=True`                                |
+| `@pydantic::use_enum_values`          | `use_enum_values=True`                                    |
+| `@pydantic::str_strip_whitespace`     | `str_strip_whitespace=True`                               |
+| `@pydantic::alias_generator("camel")` | `alias_generator=to_camel`. Also `"pascal"` or `"snake"`. |
+| `@pydantic::config("key", value)`     | `key=value` for any other `ConfigDict` key                |
 
 ```xen
 pub type User = { name: string, "first-name": string }
@@ -216,23 +247,23 @@ pub type User = { name: string, "first-name": string }
 
 ### Models and type aliases
 
-| Annotation                           | Effect                                                                 |
-| ------------------------------------ | ---------------------------------------------------------------------- |
-| `@pydantic::strict`                  | Disables lax type coercion (`strict=True`).                            |
-| `@pydantic::title("Text")`           | Sets the JSON Schema title.                                            |
-| `@pydantic::discriminator("field")`  | Validates a union of models as a tagged union keyed by `field`.        |
+| Annotation                          | Effect                                                          |
+| ----------------------------------- | --------------------------------------------------------------- |
+| `@pydantic::strict`                 | Disables lax type coercion (`strict=True`).                     |
+| `@pydantic::title("Text")`          | Sets the JSON Schema title.                                     |
+| `@pydantic::discriminator("field")` | Validates a union of models as a tagged union keyed by `field`. |
 
 ### Custom validators
 
 These annotations take the dotted import path of a Python function. A path
 that starts with `.` is relative to the generated module.
 
-| Annotation                              | On a type alias               | On a model                                         |
-| --------------------------------------- | ----------------------------- | -------------------------------------------------- |
-| `@pydantic::after_validator("m.f")`     | `AfterValidator(f)`           | `@model_validator(mode="after")`, calls `f(self)`  |
-| `@pydantic::before_validator("m.f")`    | `BeforeValidator(f)`          | `@model_validator(mode="before")`, calls `f(data)` |
-| `@pydantic::wrap_validator("m.f")`      | `WrapValidator(f)`            | `@model_validator(mode="wrap")`, calls `f(data, handler)` |
-| `@pydantic::plain_validator("m.f")`     | `PlainValidator(f)`           | Not supported (error)                              |
+| Annotation                           | On a type alias      | On a model                                                |
+| ------------------------------------ | -------------------- | --------------------------------------------------------- |
+| `@pydantic::after_validator("m.f")`  | `AfterValidator(f)`  | `@model_validator(mode="after")`, calls `f(self)`         |
+| `@pydantic::before_validator("m.f")` | `BeforeValidator(f)` | `@model_validator(mode="before")`, calls `f(data)`        |
+| `@pydantic::wrap_validator("m.f")`   | `WrapValidator(f)`   | `@model_validator(mode="wrap")`, calls `f(data, handler)` |
+| `@pydantic::plain_validator("m.f")`  | `PlainValidator(f)`  | Not supported (error)                                     |
 
 ```xen
 pub type Slug = string @pydantic::after_validator("app.checks.slugify");

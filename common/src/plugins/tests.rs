@@ -840,11 +840,11 @@ fn lsp_metadata_survives_generator_library_release() {
         .description
         .metadata
         .annotations
-        .contains_key("java::Lombok"));
+        .contains_key("java::Data"));
     let registry = XenoRegistry::with_config(config, false).unwrap();
     let diagnostics = registry.load_module_from_source(
         &workspace.0.join("index.xen"),
-        "type Example = TS::symbol @java::Lombok(java::Data);".into(),
+        "type Example = TS::symbol @java::Data;".into(),
     );
     assert!(
         !diagnostics

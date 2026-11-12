@@ -11,10 +11,11 @@ use xenomorph_common::parser::{
 use xenomorph_common::plugins::XenoPlugin;
 use xenomorph_common::semantic::{
     is_type_utility, literal_to_owned, simple_to_owned_type, unsupported_target_type_diagnostic,
-    AnalyzerListener, OwnedLiteral, OwnedType, ScopeInfo, TypeHierarchy,
+    use_type_override, AnalyzerListener, OwnedLiteral, OwnedType, ScopeInfo, TypeHierarchy,
+    XenoAnnotation, USETYPE,
 };
 use xenomorph_common::utils::extract_documentation;
-use xenomorph_common::{TokenData, XenoDiagnostic};
+use xenomorph_common::{TokenData, XenoDiagSeverity, XenoDiagnostic};
 
 // ── Plugin registration ─────────────────────────────────────────────
 
@@ -27,12 +28,17 @@ static PLUGIN: XenoPlugin = XenoPlugin {
     initialize: None,
     shutdown: None,
     provide_types: None,
-    provide_annotations: None,
+    provide_annotations: Some(provide_annotations),
     provide_custom_declarations: None,
     provide_config_schema: Some(provide_config_schema),
     register_generator: Some(create_generator),
     register_analyzer: None,
 };
+
+fn provide_annotations() -> &'static [&'static XenoAnnotation] {
+    static ANNOTATIONS: &[&XenoAnnotation] = &[&USETYPE];
+    ANNOTATIONS
+}
 
 fn provide_config_schema() -> &'static str {
     r#"{
@@ -283,13 +289,40 @@ impl JsonSchemaGenerator {
                     .map(|item| self.simple_type_to_schema(item, context))
                     .collect::<Vec<_>>()
             }),
-            Type::Intersection(items) => json!({
-                "allOf": items
-                    .iter()
-                    .map(|item| self.simple_type_to_schema(item, context))
-                    .collect::<Vec<_>>()
-            }),
+            Type::Intersection(items) => {
+                if let Some(schema) = self.dict_intersection_schema(items, context) {
+                    return schema;
+                }
+                json!({
+                    "allOf": items
+                        .iter()
+                        .map(|item| self.simple_type_to_schema(item, context))
+                        .collect::<Vec<_>>()
+                })
+            }
         }
+    }
+
+    /// `allOf` with a closed struct rejects every extra key, so a struct
+    /// intersected with a `Dict` is merged into one object whose extra keys
+    /// follow the dict value type.
+    fn dict_intersection_schema(
+        &self,
+        items: &[SimpleType],
+        context: &SchemaContext<'_, '_>,
+    ) -> Option<Value> {
+        if !context.substitutions.is_empty() {
+            return None;
+        }
+        let candidate = OwnedType::Intersection(
+            items
+                .iter()
+                .map(|item| simple_to_owned_type(item, &self.source))
+                .collect(),
+        );
+        let shape = self.type_hierarchy.struct_shape(&candidate).ok()??;
+        shape.extra_value_type()?;
+        Some(self.owned_type_to_schema(&candidate))
     }
 
     fn simple_type_to_schema(&self, ty: &SimpleType, context: &mut SchemaContext<'_, '_>) -> Value {
@@ -506,12 +539,25 @@ impl JsonSchemaGenerator {
                     .map(|item| self.owned_type_to_schema(item))
                     .collect::<Vec<_>>()
             }),
-            OwnedType::Intersection(items) => json!({
-                "allOf": items
-                    .iter()
-                    .map(|item| self.owned_type_to_schema(item))
-                    .collect::<Vec<_>>()
-            }),
+            OwnedType::Intersection(items) => {
+                if let Some((shape, extra)) = self
+                    .type_hierarchy
+                    .struct_shape(ty)
+                    .ok()
+                    .flatten()
+                    .and_then(|shape| shape.extra_value_type().map(|extra| (shape, extra)))
+                {
+                    let mut schema = self.owned_type_to_schema(&OwnedType::Struct(shape.fields));
+                    schema["additionalProperties"] = self.owned_type_to_schema(&extra);
+                    return schema;
+                }
+                json!({
+                    "allOf": items
+                        .iter()
+                        .map(|item| self.owned_type_to_schema(item))
+                        .collect::<Vec<_>>()
+                })
+            }
             OwnedType::Generic { name, .. } => json!({ "x-xenomorph-generic-parameter": name }),
         }
     }
@@ -681,7 +727,7 @@ impl<'src> AnalyzerListener<'src> for JsonSchemaGenerator {
     fn on_before_ast(
         &mut self,
         ast: &[Declaration],
-        _errors: &mut Vec<xenomorph_common::XenoDiagnostic>,
+        errors: &mut Vec<xenomorph_common::XenoDiagnostic>,
     ) {
         let declarations = ast
             .iter()
@@ -732,13 +778,31 @@ impl<'src> AnalyzerListener<'src> for JsonSchemaGenerator {
                 ..
             } = decl
             {
-                let schema = self.type_decl_to_schema(
-                    docs,
-                    name.text(&self.source),
-                    generics.as_deref(),
-                    t,
-                    &mut context,
-                );
+                let schema = match use_type_override(&t.1, "json_schema", &self.source) {
+                    Some(Expr::Type(Type::Simple(SimpleType::Literal(Literal::String(
+                        code,
+                        token,
+                    ))))) => serde_json::from_str(code).unwrap_or_else(|error| {
+                        errors.push(XenoDiagnostic {
+                            tags: vec![],
+                            location: *token,
+                            message: format!(
+                                "Invalid JSON Schema in @json_schema::usetype: {error}"
+                            ),
+                            severity: XenoDiagSeverity::Err,
+                        });
+                        json!({})
+                    }),
+                    Some(Expr::Type(override_type)) => self
+                        .anonym_type_to_schema(&(override_type.clone(), Vec::new()), &mut context),
+                    _ => self.type_decl_to_schema(
+                        docs,
+                        name.text(&self.source),
+                        generics.as_deref(),
+                        t,
+                        &mut context,
+                    ),
+                };
                 self.defs
                     .insert(name.text(&self.source).to_string(), schema);
             }
@@ -1201,6 +1265,23 @@ mod tests {
         }
         generator.on_before_ast(&ast, &mut Vec::new());
         generator.defs
+    }
+
+    #[test]
+    fn usetype_and_dict_intersections() {
+        let defs = generate_defs(concat!(
+            "type Base = { id: string }; ",
+            "type Extra = &Base&Dict<string, bool>; ",
+            "type Raw = &Base&Dict<string, any> @json_schema::usetype(\"{}\"); ",
+            "type Alias = Base @json_schema::usetype(string);",
+        ));
+        assert_eq!(
+            defs["Extra"]["additionalProperties"],
+            json!({ "type": "boolean" })
+        );
+        assert_eq!(defs["Extra"]["required"], json!(["id"]));
+        assert_eq!(defs["Raw"], json!({}));
+        assert_eq!(defs["Alias"]["type"], json!("string"));
     }
 
     fn assert_local_refs_resolve(document: &Value, value: &Value) {

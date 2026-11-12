@@ -881,8 +881,23 @@ impl Backend {
             deduplicate_completions(types)
         };
 
-        let OwnedConstraint::Trait(required) = required else {
-            return all_types();
+        let literals = || {
+            self.registry
+                .metadata
+                .traits
+                .get("Literal")
+                .map(|literal| self.literal_completions(literal))
+                .unwrap_or_default()
+        };
+
+        let required = match required {
+            OwnedConstraint::Trait(required) => required,
+            OwnedConstraint::Target => return literals(),
+            OwnedConstraint::Type(_) => {
+                let mut items = all_types();
+                items.extend(literals());
+                return deduplicate_completions(items);
+            }
         };
         let Some(required) = self.registry.metadata.traits.get(required) else {
             return Vec::new();
@@ -918,9 +933,7 @@ impl Backend {
             OwnedTraitKind::Expression => {
                 let mut items = all_types();
                 items.extend(self.get_builtin_annotations());
-                if let Some(literal) = self.registry.metadata.traits.get("Literal") {
-                    items.extend(self.literal_completions(literal));
-                }
+                items.extend(literals());
                 deduplicate_completions(items)
             }
             OwnedTraitKind::Struct => all_types(),

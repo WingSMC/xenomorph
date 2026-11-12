@@ -9,8 +9,8 @@ use xenomorph_common::parser::{
 };
 use xenomorph_common::plugins::XenoPlugin;
 use xenomorph_common::semantic::{
-    unsupported_target_type_diagnostic, AnalyzerListener, ScopeInfo, TypeHierarchy, XenoParent,
-    XenoType as SemanticType, KEY_TRAIT,
+    unsupported_target_type_diagnostic, use_type_override, AnalyzerListener, ScopeInfo,
+    TypeHierarchy, XenoAnnotation, XenoParent, XenoType as SemanticType, KEY_TRAIT, USETYPE,
 };
 use xenomorph_common::utils::{extract_documentation, relative_module_path};
 use xenomorph_common::{TokenData, XenoDiagSeverity, XenoDiagnostic};
@@ -26,7 +26,7 @@ static PLUGIN: XenoPlugin = XenoPlugin {
     initialize: None,
     shutdown: None,
     provide_types: Some(provide_types),
-    provide_annotations: None,
+    provide_annotations: Some(provide_annotations),
     provide_custom_declarations: None,
     provide_config_schema: Some(provide_config_schema),
     register_generator: Some(create_generator),
@@ -44,6 +44,11 @@ static TYPESCRIPT_TYPES: &[&SemanticType] = &[&SYMBOL];
 
 fn provide_types() -> &'static [&'static SemanticType] {
     TYPESCRIPT_TYPES
+}
+
+fn provide_annotations() -> &'static [&'static XenoAnnotation] {
+    static ANNOTATIONS: &[&XenoAnnotation] = &[&USETYPE];
+    ANNOTATIONS
 }
 
 fn provide_config_schema() -> &'static str {
@@ -331,6 +336,15 @@ fn generate_type_decl(
             }
         }
         out.push_str(" */\n");
+    }
+
+    if let Some(Expr::Type(override_type)) = use_type_override(&t.1, "TS", source) {
+        let ts = match override_type {
+            Type::Simple(SimpleType::Literal(Literal::String(code, _))) => code.clone(),
+            other => type_to_ts(other, source),
+        };
+        out.push_str(&format!("{export}type {name}{generic_params} = {ts};\n\n"));
+        return;
     }
 
     if let Type::Struct(fields) = &t.0 {

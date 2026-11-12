@@ -48,12 +48,15 @@ pub(crate) struct FloatRepresentationDef {
 pub enum OwnedConstraint {
     Type(String),
     Trait(String),
+    /// A value of the annotated type; valid only for explicit annotation parameters.
+    Target,
 }
 
 impl OwnedConstraint {
     pub fn name(&self) -> &str {
         match self {
             Self::Type(name) | Self::Trait(name) => name,
+            Self::Target => super::TARGET_CONSTRAINT_NAME,
         }
     }
 }
@@ -234,10 +237,12 @@ impl MetadataGraph {
                         parent.name()
                     ));
                 }
+                reject_target(parent, &ty.name)?;
                 self.validate_constraint(parent)?;
             }
             for parameter in &ty.generic_params {
                 if let Some(constraint) = &parameter.constraint {
+                    reject_target(constraint, &ty.name)?;
                     self.validate_constraint(constraint)?;
                 }
             }
@@ -268,6 +273,9 @@ impl MetadataGraph {
                     .map(|parameter| parameter.name.as_str()),
                 &annotation.name,
             )?;
+            if let Some(target) = annotation.target_parameter() {
+                reject_target(&target.constraint, &annotation.name)?;
+            }
             for parameter in &annotation.params {
                 self.validate_constraint(&parameter.constraint)?;
             }
@@ -331,6 +339,7 @@ pub(crate) fn validate_constraint(
     let (kind, present) = match constraint {
         OwnedConstraint::Type(name) => ("type", has_type(name)),
         OwnedConstraint::Trait(name) => ("trait", has_trait(name)),
+        OwnedConstraint::Target => return Ok(()),
     };
     if constraint.name().trim().is_empty() || !present {
         return Err(format!(
@@ -339,6 +348,16 @@ pub(crate) fn validate_constraint(
         ));
     }
     Ok(())
+}
+
+fn reject_target(constraint: &OwnedConstraint, owner: &str) -> Result<(), String> {
+    match constraint {
+        OwnedConstraint::Target => Err(format!(
+            "Metadata '{owner}' uses the '{}' constraint outside an explicit annotation parameter",
+            super::TARGET_CONSTRAINT_NAME
+        )),
+        _ => Ok(()),
+    }
 }
 
 pub(crate) mod unique_named_map {
@@ -447,6 +466,7 @@ impl MetadataGraph {
                 self.insert_trait_descriptor(descriptor);
                 OwnedConstraint::Trait(descriptor.name.to_string())
             }
+            XenoConstraint::Target => OwnedConstraint::Target,
         }
     }
 
