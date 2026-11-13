@@ -212,9 +212,11 @@ impl<'src> AnalyzerListener<'src> for TsGenerator {
                     name.text(&self.source),
                     generics.as_deref(),
                     t,
-                    &self.source,
                     public.is_some(),
-                    &self.type_hierarchy,
+                    TsContext {
+                        source: &self.source,
+                        hierarchy: &self.type_hierarchy,
+                    },
                 );
             }
         }
@@ -305,6 +307,11 @@ impl<'src> AnalyzerListener<'src> for TsGenerator {
 
 // ── Type declaration generation ─────────────────────────────────────
 
+struct TsContext<'a> {
+    source: &'a str,
+    hierarchy: &'a TypeHierarchy,
+}
+
 #[cfg(test)]
 fn generate_type_decl(
     out: &mut String,
@@ -321,9 +328,11 @@ fn generate_type_decl(
         name,
         generics,
         t,
-        source,
         public,
-        &TypeHierarchy::default(),
+        TsContext {
+            source,
+            hierarchy: &TypeHierarchy::default(),
+        },
     );
 }
 
@@ -333,10 +342,10 @@ fn generate_type_decl_in(
     name: &str,
     generics: Option<&[(TokenData, Option<TokenData>)]>,
     t: &XenoType,
-    source: &str,
     public: bool,
-    hierarchy: &TypeHierarchy,
+    context: TsContext<'_>,
 ) {
+    let TsContext { source, hierarchy } = context;
     let export = if public { "export " } else { "" };
     let annotations: Vec<String> =
         t.1.iter()

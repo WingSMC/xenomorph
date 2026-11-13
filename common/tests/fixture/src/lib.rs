@@ -1,9 +1,11 @@
+#[cfg(not(feature = "bad-abi"))]
 use std::{
     fs,
     io::Write,
     path::PathBuf,
     time::{Duration, Instant},
 };
+#[cfg(not(feature = "bad-abi"))]
 use xenomorph_common::{
     config::{Config, ConfigValue},
     parser::Declaration,
@@ -15,6 +17,7 @@ use xenomorph_common::{
     XenoDiagSeverity, XenoDiagnostic,
 };
 
+#[cfg(not(feature = "bad-abi"))]
 static PLUGIN: XenoPlugin = XenoPlugin {
     name: "fixture",
     namespace: if cfg!(feature = "namespace-collision") {
@@ -45,6 +48,7 @@ static PLUGIN: XenoPlugin = XenoPlugin {
     },
 };
 
+#[cfg(not(feature = "bad-abi"))]
 static MATCHERS: &[CustomDeclarationMatcher] = &[
     CustomDeclarationMatcher {
         identifier: "fixture_consume",
@@ -60,6 +64,7 @@ static MATCHERS: &[CustomDeclarationMatcher] = &[
     },
 ];
 
+#[cfg(not(feature = "bad-abi"))]
 fn parse_custom(config: &Config, request: &CustomDeclarationRequest) -> CustomDeclarationResult {
     if request.identifier == "fixture_error" {
         return Err(XenoDiagnostic {
@@ -115,6 +120,7 @@ pub extern "C" fn xenomorph_plugin_v1() -> *const xenomorph_common::plugins::abi
     &HEADER
 }
 
+#[cfg(not(feature = "bad-abi"))]
 fn event(workdir: &std::path::Path, message: &str) -> Result<(), String> {
     let mut file = fs::OpenOptions::new()
         .append(true)
@@ -124,6 +130,7 @@ fn event(workdir: &std::path::Path, message: &str) -> Result<(), String> {
     writeln!(file, "{message}").map_err(|error| error.to_string())
 }
 
+#[cfg(not(feature = "bad-abi"))]
 fn initialize(config: &Config) -> Result<(), String> {
     if config.plugins.config.get("fixture") == Some(&ConfigValue::Boolean(false)) {
         return Err("Fixture initialization rejected".into());
@@ -131,15 +138,18 @@ fn initialize(config: &Config) -> Result<(), String> {
     event(&config.workdir, "initialize")
 }
 
+#[cfg(not(feature = "bad-abi"))]
 fn shutdown(config: &Config) -> Result<(), String> {
     event(&config.workdir, "shutdown")
 }
 
+#[cfg(not(feature = "bad-abi"))]
 struct Listener {
     workdir: PathBuf,
     generation: bool,
 }
 
+#[cfg(not(feature = "bad-abi"))]
 fn listener(config: &Config) -> Box<dyn for<'a> AnalyzerListener<'a>> {
     Box::new(Listener {
         workdir: config.workdir.clone(),
@@ -147,6 +157,7 @@ fn listener(config: &Config) -> Box<dyn for<'a> AnalyzerListener<'a>> {
     })
 }
 
+#[cfg(not(feature = "bad-abi"))]
 fn generator_listener(config: &Config) -> Box<dyn for<'a> AnalyzerListener<'a>> {
     Box::new(Listener {
         workdir: config.workdir.clone(),
@@ -154,12 +165,14 @@ fn generator_listener(config: &Config) -> Box<dyn for<'a> AnalyzerListener<'a>> 
     })
 }
 
+#[cfg(not(feature = "bad-abi"))]
 impl Drop for Listener {
     fn drop(&mut self) {
         event(&self.workdir, "listener-drop").expect("fixture lifecycle event");
     }
 }
 
+#[cfg(not(feature = "bad-abi"))]
 impl<'src> AnalyzerListener<'src> for Listener {
     fn on_before_module(&mut self, _: &ScopeInfo) {
         event(&self.workdir, "callback-start").expect("fixture lifecycle event");

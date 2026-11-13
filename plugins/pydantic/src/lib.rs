@@ -1021,6 +1021,12 @@ impl Imports {
 
 // ── Generator listener ──────────────────────────────────────────────
 
+#[derive(Default)]
+struct ModelOptions<'a> {
+    allows_extra: bool,
+    base: Option<&'a str>,
+}
+
 struct PydanticGenerator {
     source: String,
     workdir: PathBuf,
@@ -1189,7 +1195,14 @@ impl PydanticGenerator {
             Type::Struct(fields) => {
                 let fields = self.ast_fields(fields);
                 (
-                    self.model(name, params, docs, &fields, false, annotations, None),
+                    self.model(
+                        name,
+                        params,
+                        docs,
+                        &fields,
+                        annotations,
+                        ModelOptions::default(),
+                    ),
                     vec![],
                 )
             }
@@ -1242,9 +1255,11 @@ impl PydanticGenerator {
                     params,
                     docs,
                     &shape.fields,
-                    !shape.dicts.is_empty(),
                     annotations,
-                    base.as_deref(),
+                    ModelOptions {
+                        allows_extra: !shape.dicts.is_empty(),
+                        base: base.as_deref(),
+                    },
                 ),
                 vec![],
             ),
@@ -1280,10 +1295,10 @@ impl PydanticGenerator {
         params: &[String],
         docs: Option<&str>,
         fields: &[OwnedField],
-        allows_extra: bool,
         annotations: &[Annotation],
-        base: Option<&str>,
+        options: ModelOptions<'_>,
     ) -> String {
+        let ModelOptions { allows_extra, base } = options;
         let mut config = FieldArgs::default();
         let mut validators: Vec<(&str, String)> = Vec::new();
         let mut deprecated = None;
