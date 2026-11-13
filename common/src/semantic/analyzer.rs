@@ -666,12 +666,24 @@ pub fn run_plugin_listener<'src>(
     scope: &ScopeInfo,
     source: &str,
 ) -> Vec<XenoDiagnostic> {
+    run_plugin_listener_with_mode(listener, ast, scope, source, false)
+}
+
+pub(crate) fn run_plugin_listener_with_mode<'src>(
+    listener: Box<dyn AnalyzerListener<'src> + 'src>,
+    ast: &[Declaration],
+    scope: &ScopeInfo,
+    source: &str,
+    generation: bool,
+) -> Vec<XenoDiagnostic> {
     let mut listeners = vec![listener];
     listeners[0].set_source(source);
     listeners[0].on_before_module(scope);
     let mut diagnostics = Vec::new();
     walk_ast(&mut listeners, ast, &mut diagnostics);
-    listeners[0].on_after_module(scope);
+    if !generation || can_generate(&diagnostics) {
+        listeners[0].on_after_module(scope);
+    }
     diagnostics
 }
 
@@ -939,6 +951,54 @@ mod tests {
     #[test]
     fn errors_block_generation() {
         assert!(!can_generate(&[diagnostic(XenoDiagSeverity::Err)]));
+    }
+
+    #[test]
+    fn sdk_errors_block_generator_finalization_but_analyzers_always_finalize() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        struct Listener {
+            finalized: Arc<AtomicBool>,
+            severity: XenoDiagSeverity,
+        }
+        impl<'src> AnalyzerListener<'src> for Listener {
+            fn on_simple_type(&mut self, _: &SimpleType, errors: &mut Vec<XenoDiagnostic>) {
+                errors.push(diagnostic(self.severity));
+            }
+            fn on_after_module(&mut self, _: &ScopeInfo) {
+                self.finalized.store(true, Ordering::Relaxed);
+            }
+        }
+        let source = "type Upload = file;";
+        let tokens = crate::lexer::Lexer::tokenize(source).unwrap();
+        let (ast, diagnostics) = crate::parser::Parser::parse(&tokens, source);
+        assert!(diagnostics.is_empty());
+        for generation in [true, false] {
+            for severity in [
+                XenoDiagSeverity::Err,
+                XenoDiagSeverity::Warn,
+                XenoDiagSeverity::Info,
+            ] {
+                let finalized = Arc::new(AtomicBool::new(false));
+                let diagnostics = run_plugin_listener_with_mode(
+                    Box::new(Listener {
+                        finalized: finalized.clone(),
+                        severity,
+                    }),
+                    &ast,
+                    &scope_with_declarations(HashMap::new()),
+                    source,
+                    generation,
+                );
+                assert_eq!(diagnostics.len(), 1);
+                assert_eq!(
+                    finalized.load(Ordering::Relaxed),
+                    !generation || severity != XenoDiagSeverity::Err
+                );
+            }
+        }
     }
 
     #[test]

@@ -1014,6 +1014,7 @@ fn builtin_to_schema(name: &str) -> Option<Value> {
         "regex" => json!({ "type": "string", "format": "regex" }),
         "xml" | "yaml" | "json" | "toml" | "csv" | "tsv" => json!({ "type": "string" }),
         "binary" => json!({ "type": "string", "contentEncoding": "base64" }),
+        "file" => json!({ "type": "string", "format": "binary" }),
         "bool" => json!({ "type": "boolean" }),
         "number" | "f32" | "f64" | "decimal" => json!({ "type": "number" }),
         "integer" | "bigint" => json!({ "type": "integer" }),
@@ -1412,6 +1413,26 @@ mod tests {
             schema["oneOf"][0]["description"],
             json!("The active state.")
         );
+    }
+
+    #[test]
+    fn files_use_binary_format_without_base64_encoding_or_unresolved_refs() {
+        let defs = generate_defs(concat!(
+            "type Upload = file; type Maybe = ?file; type Uploads = file[]; ",
+            "type Box<T> = { value: T }; type UploadBox = Box<file>; ",
+            "type Request = { upload: file, optional: ?file, uploads: file[] };",
+        ));
+        let file = json!({ "type": "string", "format": "binary" });
+        assert_eq!(builtin_to_schema("file"), Some(file.clone()));
+        assert_eq!(defs["Upload"]["format"], "binary");
+        assert!(defs["Upload"].get("contentEncoding").is_none());
+        assert_eq!(defs["Maybe"]["anyOf"], json!([file, { "type": "null" }]));
+        assert_eq!(defs["Uploads"]["items"], file);
+        assert_eq!(defs["UploadBox"]["properties"]["value"], file);
+        assert_eq!(defs["Request"]["properties"]["upload"], file);
+        assert_eq!(defs["Request"]["required"], json!(["upload", "uploads"]));
+        let document = json!({ "$defs": defs });
+        assert_local_refs_resolve(&document, &document);
     }
 
     #[test]

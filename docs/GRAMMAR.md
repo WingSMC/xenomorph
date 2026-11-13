@@ -66,6 +66,30 @@ Each reference has one namespace segment and contains no whitespace around
     - Optional representation: append `as` and a compatible numeric type, for example `1 as i32`, `1 as u64`, `3.14 as f64`, or `0.1 as decimal`
 - String:
     - Unicode: `string`
+- Uploaded file: `file`
+
+### Uploaded files
+
+`file` describes an uploaded file object. It is distinct from raw bytes
+(`binary`) and from a string containing a filesystem path. It is a subtype of
+`any`, but does not implement string, key, or length traits.
+
+```xen
+pub type UploadRequest = { attachment: file, optional: ?file, attachments: file[] };
+```
+
+| Target      | Representation                                                                 |
+| ----------- | ------------------------------------------------------------------------------ |
+| TypeScript  | Native `File`                                                                  |
+| JSON Schema | `{"type": "string", "format": "binary"}`, without base64 encoding              |
+| Pydantic    | Imported type selected by `[plugins.pydantic.file_type]` (`module` and `name`) |
+| Java        | Reference type selected by `plugins.java.file_type`                            |
+
+Java and Pydantic report an error when a generated value type uses `file`
+without a valid mapping. There is no fallback and no automatically selected
+framework dependency. See the [Pydantic](../plugins/pydantic/README.md#uploaded-files)
+and [Java](../plugins/java/README.md#uploaded-files) configuration examples.
+These mappings do not implement file transport or multipart parsing.
 
 ## Numeric literal representation and casts
 

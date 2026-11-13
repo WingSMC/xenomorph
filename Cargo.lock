@@ -1282,6 +1282,7 @@ dependencies = [
 name = "xenomorph_java"
 version = "0.3.0"
 dependencies = [
+ "serde_json",
  "xenomorph_common",
 ]
 
@@ -1331,6 +1332,7 @@ version = "0.3.0"
 dependencies = [
  "bigdecimal",
  "num-bigint",
+ "serde_json",
  "xenomorph_common",
 ]
 

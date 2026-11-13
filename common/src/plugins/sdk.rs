@@ -4,7 +4,7 @@ use super::{
 };
 use crate::{
     config::Config,
-    semantic::{run_plugin_listener, MetadataGraph},
+    semantic::{run_plugin_listener_with_mode, MetadataGraph},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -227,11 +227,12 @@ pub unsafe fn run(
         .ok_or_else(|| "Plugin does not provide the requested capability".to_string())?;
         syntax::validate(&request.syntax.source, &request.syntax.declarations)?;
         let ast = &request.syntax.declarations;
-        let diagnostics = run_plugin_listener(
+        let diagnostics = run_plugin_listener_with_mode(
             factory(&instance.config),
             ast,
             &request.scope,
             &request.syntax.source,
+            request.generation,
         )
         .iter()
         .map(Diagnostic::from)

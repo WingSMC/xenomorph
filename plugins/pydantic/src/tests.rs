@@ -111,6 +111,159 @@ fn analyze(source: &str) -> Vec<XenoDiagnostic> {
     errors
 }
 
+fn file_config(value: &str) -> Config {
+    let mut config = Config::default();
+    config.plugins.config.insert(
+        NAME.into(),
+        format!("{{ {value} }}").parse::<ConfigValue>().unwrap(),
+    );
+    config
+}
+
+#[test]
+fn configured_file_import_is_used_in_aliases_fields_collections_and_generics() {
+    let config = file_config("file_type = { module = 'pydantic', name = 'Base64Bytes' }");
+    let source = concat!(
+        "type Upload = file; type Uploads = file[]; ",
+        "type Box<T> = { value: T }; type UploadBox = Box<file>; ",
+        "type Request = { upload: file, optional: ?file, uploads: Uploads, alias: Upload };",
+    );
+    let (output, errors) = generate_with(source, |generator| {
+        generator.file_type = configured_generator(&config).file_type;
+    });
+    assert!(errors.is_empty(), "{errors:#?}");
+    assert!(
+        output.contains("from pydantic import Base64Bytes, BaseModel\n"),
+        "{output}"
+    );
+    assert!(output.contains("type Upload = Base64Bytes\n"), "{output}");
+    assert!(
+        output.contains("type Uploads = list[Base64Bytes]\n"),
+        "{output}"
+    );
+    assert!(
+        output.contains("class UploadBox(Box[Base64Bytes]):"),
+        "{output}"
+    );
+    assert!(output.contains("    upload: Base64Bytes\n"), "{output}");
+    assert!(
+        output.contains("    optional: Base64Bytes | None = None\n"),
+        "{output}"
+    );
+    assert_python(
+        &output,
+        r#"
+from pydantic import ValidationError
+request = Request(upload=b'aGVsbG8=', uploads=[b'd29ybGQ='], alias=b'aGVsbG8=')
+assert request.upload == request.alias == b'hello'
+assert request.uploads == [b'world']
+assert request.optional is None
+assert UploadBox(value=b'aGVsbG8=').value == b'hello'
+assert Request.model_json_schema()['properties']['upload']['format'] == 'base64'
+try:
+    Request(upload=42, uploads=[], alias=b'aGVsbG8=')
+except ValidationError:
+    pass
+else:
+    raise AssertionError('the configured file type must validate input')
+"#,
+    );
+}
+
+#[test]
+fn configured_file_import_handles_relative_paths_and_name_collisions() {
+    let config = file_config("file_type = { module = '.uploads', name = 'Upload' }");
+    let (output, errors) = generate_with(
+        "type Upload = string; type Request = { value: file };",
+        |generator| {
+            generator.file_type = configured_file_type(&config);
+        },
+    );
+    assert!(errors.is_empty(), "{errors:#?}");
+    assert!(
+        output.contains("from .uploads import Upload as Upload_2\n"),
+        "{output}"
+    );
+    assert!(output.contains("    value: Upload_2\n"), "{output}");
+    let (output, _) = generate_with("type Request = { value: file };", |generator| {
+        generator.file_type = configured_file_type(&config);
+    });
+    assert!(output.contains("from .uploads import Upload\n"), "{output}");
+    assert!(!output.contains("Upload_2"), "{output}");
+    let generator = configured_generator(&config);
+    assert_eq!(
+        generator.render(&OwnedType::Qualified {
+            module_path: None,
+            name: "file".into(),
+            arguments: Vec::new(),
+        }),
+        "Upload"
+    );
+}
+
+#[test]
+fn missing_or_invalid_file_config_reports_errors_at_value_references() {
+    let source = "type Alias = file; type Uploads = Alias[]; type Box<T> = { value: T }; type Request = { value: Box<file> };";
+    let (mut generator, _) = generator_for(source);
+    let reference = SimpleType::Identifier(
+        TokenData::new(
+            source.find("Alias[]").unwrap(),
+            source.find("Alias[]").unwrap() + 5,
+        ),
+        None,
+    );
+    for config in [
+        Config::default(),
+        file_config("file_type = 'Upload'"),
+        file_config("file_type = { module = 'uploads' }"),
+        file_config("file_type = { module = 'uploads', name = 'class' }"),
+        file_config("file_type = { module = 'bad..module', name = 'Upload' }"),
+        file_config("file_type = { module = 'uploads', name = 'Upload', typo = true }"),
+    ] {
+        generator.file_type = configured_file_type(&config);
+        assert!(generator.file_type.is_err());
+        let mut errors = Vec::new();
+        generator.on_simple_type(&reference, &mut errors);
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].severity, XenoDiagSeverity::Err);
+        assert_eq!(errors[0].location.text(source), "Alias");
+        assert!(
+            errors[0].message.contains("[plugins.pydantic.file_type]"),
+            "{errors:#?}"
+        );
+    }
+    generator.file_type = configured_file_type(&file_config(
+        "file_type = { module = 'app.uploads', name = 'Upload' }",
+    ));
+    let mut errors = Vec::new();
+    generator.on_simple_type(&reference, &mut errors);
+    assert!(errors.is_empty(), "{errors:#?}");
+    assert_eq!(
+        configured_file_type(&file_config(
+            "file_type = { module = '..', name = 'Upload' }"
+        ))
+        .unwrap(),
+        ("..".into(), "Upload".into())
+    );
+}
+
+#[test]
+fn file_mapping_is_not_required_for_binary_or_unrelated_types() {
+    let (mut generator, _) = generator_for("type Data = binary;");
+    let mut errors = Vec::new();
+    generator.on_simple_type(
+        &SimpleType::Identifier(TokenData::new(12, 18), None),
+        &mut errors,
+    );
+    assert!(errors.is_empty(), "{errors:#?}");
+    assert!(generate("type Data = binary;").contains("type Data = Base64Bytes\n"));
+    let schema: serde_json::Value = serde_json::from_str(provide_config_schema()).unwrap();
+    assert_eq!(
+        schema["properties"]["file_type"]["required"],
+        serde_json::json!(["module", "name"])
+    );
+}
+
 #[test]
 fn dict_members_allow_extra_keys_and_usetype_overrides() {
     let output = generate(concat!(

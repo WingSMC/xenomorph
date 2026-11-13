@@ -1,7 +1,7 @@
 use crate::parser::SimpleType;
 use crate::{TokenData, XenoDiagSeverity, XenoDiagnostic};
 
-use super::{simple_to_owned_type, OwnedType, TypeHierarchy};
+use super::{simple_to_owned_type, AnalyzerListener, OwnedType, ScopeInfo, TypeHierarchy};
 
 /// Creates a fatal diagnostic when a source type contains a static semantic
 /// type that has no native mapping for the target language.
@@ -27,6 +27,85 @@ pub fn unsupported_target_type_diagnostic(
         ),
         severity: XenoDiagSeverity::Err,
     })
+}
+
+/// Reports a missing or invalid plugin file-type configuration at a value-type
+/// reference, including aliases, utilities, and nested generic arguments.
+pub fn required_file_type_diagnostic(
+    target: &str,
+    configuration_error: Option<&str>,
+    ty: &SimpleType,
+    hierarchy: &TypeHierarchy,
+    source: &str,
+) -> Option<XenoDiagnostic> {
+    let error = configuration_error?;
+    let mut diagnostic =
+        unsupported_target_type_diagnostic(target, ty, hierarchy, source, |name| name != "file")?;
+    diagnostic.message = format!("{target} cannot represent type 'file': {error}");
+    Some(diagnostic)
+}
+
+/// Editor-side validation shared by generators that require a file mapping.
+#[derive(Default)]
+pub struct FileTypeValidator {
+    target: &'static str,
+    configuration_error: Option<String>,
+    source: String,
+    hierarchy: TypeHierarchy,
+    annotation_depth: usize,
+}
+
+impl FileTypeValidator {
+    pub fn new(target: &'static str, configuration_error: Option<String>) -> Self {
+        Self {
+            target,
+            configuration_error,
+            ..Self::default()
+        }
+    }
+}
+
+impl<'src> AnalyzerListener<'src> for FileTypeValidator {
+    fn set_source(&mut self, source: &str) {
+        self.source = source.to_string();
+    }
+
+    fn on_before_module(&mut self, scope: &ScopeInfo) {
+        self.hierarchy = scope.type_hierarchy.clone();
+        self.annotation_depth = 0;
+    }
+
+    fn on_simple_type(&mut self, ty: &SimpleType, errors: &mut Vec<XenoDiagnostic>) {
+        if self.annotation_depth == 0 {
+            if let Some(diagnostic) = required_file_type_diagnostic(
+                self.target,
+                self.configuration_error.as_deref(),
+                ty,
+                &self.hierarchy,
+                &self.source,
+            ) {
+                errors.push(diagnostic);
+            }
+        }
+    }
+
+    fn on_before_annotation(
+        &mut self,
+        _: &TokenData,
+        _: &[crate::parser::Expr],
+        _: &mut Vec<XenoDiagnostic>,
+    ) {
+        self.annotation_depth += 1;
+    }
+
+    fn on_after_annotation(
+        &mut self,
+        _: &TokenData,
+        _: &[crate::parser::Expr],
+        _: &mut Vec<XenoDiagnostic>,
+    ) {
+        self.annotation_depth = self.annotation_depth.saturating_sub(1);
+    }
 }
 
 fn simple_type_identifier(ty: &SimpleType) -> Option<&TokenData> {
@@ -102,6 +181,64 @@ mod tests {
         generic_params: None,
         parents: None,
     };
+
+    #[test]
+    fn required_file_mapping_checks_aliases_arrays_and_generic_arguments_only_in_values() {
+        let source = "file Alias Box";
+        let file = TokenData::new(0, 4);
+        let alias = TokenData::new(5, 10);
+        let boxed = TokenData::new(11, 14);
+        let mut hierarchy = TypeHierarchy::default();
+        hierarchy.set_current_module("test");
+        hierarchy.register_module("test", Vec::new());
+        for ty in crate::semantic::BUILTIN_TYPES {
+            hierarchy.insert_semantic_type(ty);
+        }
+        hierarchy.insert_declaration(
+            "test",
+            "Alias",
+            TypeDeclarationInfo {
+                generic_params: Vec::new(),
+                parents: vec![OwnedType::named("file")],
+                body: OwnedType::named("file"),
+                transparent_alias: true,
+            },
+        );
+        for ty in [
+            SimpleType::Identifier(file, None),
+            SimpleType::Identifier(alias, None),
+            SimpleType::Array(alias, None),
+            SimpleType::Optional(Box::new(SimpleType::Identifier(file, None))),
+            SimpleType::Identifier(boxed, Some(vec![SimpleType::Identifier(file, None)])),
+        ] {
+            let diagnostic = required_file_type_diagnostic(
+                "Test",
+                Some("configure file_type"),
+                &ty,
+                &hierarchy,
+                source,
+            )
+            .unwrap();
+            assert_eq!(diagnostic.severity, XenoDiagSeverity::Err);
+            assert_eq!(
+                diagnostic.message,
+                "Test cannot represent type 'file': configure file_type"
+            );
+            assert!(required_file_type_diagnostic("Test", None, &ty, &hierarchy, source).is_none());
+        }
+        let mut validator = FileTypeValidator::new("Test", Some("configure file_type".into()));
+        validator.set_source(source);
+        validator.hierarchy = hierarchy;
+        let mut errors = Vec::new();
+        let ty = SimpleType::Identifier(alias, None);
+        validator.on_before_annotation(&file, &[], &mut errors);
+        validator.on_simple_type(&ty, &mut errors);
+        assert!(errors.is_empty());
+        validator.on_after_annotation(&file, &[], &mut errors);
+        validator.on_simple_type(&ty, &mut errors);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].location, alias);
+    }
 
     #[test]
     fn reports_resolved_unmapped_alias_at_the_source_identifier() {

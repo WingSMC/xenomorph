@@ -19,11 +19,11 @@ use xenomorph_common::parser::{
 use xenomorph_common::plugins::protocol::CustomDeclarationRequest;
 use xenomorph_common::plugins::{CustomDeclarationMatcher, CustomDeclarationResult, XenoPlugin};
 use xenomorph_common::semantic::{
-    simple_to_owned_type, type_to_owned_type, unsupported_target_type_diagnostic,
-    use_type_override, AnalyzerListener, DeclarationAnnotation, OwnedField, OwnedLiteral,
-    OwnedType, ScopeInfo, TypeHierarchy, XenoAnnotation, XenoAnnotationKind, XenoConstraint,
-    XenoParam, ANY_TARGET_PARAM, LITERAL_VALUE_PARAM, STRING_LITERAL, STRING_VALUE_PARAM, STRUCT,
-    USETYPE,
+    required_file_type_diagnostic, simple_to_owned_type, type_to_owned_type,
+    unsupported_target_type_diagnostic, use_type_override, AnalyzerListener, DeclarationAnnotation,
+    FileTypeValidator, OwnedField, OwnedLiteral, OwnedType, ScopeInfo, TypeHierarchy,
+    XenoAnnotation, XenoAnnotationKind, XenoConstraint, XenoParam, ANY_TARGET_PARAM,
+    LITERAL_VALUE_PARAM, STRING_LITERAL, STRING_VALUE_PARAM, STRUCT, USETYPE,
 };
 use xenomorph_common::utils::extract_documentation;
 use xenomorph_common::{TokenData, XenoDiagSeverity, XenoDiagnostic};
@@ -217,6 +217,16 @@ fn provide_config_schema() -> &'static str {
                 "type": "string",
                 "enum": ["allow", "ignore", "forbid"],
                 "description": "Default `extra` behaviour for every generated model. `@pydantic::extra` overrides it per model."
+            },
+            "file_type": {
+                "type": "object",
+                "description": "Python type used for the file builtin. Required when the schema uses file. The type must support Pydantic validation.",
+                "properties": {
+                    "module": { "type": "string", "minLength": 1, "description": "Module to import from; leading dots allow relative imports." },
+                    "name": { "type": "string", "minLength": 1, "description": "Name of the imported type." }
+                },
+                "required": ["module", "name"],
+                "additionalProperties": false
             }
         },
         "additionalProperties": false
@@ -224,8 +234,54 @@ fn provide_config_schema() -> &'static str {
 }
 
 fn create_generator(config: &Config) -> Box<dyn for<'a> AnalyzerListener<'a>> {
+    Box::new(PydanticGenerator::from_config(config))
+}
+
+fn configured_file_type(config: &Config) -> Result<(String, String), String> {
+    let guidance = "Set module and name in [plugins.pydantic.file_type] in xenomorph.toml.";
+    let value = config
+        .plugins
+        .config
+        .get(NAME)
+        .and_then(|value| value.get("file_type"))
+        .ok_or_else(|| guidance.to_string())?;
+    let table = value
+        .as_table()
+        .ok_or_else(|| format!("file_type must be a table. {guidance}"))?;
+    if table
+        .keys()
+        .any(|key| !matches!(key.as_str(), "module" | "name"))
+    {
+        return Err(format!(
+            "file_type accepts only module and name. {guidance}"
+        ));
+    }
+    let module = table
+        .get("module")
+        .and_then(ConfigValue::as_str)
+        .unwrap_or_default();
+    let name = table
+        .get("name")
+        .and_then(ConfigValue::as_str)
+        .unwrap_or_default();
+    let path = module.trim_start_matches('.');
+    let valid_module = !module.is_empty()
+        && (path.is_empty()
+            || path
+                .split('.')
+                .all(|part| is_python_identifier(part) && !is_python_keyword(part)));
+    if !valid_module || !is_python_identifier(name) || is_python_keyword(name) {
+        return Err(format!(
+            "file_type requires a valid Python module and imported type name. {guidance}"
+        ));
+    }
+    Ok((module.to_string(), name.to_string()))
+}
+
+fn configured_generator(config: &Config) -> PydanticGenerator {
     let mut generator = PydanticGenerator::new();
     generator.workdir = config.workdir.clone();
+    generator.file_type = configured_file_type(config);
     if let Some(ConfigValue::Table(table)) = config.plugins.config.get(NAME) {
         if let Some(ConfigValue::String(output)) = table.get("output") {
             generator.output_dir = Some(PathBuf::from(output));
@@ -237,11 +293,14 @@ fn create_generator(config: &Config) -> Box<dyn for<'a> AnalyzerListener<'a>> {
             generator.default_extra = Some(extra.clone());
         }
     }
-    Box::new(generator)
+    generator
 }
 
-fn create_analyzer(_config: &Config) -> Box<dyn for<'a> AnalyzerListener<'a>> {
-    Box::new(PydanticAnalyzer::default())
+fn create_analyzer(config: &Config) -> Box<dyn for<'a> AnalyzerListener<'a>> {
+    Box::new(PydanticAnalyzer {
+        file_types: FileTypeValidator::new("Pydantic", configured_file_type(config).err()),
+        ..PydanticAnalyzer::default()
+    })
 }
 
 // ── Annotation helpers ──────────────────────────────────────────────
@@ -328,12 +387,40 @@ fn diagnostic(location: TokenData, severity: XenoDiagSeverity, message: String) 
 #[derive(Default)]
 struct PydanticAnalyzer {
     source: String,
+    file_types: FileTypeValidator,
 }
 
 impl<'src> AnalyzerListener<'src> for PydanticAnalyzer {
     fn set_source(&mut self, source: &str) {
         self.source.clear();
         self.source.push_str(source);
+        self.file_types.set_source(source);
+    }
+
+    fn on_before_module(&mut self, scope: &ScopeInfo) {
+        self.file_types.on_before_module(scope);
+    }
+
+    fn on_simple_type(&mut self, ty: &SimpleType, errors: &mut Vec<XenoDiagnostic>) {
+        self.file_types.on_simple_type(ty, errors);
+    }
+
+    fn on_before_annotation(
+        &mut self,
+        name: &TokenData,
+        args: &[Expr],
+        errors: &mut Vec<XenoDiagnostic>,
+    ) {
+        self.file_types.on_before_annotation(name, args, errors);
+    }
+
+    fn on_after_annotation(
+        &mut self,
+        name: &TokenData,
+        args: &[Expr],
+        errors: &mut Vec<XenoDiagnostic>,
+    ) {
+        self.file_types.on_after_annotation(name, args, errors);
     }
 
     fn on_before_decl(&mut self, decl: &Declaration, errors: &mut Vec<XenoDiagnostic>) {
@@ -782,6 +869,7 @@ fn builtin(name: &str) -> Option<Builtin> {
         "datetime" => simple("datetime", Some(("datetime", "datetime"))),
         "duration" => simple("timedelta", Some(("datetime", "timedelta"))),
         "binary" => simple("Base64Bytes", Some(("pydantic", "Base64Bytes"))),
+        "file" => simple("file", None),
         "regex" => simple("Pattern", Some(("re", "Pattern"))),
         "any" => simple("Any", Some(("typing", "Any"))),
         "null" => simple("None", None),
@@ -939,6 +1027,7 @@ struct PydanticGenerator {
     output_dir: Option<PathBuf>,
     package: Option<String>,
     default_extra: Option<String>,
+    file_type: Result<(String, String), String>,
     abs_path: PathBuf,
     module_path: String,
     imported_types: HashMap<String, Vec<String>>,
@@ -964,6 +1053,7 @@ impl PydanticGenerator {
             output_dir: None,
             package: None,
             default_extra: None,
+            file_type: configured_file_type(&Config::default()),
             abs_path: PathBuf::new(),
             module_path: String::new(),
             imported_types: HashMap::new(),
@@ -977,6 +1067,10 @@ impl PydanticGenerator {
             exports: Vec::new(),
             annotation_depth: 0,
         }
+    }
+
+    fn from_config(config: &Config) -> Self {
+        configured_generator(config)
     }
 
     fn symbol(&self, module: &str, symbol: &str) -> String {
@@ -1898,6 +1992,13 @@ impl PydanticGenerator {
     // ── Type expressions ──
 
     fn builtin_base(&self, builtin: &Builtin) -> String {
+        if builtin.base == "file" {
+            return match &self.file_type {
+                Ok((module, name)) => self.symbol(module, name),
+                // The value-type diagnostic prevents this fragment from being written.
+                Err(_) => String::new(),
+            };
+        }
         match builtin.import {
             Some((module, symbol)) if symbol == "Pattern" => {
                 format!("{}[str]", self.symbol(module, symbol))
@@ -1910,6 +2011,11 @@ impl PydanticGenerator {
     fn render(&self, ty: &OwnedType) -> String {
         match ty {
             OwnedType::Named { name, arguments } => self.render_named(ty, name, arguments),
+            OwnedType::Qualified {
+                module_path: None,
+                name,
+                arguments,
+            } if name == "file" => self.render_named(ty, name, arguments),
             OwnedType::Qualified {
                 module_path,
                 name,
@@ -2141,13 +2247,22 @@ impl<'src> AnalyzerListener<'src> for PydanticGenerator {
         if self.annotation_depth > 0 {
             return;
         }
-        if let Some(diagnostic) = unsupported_target_type_diagnostic(
+        if let Some(diagnostic) = required_file_type_diagnostic(
             "Pydantic",
+            self.file_type.as_ref().err().map(String::as_str),
             ty,
             &self.type_hierarchy,
             &self.source,
-            has_native_python_mapping,
-        ) {
+        )
+        .or_else(|| {
+            unsupported_target_type_diagnostic(
+                "Pydantic",
+                ty,
+                &self.type_hierarchy,
+                &self.source,
+                has_native_python_mapping,
+            )
+        }) {
             errors.push(diagnostic);
         }
     }

@@ -13,3 +13,6 @@ crate-type = ["cdylib"]
 xenomorph_common = { path = "../../common" }
 num-bigint = "0.4"
 bigdecimal = "0.4"
+
+[dev-dependencies]
+serde_json = "1"

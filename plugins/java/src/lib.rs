@@ -9,10 +9,11 @@ use xenomorph_common::parser::{
 };
 use xenomorph_common::plugins::XenoPlugin;
 use xenomorph_common::semantic::{
-    is_type_utility, simple_to_owned_type, type_to_owned_type, unsupported_target_type_diagnostic,
-    use_type_override, AnalyzerListener, OwnedField, OwnedLiteral, OwnedSet, OwnedType, ScopeInfo,
-    TypeDefinition, TypeHierarchy, XenoAnnotation, XenoAnnotationKind, XenoConstraint, XenoParam,
-    XenoType as SemanticType, ANY_TARGET_PARAM, EXPRESSION, USETYPE,
+    is_type_utility, required_file_type_diagnostic, simple_to_owned_type, type_to_owned_type,
+    unsupported_target_type_diagnostic, use_type_override, AnalyzerListener, FileTypeValidator,
+    OwnedField, OwnedLiteral, OwnedSet, OwnedType, ScopeInfo, TypeDefinition, TypeHierarchy,
+    XenoAnnotation, XenoAnnotationKind, XenoConstraint, XenoParam, XenoType as SemanticType,
+    ANY_TARGET_PARAM, EXPRESSION, USETYPE,
 };
 use xenomorph_common::utils::extract_documentation;
 use xenomorph_common::{TokenData, XenoDiagSeverity, XenoDiagnostic};
@@ -32,7 +33,7 @@ static PLUGIN: XenoPlugin = XenoPlugin {
     provide_custom_declarations: None,
     provide_config_schema: Some(provide_config_schema),
     register_generator: Some(create_generator),
-    register_analyzer: None,
+    register_analyzer: Some(create_analyzer),
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,6 +197,11 @@ fn provide_config_schema() -> &'static str {
                 "type": "string",
                 "description": "Java package the generated DTOs belong to, e.g. `com.xyz.model`."
             },
+            "file_type": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Java reference type used for the file builtin. Fully qualified names are imported. Required when the schema uses file."
+            },
             "value": {
                 "type": "boolean",
                 "description": "Annotate every generated class with Lombok's `@Value` (immutable DTOs)."
@@ -283,6 +289,9 @@ struct JavaGenerator {
     blanket_builder: bool,
     /// Blanket `@Data` on every class.
     blanket_data: bool,
+    /// Java fully qualified class name that maps from the `file` type of Xenomorph,
+    /// e.g., `javax.servlet.http.Part` or `jakarta.servlet.http.Part`.
+    file_type: Result<String, String>,
     /// Complete semantic type graph used to expand transparent aliases.
     type_hierarchy: TypeHierarchy,
     /// Generated files for the current module: (type name, file contents).
@@ -310,6 +319,7 @@ impl JavaGenerator {
             blanket_value: false,
             blanket_builder: false,
             blanket_data: false,
+            file_type: configured_file_type(&Config::default()),
             type_hierarchy: TypeHierarchy::default(),
             files: Vec::new(),
             constants: Vec::new(),
@@ -321,8 +331,40 @@ impl JavaGenerator {
 }
 
 fn create_generator(config: &Config) -> Box<dyn for<'a> AnalyzerListener<'a>> {
+    Box::new(JavaGenerator::from_config(config))
+}
+
+fn create_analyzer(config: &Config) -> Box<dyn for<'a> AnalyzerListener<'a>> {
+    Box::new(FileTypeValidator::new(
+        "Java",
+        configured_file_type(config).err(),
+    ))
+}
+
+fn configured_file_type(config: &Config) -> Result<String, String> {
+    let guidance = "Set file_type in [plugins.java] in xenomorph.toml to a Java reference type.";
+    let value = config
+        .plugins
+        .config
+        .get(NAME)
+        .and_then(|value| value.get("file_type"))
+        .and_then(ConfigValue::as_str)
+        .ok_or_else(|| guidance.to_string())?;
+    if !value.split('.').all(|part| {
+        let mut chars = part.chars();
+        chars.next().is_some_and(is_java_identifier_start)
+            && chars.all(is_java_identifier_part)
+            && !is_java_keyword(part)
+    }) {
+        return Err(format!("Invalid Java file_type '{value}'. {guidance}"));
+    }
+    Ok(value.to_string())
+}
+
+fn configured_generator(config: &Config) -> JavaGenerator {
     let mut generator = JavaGenerator::new();
     generator.workdir = config.workdir.clone();
+    generator.file_type = configured_file_type(config);
     let plugin_configs = &config.plugins.config;
 
     if let Some(ConfigValue::Table(cfg)) = plugin_configs.get("java") {
@@ -343,7 +385,7 @@ fn create_generator(config: &Config) -> Box<dyn for<'a> AnalyzerListener<'a>> {
         }
     }
 
-    Box::new(generator)
+    generator
 }
 
 impl<'src> AnalyzerListener<'src> for JavaGenerator {
@@ -447,13 +489,22 @@ impl<'src> AnalyzerListener<'src> for JavaGenerator {
 
     fn on_simple_type(&mut self, ty: &SimpleType, errors: &mut Vec<XenoDiagnostic>) {
         if self.annotation_depth == 0 {
-            if let Some(diagnostic) = unsupported_target_type_diagnostic(
+            if let Some(diagnostic) = required_file_type_diagnostic(
                 "Java",
+                self.file_type.as_ref().err().map(String::as_str),
                 ty,
                 &self.type_hierarchy,
                 &self.source,
-                has_native_java_mapping,
-            ) {
+            )
+            .or_else(|| {
+                unsupported_target_type_diagnostic(
+                    "Java",
+                    ty,
+                    &self.type_hierarchy,
+                    &self.source,
+                    has_native_java_mapping,
+                )
+            }) {
                 errors.push(diagnostic);
             }
         }
@@ -544,6 +595,10 @@ impl<'src> AnalyzerListener<'src> for JavaGenerator {
 // ── Type declaration generation ─────────────────────────────────────
 
 impl JavaGenerator {
+    fn from_config(config: &Config) -> Self {
+        configured_generator(config)
+    }
+
     /// The Java type a field gets when it references a source declaration
     /// that has no class of its own, or that Java represents specially.
     fn declared_type_to_java(
@@ -1736,6 +1791,16 @@ impl JavaGenerator {
             };
         }
 
+        if name == "file" {
+            return match &self.file_type {
+                Ok(code) => self.use_type_to_java(
+                    &OwnedType::Literal(OwnedLiteral::String(code.clone())),
+                    imports,
+                ),
+                // The value-type diagnostic prevents this fragment from being written.
+                Err(_) => String::new(),
+            };
+        }
         if let Some(base) = native_type_to_java(name, imports) {
             return base;
         }
@@ -1824,7 +1889,7 @@ fn native_type_to_java(name: &str, imports: &mut BTreeSet<String>) -> Option<Str
 }
 
 fn has_native_java_mapping(name: &str) -> bool {
-    native_type_to_java(name, &mut BTreeSet::new()).is_some()
+    name == "file" || native_type_to_java(name, &mut BTreeSet::new()).is_some()
 }
 
 /// Renders `@java::Data`-style annotations as Java decorators, e.g.
@@ -3319,6 +3384,100 @@ mod tests {
             errors[0].message,
             "Java type identifier 'class' conflicts with a reserved keyword."
         );
+    }
+
+    #[test]
+    fn configured_file_type_is_imported_through_aliases_arrays_and_generics() {
+        let mut config = Config::default();
+        config.plugins.config.insert(
+            NAME.into(),
+            "{ file_type = 'java.io.InputStream' }"
+                .parse::<ConfigValue>()
+                .unwrap(),
+        );
+        let configured = configured_generator(&config);
+        let source = concat!(
+            "type Upload = file; type Uploads = Upload[]; ",
+            "type Box<T> = { value: T }; ",
+            "type Request = { upload: file, optional: ?Upload, uploads: Uploads, boxed: Box<file>, data: binary };",
+        );
+        let ast = parse(source);
+        let mut generator = generator_with_declarations(&ast, source);
+        generator.file_type = configured.file_type;
+        let mut errors = Vec::new();
+        generator.on_before_ast(&ast, &mut errors);
+        let start = source.find("file").unwrap();
+        generator.on_simple_type(
+            &SimpleType::Identifier(TokenData::new(start, start + 4), None),
+            &mut errors,
+        );
+        assert!(errors.is_empty(), "{errors:#?}");
+        let output = generated(&generator, "Request");
+        assert_eq!(
+            output.matches("import java.io.InputStream;").count(),
+            1,
+            "{output}"
+        );
+        for field in [
+            "InputStream upload",
+            "InputStream optional",
+            "List<InputStream> uploads",
+            "Box<InputStream> boxed",
+            "byte[] data",
+        ] {
+            assert!(output.contains(&format!("private {field};")), "{output}");
+        }
+        assert!(
+            !output.contains("@NonNull\n    private InputStream optional;"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn missing_or_invalid_java_file_type_is_a_fatal_diagnostic() {
+        let source = "type Upload = file; type Request = { value: Upload };";
+        let ast = parse(source);
+        let mut generator = generator_with_declarations(&ast, source);
+        let start = source.rfind("Upload").unwrap();
+        let ty = SimpleType::Identifier(TokenData::new(start, start + 6), None);
+        for value in [
+            None,
+            Some("''"),
+            Some("42"),
+            Some("'java..File'"),
+            Some("'void'"),
+            Some("'File<>'"),
+        ] {
+            let mut config = Config::default();
+            if let Some(value) = value {
+                config.plugins.config.insert(
+                    NAME.into(),
+                    format!("{{ file_type = {value} }}")
+                        .parse::<ConfigValue>()
+                        .unwrap(),
+                );
+            }
+            generator.file_type = configured_file_type(&config);
+            assert!(generator.file_type.is_err());
+            let mut errors = Vec::new();
+            generator.on_simple_type(&ty, &mut errors);
+            assert_eq!(errors.len(), 1, "{errors:#?}");
+            assert_eq!(errors[0].severity, XenoDiagSeverity::Err);
+            assert_eq!(errors[0].location.text(source), "Upload");
+            assert!(errors[0].message.contains("[plugins.java]"), "{errors:#?}");
+        }
+        generator.file_type = Ok("UploadPart".into());
+        let mut errors = Vec::new();
+        generator.on_simple_type(&ty, &mut errors);
+        assert!(errors.is_empty(), "{errors:#?}");
+        let mut imports = BTreeSet::new();
+        assert_eq!(
+            generator.owned_type_to_java(&OwnedType::named("file"), &mut imports),
+            "UploadPart"
+        );
+        assert!(imports.is_empty());
+        let schema: serde_json::Value = serde_json::from_str(provide_config_schema()).unwrap();
+        assert_eq!(schema["properties"]["file_type"]["type"], "string");
     }
 
     #[test]

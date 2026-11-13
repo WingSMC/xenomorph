@@ -827,10 +827,15 @@ fn lsp_metadata_survives_generator_library_release() {
             "xenomorph_typescript",
             "xenomorph_java",
             "xenomorph_json_schema",
+            "xenomorph_pydantic",
         ],
     );
     let plugins = load_plugins(&config, PluginMode::Analysis).unwrap();
-    assert!(plugins.iter().all(|plugin| !plugin.is_loaded()));
+    assert!(!plugins[0].is_loaded() && !plugins[2].is_loaded());
+    assert!(
+        plugins[1].is_loaded() && plugins[3].is_loaded(),
+        "File mapping analyzers must remain loaded."
+    );
     assert!(plugins[0]
         .description
         .metadata
@@ -852,6 +857,22 @@ fn lsp_metadata_survives_generator_library_release() {
             .any(|diagnostic| diagnostic.severity == crate::XenoDiagSeverity::Err),
         "{diagnostics:?}"
     );
+    let diagnostics = registry.load_module_from_source(
+        &workspace.0.join("index.xen"),
+        "pub type Upload = file;".into(),
+    );
+    for target in ["Java", "Pydantic"] {
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.severity == crate::XenoDiagSeverity::Err
+                    && diagnostic
+                        .message
+                        .starts_with(&format!("{target} cannot represent type 'file':"))
+            }),
+            "{diagnostics:?}"
+        );
+    }
+    assert!(!workspace.0.join("index.py").exists());
 }
 
 #[test]

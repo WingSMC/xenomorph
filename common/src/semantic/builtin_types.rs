@@ -580,6 +580,15 @@ static BINARY: XenoType = XenoType {
     parents: Some(LENGTH_PARENT),
 };
 
+static FILE: XenoType = XenoType {
+    name: "file",
+    documentation: Some(
+        "An uploaded file. TypeScript uses native File; other language plugins require a configured file type. This is distinct from raw binary data or a filesystem path.",
+    ),
+    generic_params: None,
+    parents: Some(ANY_PARENT),
+};
+
 static JSON: XenoType = XenoType {
     name: "json",
     documentation: Some(
@@ -794,6 +803,7 @@ pub static BUILTIN_TYPES: &[&XenoType] = &[
     &EMAIL,
     &URL,
     &BINARY,
+    &FILE,
     &JSON,
     &XML,
     &YAML,
@@ -833,6 +843,17 @@ pub static BUILTIN_TRAITS: &[&XenoTrait] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_is_a_distinct_builtin_without_string_or_length_traits() {
+        assert!(BUILTIN_TYPES.iter().any(|ty| std::ptr::eq(*ty, &FILE)));
+        assert!(is_type_compatible(&FILE, &ANY, &mut HashSet::new()));
+        assert!(!is_type_compatible(&FILE, &BINARY, &mut HashSet::new()));
+        assert!(!is_type_compatible(&FILE, &STRING, &mut HashSet::new()));
+        assert!(!FILE.implements(&HAS_LENGTH));
+        assert!(!FILE.implements(&KEY_TRAIT));
+        assert!(!FILE.implements(&STRING_LITERAL));
+    }
 
     #[test]
     fn semantic_traits_follow_multiple_parent_levels() {

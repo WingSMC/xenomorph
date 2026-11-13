@@ -22,15 +22,37 @@ builder = true
 
 The available Java plugin settings are:
 
-| Setting   | Type    | Purpose                                                                                                                                                                                                      |
-| --------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `output`  | string  | Target directory for generated `.java` files. Relative paths start at the workspace root. Package subdirectories are created below this directory. If omitted, output is written next to each source module. |
-| `package` | string  | Package declaration used by generated Java files, such as `com.example.model`.                                                                                                                               |
-| `value`   | boolean | Add Lombok `@Value` to every generated class.                                                                                                                                                                |
-| `builder` | boolean | Add Lombok `@Builder` to every generated class.                                                                                                                                                              |
-| `data`    | boolean | Add Lombok `@Data` to every generated class.                                                                                                                                                                 |
+| Setting     | Type    | Purpose                                                                                                                                                                                                      |
+| ----------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `output`    | string  | Target directory for generated `.java` files. Relative paths start at the workspace root. Package subdirectories are created below this directory. If omitted, output is written next to each source module. |
+| `package`   | string  | Package declaration used by generated Java files, such as `com.example.model`.                                                                                                                               |
+| `value`     | boolean | Add Lombok `@Value` to every generated class.                                                                                                                                                                |
+| `builder`   | boolean | Add Lombok `@Builder` to every generated class.                                                                                                                                                              |
+| `data`      | boolean | Add Lombok `@Data` to every generated class.                                                                                                                                                                 |
+| `file_type` | string  | Java reference type for uploaded files, such as `com.example.uploads.UploadFile`. Required only when generated value types use `file`.                                                                       |
 
 Generated DTOs require Lombok. Generated tuple support also requires Gson.
+
+## Uploaded files
+
+`file` represents an uploaded file, distinct from `binary` (`byte[]`) and a
+filesystem path. Choose its Java reference type in `xenomorph.toml`:
+
+```toml
+[plugins.java]
+file_type = "com.example.uploads.UploadFile"
+```
+
+Fully qualified names are imported; simple names must be available in the
+generated package. The configured type is used through aliases, optional
+fields, collections, and generic arguments. Primitive types and malformed
+names are rejected.
+
+Missing or invalid settings produce an error diagnostic at the source type
+reference and stop generation; there is no `Object` fallback. Schemas without
+`file` do not require this setting. The type must be available on your Java
+classpath. The plugin does not select a web framework or generate multipart
+parsing or file serialization.
 
 ## Use tuples with Gson
 
@@ -171,5 +193,5 @@ expanded into their underlying types and have no separate declaration to mark.
 
 The Java generator uses the [versioned plugin SDK](../../docs/PLUGINS.md).
 Output paths use the configuration supplied by the host at initialization.
-The LSP retains Java/Lombok semantic metadata but releases the generator
-library; it does not generate Java files.
+The LSP retains Java/Lombok semantic metadata and runs the file-type mapping
+analyzer. It does not generate Java files.

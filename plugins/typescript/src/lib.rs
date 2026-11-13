@@ -717,6 +717,7 @@ fn native_type_to_ts(name: &str) -> Option<&'static str> {
         | "decimal" => "number",
         "i64" | "i128" | "u64" | "u128" | "bigint" | "integer" => "bigint",
         "binary" => "Uint8Array",
+        "file" => "File",
         "regex" => "RegExp",
         "NEVER" => "never",
         "any" => "any",
@@ -1449,6 +1450,40 @@ const missingPresent: Present = undefined;
     }
 
     #[test]
+    fn files_use_native_file_in_aliases_fields_arrays_and_generics() {
+        use xenomorph_common::{lexer::Lexer, parser::Parser};
+        let source = concat!(
+            "pub type Upload = file; ",
+            "pub type Uploads = file[]; ",
+            "pub type Box<T> = { value: T }; ",
+            "pub type Request = { upload: file, optional: ?file, uploads: file[], boxed: Box<file> };",
+        );
+        let tokens = Lexer::tokenize(source).unwrap();
+        let (ast, diagnostics) = Parser::parse(&tokens, source);
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let mut generator = TsGenerator::new();
+        generator.set_source(source);
+        for builtin in BUILTIN_TYPES {
+            generator.type_hierarchy.insert_semantic_type(builtin);
+        }
+        let mut errors = Vec::new();
+        generator.on_before_ast(&ast, &mut errors);
+        generator.on_simple_type(
+            &SimpleType::Identifier(TokenData::new(18, 22), None),
+            &mut errors,
+        );
+        assert!(errors.is_empty(), "{errors:#?}");
+        let output = &generator.out;
+        assert!(output.contains("export type Upload = File;"), "{output}");
+        assert!(output.contains("export type Uploads = File[];"), "{output}");
+        assert!(output.contains("  upload: File;"), "{output}");
+        assert!(output.contains("  optional?: File;"), "{output}");
+        assert!(output.contains("  uploads: File[];"), "{output}");
+        assert!(output.contains("  boxed: Box<File>;"), "{output}");
+        assert_typescript(output, "declare const upload: File; const request: Request = { upload, uploads: [upload], boxed: { value: upload } };");
+    }
+
+    #[test]
     fn test_builtin_mappings() {
         assert_eq!(native_type_to_ts("string"), Some("string"));
         assert_eq!(native_type_to_ts("bool"), Some("boolean"));
@@ -1456,6 +1491,7 @@ const missingPresent: Present = undefined;
         assert_eq!(native_type_to_ts("u64"), Some("bigint"));
         assert_eq!(native_type_to_ts("bigint"), Some("bigint"));
         assert_eq!(native_type_to_ts("binary"), Some("Uint8Array"));
+        assert_eq!(native_type_to_ts("file"), Some("File"));
         assert_eq!(native_type_to_ts("json"), Some("string"));
         assert_eq!(native_type_to_ts("null"), Some("null"));
         assert_eq!(native_type_to_ts("NEVER"), Some("never"));

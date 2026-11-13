@@ -21,11 +21,36 @@ package = "models"
 extra = "forbid"
 ```
 
-| Setting   | Type   | Purpose                                                                                                                                                                                                                       |
-| --------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `output`  | string | Target directory for generated `.py` files. Relative paths start at the workspace root. Module subdirectories are created below this directory. If omitted, output is written next to each source module.                     |
-| `package` | string | Dotted Python package that contains `output`, such as `app.models`. If set, cross-module imports are absolute (`from app.models.shared.ids import UserId`). If omitted, they are relative (`from .shared.ids import UserId`). |
-| `extra`   | string | Default `extra` behaviour of every generated model: `"allow"`, `"ignore"`, or `"forbid"`. `@pydantic::extra` overrides it per model. If omitted, Pydantic's default (`"ignore"`) applies.                                     |
+| Setting     | Type   | Purpose                                                                                                                                                                                                                       |
+| ----------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `output`    | string | Target directory for generated `.py` files. Relative paths start at the workspace root. Module subdirectories are created below this directory. If omitted, output is written next to each source module.                     |
+| `package`   | string | Dotted Python package that contains `output`, such as `app.models`. If set, cross-module imports are absolute (`from app.models.shared.ids import UserId`). If omitted, they are relative (`from .shared.ids import UserId`). |
+| `extra`     | string | Default `extra` behaviour of every generated model: `"allow"`, `"ignore"`, or `"forbid"`. `@pydantic::extra` overrides it per model. If omitted, Pydantic's default (`"ignore"`) applies.                                     |
+| `file_type` | table  | Uploaded-file mapping with required `module` and `name` strings. Required only when generated value types use `file`.                                                                                                         |
+
+### Uploaded files
+
+`file` represents an uploaded file, not raw `binary` data or a filesystem path.
+Choose the Python type explicitly:
+
+```toml
+[plugins.pydantic.file_type]
+module = "app.uploads"
+name = "UploadFile"
+```
+
+The generator imports `UploadFile` from `app.uploads` and uses it in aliases,
+fields, collections, and generic arguments. Relative modules such as
+`.uploads` are supported. Import-name collisions are resolved with an alias.
+The imported type must be available in your Python environment and support
+Pydantic validation. For arbitrary classes, configure the containing model
+with `@pydantic::config("arbitrary_types_allowed", true)` or implement Pydantic
+schema support on the class.
+
+Missing or invalid settings produce an error diagnostic at the source type
+reference and stop generation; there is no `Any` fallback. Schemas without
+`file` do not require this setting. The plugin does not select a web framework
+or generate multipart parsing or file serialization.
 
 ### Requirements
 
@@ -208,6 +233,7 @@ produce a generation error instead of silently replacing a field.
 | `ip`, `ipv4`, `ipv6`                    | `IPvAnyAddress`, `IPv4Address`, `IPv6Address`    |
 | `date`, `datetime`, `duration`          | `date`, `datetime`, `timedelta`                  |
 | `binary`                                | `Base64Bytes`                                    |
+| `file`                                  | Imported type configured by `file_type`          |
 | `regex`                                 | `re.Pattern[str]`                                |
 | `any`                                   | `Any`                                            |
 | `null`                                  | `None`                                           |
