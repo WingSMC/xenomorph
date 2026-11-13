@@ -185,6 +185,11 @@ type Tenths = Increment<decimal>;
 type NonemptyText = Label<string>;
 ```
 
+A type bound can be optional, written directly as `<T: ?bool>` or through an
+alias such as `type OptBool = ?bool;` followed by `<T: OptBool>`. Both accept
+`bool` and optional `bool` arguments. `?` cannot prefix a trait constraint.
+Default annotations do not change whether an argument satisfies a bound.
+
 Built-in utilities include `Pick<T, Keys>`, `Omit<T, Keys>`, `Keyof<T>`,
 `Required<T>`, `Partial<T>`, and `Complete<T>`. `Pick`, `Omit`, `Keyof`,
 `Partial`, and `Complete` require a struct. `Pick` and `Omit` select keys from a
@@ -331,6 +336,7 @@ performed by a plugin. Annotation order is retained in the AST.
 | `@match(pattern)`                                 | `string` and its descendants | One regex literal            |
 | `@deprecated(reason)`                             | Any type                     | Optional string literal      |
 | `@default(value)`                                 | Any type                     | One value of the target type |
+| `@defaultIfMissing(value)`                        | Any type                     | One value of the target type |
 | `@if(condition, expression)`                      | Any type                     | Two expressions              |
 | `@elseif(condition, expression)`                  | Any type                     | Two expressions              |
 | `@else(expression)`                               | Any type                     | One expression               |
@@ -341,13 +347,28 @@ arrays. Value arguments are typed by the type system: a parameter declared as
 `Self` accepts a value assignable to the annotated type, so `u8 @max(300)` is
 an error. An integer literal also fits float and decimal targets.
 
-`@default(value)` records the default value of a type. The value must be a
-literal, `null`, or a list or struct of those, assignable to the annotated
+`@default(value)` records a non-null default value of a type. The value must be a
+literal or a list or struct value, assignable to the annotated
 type, for example `type Port = u16 @default(8080);`, `string[] @default([])`,
 `Dict<string, i32> @default({})`, or `{}` for a struct whose fields are all
-optional. It does not change validation. Generators
-apply it to fields of that type; the Pydantic plugin uses it as the field
-default.
+optional. It does not change the semantic type or generic compatibility.
+Generators decide whether to apply it: TypeScript preserves the declared
+optionality, while Pydantic supplies the field default and removes outer
+`None` for a non-null default. For example, `?bool @default(true)` remains
+optional in Xenomorph but generates a non-nullable `bool` in Pydantic.
+`@default(null)` is an error even when the annotated type is nullable.
+
+`@defaultIfMissing(value)` supplies a default only when a field is absent
+and preserves declared nullability. It accepts the same typed values as
+`@default`, plus `null` when the target is nullable. For example,
+`type A = ?bool @defaultIfMissing(true);` stays nullable in Pydantic:
+omission supplies `True`, while explicit `None` remains `None`.
+`@defaultIfMissing(null)` is valid on nullable types. On a non-nullable type,
+the compiler underlines the annotation with a warning suggesting `@default`;
+generation still applies the default without making the type nullable.
+Neither annotation changes source type compatibility. Pydantic uses the
+nearest default annotation along an alias chain (the first matching one
+within a declaration).
 
 `@multipleof(0.1)` describes increments of one tenth; `@multipleof(10)` describes
 increments of ten. The argument must be greater than zero and is stored exactly.

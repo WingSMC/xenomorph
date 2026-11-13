@@ -9,8 +9,9 @@ use xenomorph_common::parser::{
 };
 use xenomorph_common::plugins::XenoPlugin;
 use xenomorph_common::semantic::{
-    unsupported_target_type_diagnostic, use_type_override, AnalyzerListener, ScopeInfo,
-    TypeHierarchy, XenoAnnotation, XenoParent, XenoType as SemanticType, KEY_TRAIT, USETYPE,
+    simple_to_owned_type, unsupported_target_type_diagnostic, use_type_override, AnalyzerListener,
+    OwnedType, ScopeInfo, TypeHierarchy, XenoAnnotation, XenoParent, XenoType as SemanticType,
+    KEY_TRAIT, USETYPE,
 };
 use xenomorph_common::utils::{extract_documentation, relative_module_path};
 use xenomorph_common::{TokenData, XenoDiagSeverity, XenoDiagnostic};
@@ -205,7 +206,7 @@ impl<'src> AnalyzerListener<'src> for TsGenerator {
                 ..
             } = decl
             {
-                generate_type_decl(
+                generate_type_decl_in(
                     &mut self.out,
                     docs,
                     name.text(&self.source),
@@ -213,6 +214,7 @@ impl<'src> AnalyzerListener<'src> for TsGenerator {
                     t,
                     &self.source,
                     public.is_some(),
+                    &self.type_hierarchy,
                 );
             }
         }
@@ -303,6 +305,7 @@ impl<'src> AnalyzerListener<'src> for TsGenerator {
 
 // ── Type declaration generation ─────────────────────────────────────
 
+#[cfg(test)]
 fn generate_type_decl(
     out: &mut String,
     docs: &Option<String>,
@@ -311,6 +314,28 @@ fn generate_type_decl(
     t: &XenoType,
     source: &str,
     public: bool,
+) {
+    generate_type_decl_in(
+        out,
+        docs,
+        name,
+        generics,
+        t,
+        source,
+        public,
+        &TypeHierarchy::default(),
+    );
+}
+
+fn generate_type_decl_in(
+    out: &mut String,
+    docs: &Option<String>,
+    name: &str,
+    generics: Option<&[(TokenData, Option<TokenData>)]>,
+    t: &XenoType,
+    source: &str,
+    public: bool,
+    hierarchy: &TypeHierarchy,
 ) {
     let export = if public { "export " } else { "" };
     let annotations: Vec<String> =
@@ -348,7 +373,15 @@ fn generate_type_decl(
     }
 
     if let Type::Struct(fields) = &t.0 {
-        generate_interface(out, name, &generic_params, fields, source, export);
+        generate_interface(
+            out,
+            name,
+            &generic_params,
+            fields,
+            source,
+            export,
+            hierarchy,
+        );
         return;
     }
 
@@ -419,11 +452,53 @@ fn generate_interface(
     fields: &[KeyValExpr],
     source: &str,
     export: &str,
+    hierarchy: &TypeHierarchy,
 ) {
+    let dynamic = |value: &SimpleType| match value {
+        SimpleType::Identifier(token, None) => hierarchy
+            .generic_parameters(name)
+            .unwrap_or_default()
+            .iter()
+            .any(|parameter| {
+                parameter.name == token.text(source)
+                    && parameter.constraint.as_deref().is_some_and(|bound| {
+                        bound.starts_with('?')
+                            || ts_type_is_optional(&OwnedType::named(bound), hierarchy)
+                    })
+            }),
+        _ => false,
+    };
+    if fields.iter().any(|(_, value, _)| dynamic(value)) {
+        out.push_str(&format!("{export}type {name}{generic_params} =\n"));
+        for (index, (key, value, docs)) in fields.iter().enumerate() {
+            let ty = simple_type_to_ts(value, source);
+            let key = typescript_property_name(key.text(source));
+            let doc = inline_jsdoc(docs.as_ref(), source);
+            let part = if dynamic(value) {
+                format!(
+                    "(undefined extends {ty} ? {{ {doc}{key}?: {ty} }} : {{ {doc}{key}: {ty} }})"
+                )
+            } else {
+                let opt = if ts_type_is_optional(&simple_to_owned_type(value, source), hierarchy) {
+                    "?"
+                } else {
+                    ""
+                };
+                format!("{{ {doc}{key}{opt}: {ty} }}")
+            };
+            out.push_str(&format!(
+                "  {}{part}{}\n",
+                if index == 0 { "" } else { "& " },
+                if index + 1 == fields.len() { ";" } else { "" }
+            ));
+        }
+        out.push('\n');
+        return;
+    }
     out.push_str(&format!("{export}interface {name}{generic_params} {{\n"));
     for (key, value, docs) in fields {
         let ts_type = simple_type_to_ts(value, source);
-        let optional = is_optional(value);
+        let optional = ts_type_is_optional(&simple_to_owned_type(value, source), hierarchy);
 
         if let Some(docs) = docs {
             push_jsdoc(out, &extract_documentation(docs, source), "  ");
@@ -719,8 +794,9 @@ fn expr_to_ts(expr: &Expr, source: &str) -> String {
     }
 }
 
-fn is_optional(ty: &SimpleType) -> bool {
-    ty.is_optional()
+fn ts_type_is_optional(ty: &OwnedType, hierarchy: &TypeHierarchy) -> bool {
+    hierarchy.is_assignable_to(&OwnedType::named("null"), ty)
+        || matches!(ty, OwnedType::Optional(_))
 }
 
 fn is_all_required_literals(types: &[SimpleType]) -> bool {
@@ -906,6 +982,143 @@ mod tests {
         let mut g = TsGenerator::new();
         g.set_source(FIXTURE_SOURCE);
         g
+    }
+
+    /// Validate generated declarations when the extension's compiler is installed.
+    fn assert_typescript(output: &str, assertions: &str) {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let compiler = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../extensions/vscode/client/node_modules/typescript/lib/typescript.js");
+        if !compiler.is_file() {
+            eprintln!("Skipping TypeScript compilation: install the VS Code client dependencies.");
+            return;
+        }
+        let mut child = Command::new("node")
+            .args([
+                "-e",
+                r#"
+const ts = require(process.argv[1]);
+const source = require('fs').readFileSync(0, 'utf8');
+const name = '__xeno_generated_regression__.ts';
+const options = { strict: true, noEmit: true, target: ts.ScriptTarget.ES2020 };
+const host = ts.createCompilerHost(options);
+const original = host.getSourceFile.bind(host);
+host.getSourceFile = (file, ...args) => file.endsWith(name)
+    ? ts.createSourceFile(file, source, options.target, true)
+    : original(file, ...args);
+const program = ts.createProgram([name], options, host);
+const diagnostics = ts.getPreEmitDiagnostics(program);
+if (diagnostics.length) {
+    console.error(ts.formatDiagnosticsWithColorAndContext(diagnostics, host));
+    process.exit(1);
+}
+"#,
+            ])
+            .arg(compiler)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("Node.js is required when the TypeScript compiler is installed");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(format!("{output}\n{assertions}").as_bytes())
+            .unwrap();
+        let result = child.wait_with_output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}\n{output}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
+    #[test]
+    fn defaults_do_not_change_types_in_a_target_without_defaulting() {
+        use xenomorph_common::{lexer::Lexer, parser::Parser};
+        let source = concat!(
+            "pub type DefaultFalse = bool @default(false); ",
+            "pub type OptionalFalse = ?bool @default(false); ",
+            "pub type A = ?bool @default(true); ",
+            "pub type Missing = ?bool @defaultIfMissing(true); ",
+            "pub type Present = bool @defaultIfMissing(false); ",
+            "type Copy = DefaultFalse; ",
+            "type Flags = { enabled: Copy, other: OptionalFalse, required: bool }; ",
+            "type CsvOptionsOf<Enabled: ?bool> = { csv_enable: Enabled }; ",
+            "type OptBool = ?bool; ",
+            "type AliasOptionsOf<Enabled: OptBool> = { csv_enable: Enabled }; ",
+            "type CsvOptions = CsvOptionsOf<DefaultFalse>;",
+        );
+        let tokens = Lexer::tokenize(source).unwrap();
+        let (ast, diagnostics) = Parser::parse(&tokens, source);
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let mut generator = TsGenerator::new();
+        generator.set_source(source);
+        generator.type_hierarchy.set_current_module("test");
+        generator.type_hierarchy.register_module("test", vec![]);
+        for builtin in BUILTIN_TYPES {
+            generator.type_hierarchy.insert_semantic_type(builtin);
+        }
+        for declaration in &ast {
+            if let Declaration::Type {
+                name, generics, ty, ..
+            } = declaration
+            {
+                generator.type_hierarchy.insert_declaration(
+                    "test",
+                    name.text(source),
+                    TypeDeclarationInfo::from_ast(generics.as_deref(), &ty.0, source),
+                );
+                generator.type_hierarchy.set_declaration_annotations(
+                    "test",
+                    name.text(source),
+                    xenomorph_common::semantic::declaration_annotations(&ty.1, source),
+                );
+            }
+        }
+        generator.on_before_ast(&ast, &mut vec![]);
+        let output = &generator.out;
+        assert!(
+            output.contains("export type DefaultFalse = boolean;"),
+            "{output}"
+        );
+        assert!(
+            output.contains("export type OptionalFalse = boolean | undefined;"),
+            "{output}"
+        );
+        assert!(
+            output.contains("export type A = boolean | undefined;"),
+            "{output}"
+        );
+        assert!(output.contains("  enabled: Copy;"), "{output}");
+        assert!(output.contains("  other?: OptionalFalse;"), "{output}");
+        assert!(output.contains("  required: boolean;"), "{output}");
+        assert!(
+            output.contains(
+                "(undefined extends Enabled ? { csv_enable?: Enabled } : { csv_enable: Enabled })"
+            ),
+            "{output}"
+        );
+        assert_typescript(
+            output,
+            r#"
+const optional: A = undefined;
+const missingOptional: Missing = undefined;
+const missingOmitted: CsvOptionsOf<Missing> = {};
+const omitted: CsvOptionsOf<OptionalFalse> = {};
+const aliasOmitted: AliasOptionsOf<OptionalFalse> = {};
+const present: CsvOptions = { csv_enable: true };
+// @ts-expect-error a nonoptional argument still requires the field
+const missing: CsvOptions = {};
+// @ts-expect-error default metadata alone does not make the type optional
+const missingDefault: DefaultFalse = undefined;
+// @ts-expect-error defaultIfMissing preserves required types too
+const missingPresent: Present = undefined;
+"#,
+        );
     }
     #[test]
     fn deprecated_marks_each_generated_declaration_with_jsdoc() {

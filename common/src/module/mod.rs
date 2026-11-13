@@ -2266,7 +2266,7 @@ mod tests {
             "pub type Ratio = f64 @default(0.5); ",
             "pub type Whole = f64 @default(1); ",
             "pub type Flag = bool @default(true); ",
-            "pub type Maybe = ?string @default(null); ",
+            "pub type Maybe = ?string @defaultIfMissing(null); ",
             "pub type Mode = |\"a\"|\"b\" @default(\"b\"); ",
             "pub type Alias = Port @default(80); ",
             "pub type Tags = string[] @default([]); ",
@@ -2405,6 +2405,36 @@ mod update_tests {
         config.parser.entry = "index".into();
         XenoRegistry::with_config(config, false).unwrap()
     }
+    #[test]
+    fn default_if_missing_warning_does_not_block_analysis_and_tracks_the_annotation() {
+        let registry = registry();
+        let path = registry.root.join("index.xen");
+        let source = "pub type Flag = bool @defaultIfMissing(true);";
+        let errors = registry.load_module_from_source(&path, source.into());
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].severity, XenoDiagSeverity::Warn);
+        let (line, column, length) = errors[0].location.unwrap();
+        assert_eq!(line, 0);
+        assert_eq!(
+            &source[column as usize..(column + length) as usize],
+            "defaultIfMissing"
+        );
+        assert!(errors[0].message.contains("use '@default' instead"));
+        for source in [
+            "pub type Flag = ?bool @defaultIfMissing(true);",
+            "pub type Flag = ?bool @defaultIfMissing(null);",
+            "pub type Flag = bool @default(true);",
+        ] {
+            let errors = registry.load_module_from_source(&path, source.into());
+            assert!(errors.is_empty(), "{source}: {errors:#?}");
+        }
+        let invalid = "pub type Flag = ?bool @default(null);";
+        let errors = registry.load_module_from_source(&path, invalid.into());
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].severity, XenoDiagSeverity::Err);
+        fs::remove_dir_all(&registry.root).unwrap();
+    }
+
     #[test]
     fn cycles_defer_scans_and_recover_without_blocking_recursive_types() {
         let registry = registry();

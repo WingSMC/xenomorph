@@ -203,6 +203,20 @@ impl<'context> AnnotationValidator<'context> {
             let Some(param) = annotation.parameter_at(index) else {
                 continue;
             };
+            if annotation.name == "default"
+                && matches!(arg,
+                    Expr::Type(Type::Simple(SimpleType::Identifier(identifier, None)))
+                        if identifier.text(self.source) == "null")
+            {
+                errors.push(XenoDiagnostic {
+                    tags: vec![],
+                    severity: crate::XenoDiagSeverity::Err,
+                    location: Self::expr_location(arg),
+                    message: "Annotation '@default' does not accept null, even for nullable types. Use '@defaultIfMissing(null)' instead."
+                        .to_string(),
+                });
+                continue;
+            }
             if let Err(got) = self.check_arg(target, arg, &param.constraint) {
                 errors.push(XenoDiagnostic {
                     tags: vec![],
@@ -241,7 +255,7 @@ impl<'context> AnnotationValidator<'context> {
 
     /// The type a `Self` parameter is checked against. Validators constrain
     /// the present value of an optional type; metadata describes the type as
-    /// declared, so `?T @default(null)` is valid.
+    /// declared, so `?T @defaultIfMissing(null)` is valid.
     fn target_type(&self, annotation: &OwnedAnnotation) -> Option<&OwnedType> {
         if self.annotation_depth > 0 {
             return None;
@@ -502,6 +516,22 @@ impl<'src, 'context> AnalyzerListener<'src> for AnnotationValidator<'context> {
             } else {
                 None
             };
+            if annotation.name == "defaultIfMissing"
+                && target.is_some_and(|target| {
+                    !self
+                        .scope
+                        .type_hierarchy
+                        .is_assignable_to(&OwnedType::named("null"), target)
+                })
+            {
+                errors.push(XenoDiagnostic {
+                    tags: vec![],
+                    location: *name,
+                    severity: crate::XenoDiagSeverity::Warn,
+                    message: "Annotation '@defaultIfMissing' is on a non-nullable type; use '@default' instead. It behaves like '@default' here."
+                        .to_string(),
+                });
+            }
             self.validate_args(annotation, target, name, args, errors);
         }
         self.annotation_depth += 1;
@@ -585,6 +615,108 @@ mod tests {
                 cast: None,
             },
         ))))
+    }
+
+    fn validate_source(source: &str) -> Vec<XenoDiagnostic> {
+        use crate::{lexer::Lexer, parser::Parser};
+
+        let tokens = Lexer::tokenize(source).unwrap();
+        let (ast, diagnostics) = Parser::parse(&tokens, source);
+        assert!(diagnostics.is_empty(), "{source}: {diagnostics:#?}");
+        let scope = scope(&ast, source);
+        assert!(scope.find_annotation("defaultIfMissing").is_some());
+        let mut validator = AnnotationValidator::new(&scope, source);
+        let mut errors = Vec::new();
+        for declaration in &ast {
+            if let Declaration::Type { ty, .. } = declaration {
+                validator.on_before_decl(declaration, &mut errors);
+                validator.on_before_type(ty, &mut errors);
+                for annotation in &ty.1 {
+                    validator.on_before_annotation(
+                        &annotation.ident,
+                        &annotation.params,
+                        &mut errors,
+                    );
+                    validator.on_after_annotation(
+                        &annotation.ident,
+                        &annotation.params,
+                        &mut errors,
+                    );
+                }
+                validator.on_after_type(ty, &mut errors);
+                validator.on_after_decl(declaration, &mut errors);
+            }
+        }
+        errors
+    }
+
+    #[test]
+    fn default_if_missing_requires_one_value_of_the_declared_type() {
+        for (source, valid) in [
+            ("type A = ?bool @defaultIfMissing(true);", true),
+            ("type A = ?bool @defaultIfMissing(null);", true),
+            ("type A = bool @defaultIfMissing(false);", true),
+            ("type A = string[] @defaultIfMissing([]);", true),
+            ("type A = { value: ?bool } @defaultIfMissing({});", true),
+            ("type A = ?bool @defaultIfMissing(1);", false),
+            ("type A = bool @defaultIfMissing(null);", false),
+            ("type A = u8 @defaultIfMissing(300);", false),
+            ("type A = ?bool @defaultIfMissing;", false),
+            ("type A = ?bool @defaultIfMissing(true, false);", false),
+        ] {
+            let errors = validate_source(source);
+            assert_eq!(
+                errors
+                    .iter()
+                    .all(|error| error.severity != crate::XenoDiagSeverity::Err),
+                valid,
+                "{source}: {errors:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn regular_default_rejects_null_even_for_nullable_targets() {
+        for source in [
+            "type A = bool @default(null);",
+            "type A = ?bool @default(null);",
+            "type Base = ?bool; type A = Base @default(null);",
+            "type A = |bool|null @default(null);",
+            "type A = any @default(null);",
+            "type A<T: ?bool> = T @default(null);",
+        ] {
+            let errors = validate_source(source);
+            assert_eq!(errors.len(), 1, "{source}: {errors:#?}");
+            assert_eq!(errors[0].severity, crate::XenoDiagSeverity::Err);
+            assert_eq!(errors[0].location.text(source), "null");
+            assert!(errors[0].message.contains("does not accept null"));
+        }
+    }
+
+    #[test]
+    fn default_if_missing_warns_only_for_non_nullable_types() {
+        for source in [
+            "type A = bool @defaultIfMissing(true);",
+            "type Base = bool; type A = Base @defaultIfMissing(true);",
+            "type Base = ?bool; type A = Required<Base> @defaultIfMissing(true);",
+            "type A<T: bool> = T @defaultIfMissing(true);",
+        ] {
+            let errors = validate_source(source);
+            assert_eq!(errors.len(), 1, "{source}: {errors:#?}");
+            assert_eq!(errors[0].severity, crate::XenoDiagSeverity::Warn);
+            assert_eq!(errors[0].location.text(source), "defaultIfMissing");
+            assert!(errors[0].message.contains("use '@default' instead"));
+        }
+        for source in [
+            "type A = ?bool @defaultIfMissing(true);",
+            "type Base = ?bool; type A = Base @defaultIfMissing(true);",
+            "type A = |bool|null @defaultIfMissing(true);",
+            "type A = any @defaultIfMissing(true);",
+            "type A<T: ?bool> = T @defaultIfMissing(null);",
+        ] {
+            let errors = validate_source(source);
+            assert!(errors.is_empty(), "{source}: {errors:#?}");
+        }
     }
 
     #[test]

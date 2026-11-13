@@ -1095,7 +1095,7 @@ impl PydanticGenerator {
             Type::Struct(fields) => {
                 let fields = self.ast_fields(fields);
                 (
-                    self.model(name, params, docs, &fields, false, annotations),
+                    self.model(name, params, docs, &fields, false, annotations, None),
                     vec![],
                 )
             }
@@ -1103,6 +1103,17 @@ impl PydanticGenerator {
             Type::Intersection(_) => self.struct_shaped(name, params, docs, ty, annotations),
             Type::Simple(SimpleType::Identifier(identifier, Some(_)))
                 if STRUCT_UTILITIES.contains(&identifier.text(&self.source)) =>
+            {
+                self.struct_shaped(name, params, docs, ty, annotations)
+            }
+            Type::Simple(SimpleType::Identifier(identifier, Some(_)))
+                if params.is_empty()
+                    && self
+                        .type_hierarchy
+                        .get_type(identifier.text(&self.source))
+                        .is_some_and(|definition| {
+                            matches!(definition.body, Some(OwnedType::Struct(_)))
+                        }) =>
             {
                 self.struct_shaped(name, params, docs, ty, annotations)
             }
@@ -1122,6 +1133,14 @@ impl PydanticGenerator {
         annotations: &[Annotation],
     ) -> (String, Vec<String>) {
         let owned = type_to_owned_type(ty, &self.source);
+        let base = match ty {
+            Type::Simple(SimpleType::Identifier(identifier, Some(_)))
+                if !STRUCT_UTILITIES.contains(&identifier.text(&self.source)) =>
+            {
+                Some(self.render(&owned))
+            }
+            _ => None,
+        };
         match self.type_hierarchy.struct_shape_preserving_aliases(&owned) {
             Ok(Some(shape)) => (
                 self.model(
@@ -1131,6 +1150,7 @@ impl PydanticGenerator {
                     &shape.fields,
                     !shape.dicts.is_empty(),
                     annotations,
+                    base.as_deref(),
                 ),
                 vec![],
             ),
@@ -1168,6 +1188,7 @@ impl PydanticGenerator {
         fields: &[OwnedField],
         allows_extra: bool,
         annotations: &[Annotation],
+        base: Option<&str>,
     ) -> String {
         let mut config = FieldArgs::default();
         let mut validators: Vec<(&str, String)> = Vec::new();
@@ -1285,7 +1306,7 @@ impl PydanticGenerator {
             let decorator = self.symbol("typing_extensions", "deprecated");
             output.push_str(&format!("@{decorator}({})\n", python_string(message)));
         }
-        output.push_str(&self.class_header(name, params, &base_model));
+        output.push_str(&self.class_header(name, params, base.unwrap_or(&base_model)));
         let mut sections = Vec::new();
         if let Some(docs) = docs.filter(|docs| !docs.trim().is_empty()) {
             sections.push(python_docstring(docs, "    "));
@@ -1319,7 +1340,7 @@ impl PydanticGenerator {
                     let computed_field = self.symbol("pydantic", "computed_field");
                     sections.push(format!(
                         "    @{computed_field}(alias={wire_alias})\n    @property\n    def {alias}(self) -> {}:\n        return self.{python_name}\n",
-                        self.render(&field.ty)
+                        self.render_field_type(&field.ty)
                     ));
                 } else {
                     // Wire aliases such as "first-name" cannot be Python
@@ -1367,7 +1388,7 @@ impl PydanticGenerator {
         ty: &OwnedType,
         docs: Option<&str>,
     ) -> String {
-        let rendered = self.render(ty);
+        let rendered = self.render_field_type(ty);
         let optional = self.is_optional(ty, 0);
         let mut args = FieldArgs::default();
         if let Some((key, value)) = self.default_value(ty, 0) {
@@ -1416,43 +1437,7 @@ impl PydanticGenerator {
     /// Finds field metadata through optional types and alias chains, resolving
     /// each body in its declaring module rather than the consuming module.
     fn type_annotation(&self, ty: &OwnedType, name: &str) -> Option<&DeclarationAnnotation> {
-        self.type_annotation_in(ty, name, Some(&self.module_path), 0)
-    }
-
-    fn type_annotation_in(
-        &self,
-        ty: &OwnedType,
-        name: &str,
-        context: Option<&str>,
-        depth: usize,
-    ) -> Option<&DeclarationAnnotation> {
-        if depth > 32 {
-            return None;
-        }
-        let definition = match ty {
-            OwnedType::Optional(inner) => {
-                return self.type_annotation_in(inner, name, context, depth + 1);
-            }
-            OwnedType::Named { name, .. } => self.type_hierarchy.get_type_from(context, name)?,
-            OwnedType::Qualified {
-                module_path, name, ..
-            } => self
-                .type_hierarchy
-                .get_type_in(module_path.as_deref(), name)?,
-            _ => return None,
-        };
-        definition
-            .annotations
-            .iter()
-            .find(|annotation| annotation.name == name)
-            .or_else(|| {
-                self.type_annotation_in(
-                    definition.body.as_ref()?,
-                    name,
-                    definition.module_path.as_deref(),
-                    depth + 1,
-                )
-            })
+        self.type_hierarchy.type_annotation(ty, name)
     }
 
     fn field_alias(&self, ty: &OwnedType) -> Option<&str> {
@@ -1466,7 +1451,32 @@ impl PydanticGenerator {
         }
     }
 
-    /// The `Field` argument for the nearest `@default` on the field type's
+    fn default_annotation(&self, ty: &OwnedType) -> Option<&DeclarationAnnotation> {
+        self.type_hierarchy
+            .type_annotation_any(ty, &["default", "defaultIfMissing"])
+    }
+
+    /// Only `@default` removes nullability; `@defaultIfMissing` preserves it.
+    fn has_non_null_default(&self, ty: &OwnedType) -> bool {
+        self.default_annotation(ty)
+            .filter(|annotation| annotation.name == "default")
+            .and_then(|annotation| annotation.arguments.first())
+            .is_some_and(|value| {
+                !matches!(value,
+                OwnedType::Named { name, arguments } if name == "null" && arguments.is_empty())
+            })
+    }
+
+    fn render_field_type(&self, ty: &OwnedType) -> String {
+        match ty {
+            OwnedType::Optional(inner) if self.has_non_null_default(ty) => {
+                self.render_field_type(inner)
+            }
+            _ => self.render(ty),
+        }
+    }
+
+    /// The `Field` argument for the nearest default annotation on the field type's
     /// alias chain, e.g. `type Port = u16 @default(8080);`. Struct values of
     /// a model type become a factory, since Pydantic does not validate defaults.
     fn default_value(&self, ty: &OwnedType, depth: usize) -> Option<(&'static str, String)> {
@@ -1476,7 +1486,7 @@ impl PydanticGenerator {
         if let OwnedType::Optional(inner) = ty {
             return self.default_value(inner, depth + 1);
         }
-        let value = self.type_annotation(ty, "default")?.arguments.first()?;
+        let value = self.default_annotation(ty)?.arguments.first()?;
         match value {
             OwnedType::Struct(fields) => match self.model_class(ty, depth) {
                 Some(model) if fields.is_empty() => Some(("default_factory", model)),
@@ -1592,7 +1602,7 @@ impl PydanticGenerator {
             let name = annotation_name(annotation, &self.source);
             let number = || number_param(annotation, 0);
             match name {
-                "default" => {
+                "default" | "defaultIfMissing" => {
                     if let Some((key, value)) = self.default_value(&OwnedType::named(alias_name), 0)
                     {
                         args.set(key, value);
@@ -1701,11 +1711,13 @@ impl PydanticGenerator {
         ty: &Type,
         annotations: &[Annotation],
     ) -> String {
-        // Constraints of `?T` apply to `T`, keeping the alias `T | None`.
+        // Constraints of `?T` apply to `T`. Non-null defaults remove outer
+        // nullability only in this target, not in the semantic hierarchy.
         let (inner, optional) = match ty {
             Type::Simple(SimpleType::Optional(inner)) => (Type::Simple((**inner).clone()), true),
             other => (other.clone(), false),
         };
+        let optional = optional && !self.has_non_null_default(&OwnedType::named(name));
         let mut args = FieldArgs::default();
         let base = match &inner {
             Type::Simple(SimpleType::Identifier(identifier, None)) => {

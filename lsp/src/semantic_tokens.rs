@@ -336,6 +336,12 @@ fn mark_type_reference(
     type_parameters: &HashSet<&str>,
     source: &str,
 ) {
+    let mut reference = *data;
+    let text = reference.text(source);
+    if let Some(inner) = text.strip_prefix('?') {
+        reference.start += (text.len() - inner.trim_start().len()) as u32;
+    }
+    let data = &reference;
     let kind = if type_parameters.contains(data.text(source)) {
         TokenKind::TypeParameter
     } else {
@@ -485,6 +491,17 @@ type Cast = 1 as u64;
         assert!(classified.contains(&("type".to_string(), TokenStyle::new(TokenKind::Keyword))));
         assert!(classified.contains(&("Broken".to_string(), TokenStyle::new(TokenKind::Type))));
         assert!(classified.contains(&("Unknown".to_string(), TokenStyle::new(TokenKind::Type))));
+    }
+
+    #[test]
+    fn optional_generic_bounds_keep_the_question_mark_as_an_operator() {
+        let source = "type Box<T: ?bool> = { value: T };";
+        let tokens = Lexer::tokenize(source).unwrap();
+        let (_, diagnostics) = Parser::parse(&tokens, source);
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let tokens = classified(source);
+        assert!(tokens.contains(&("?".into(), TokenStyle::new(TokenKind::Operator))));
+        assert!(tokens.contains(&("bool".into(), TokenStyle::new(TokenKind::Type))));
     }
 
     #[test]

@@ -17,7 +17,7 @@ use super::{MetadataGraph, OwnedConstraint, OwnedTrait, OwnedTraitKind, XenoTrai
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GenericParameterInfo {
     pub name: String,
-    /// Name of either a type or a trait that constrains this parameter.
+    /// A type or trait name, optionally prefixed by `?` for a type bound.
     pub constraint: Option<String>,
     /// Module in which an unqualified type constraint must be resolved.
     pub constraint_scope: Option<String>,
@@ -806,6 +806,74 @@ impl TypeHierarchy {
         if let Some(definition) = Arc::make_mut(&mut self.types).get_mut(&key) {
             Arc::make_mut(definition).annotations = annotations;
         }
+    }
+
+    /// The nearest annotation on a type's alias chain, preserving generic
+    /// arguments and resolving each body in its declaring module.
+    pub fn type_annotation(&self, ty: &OwnedType, name: &str) -> Option<&DeclarationAnnotation> {
+        self.type_annotation_any(ty, &[name])
+    }
+
+    /// The nearest annotation matching any name on a type's alias chain.
+    /// Within one declaration, the first matching annotation wins.
+    pub fn type_annotation_any(
+        &self,
+        ty: &OwnedType,
+        names: &[&str],
+    ) -> Option<&DeclarationAnnotation> {
+        fn visit<'a>(
+            hierarchy: &'a TypeHierarchy,
+            ty: &OwnedType,
+            names: &[&str],
+            context: Option<&str>,
+            depth: usize,
+        ) -> Option<&'a DeclarationAnnotation> {
+            if depth > 32 {
+                return None;
+            }
+            let (definition, arguments) = match ty {
+                OwnedType::Optional(inner) => {
+                    return visit(hierarchy, inner, names, context, depth + 1);
+                }
+                OwnedType::Named { name, arguments } => {
+                    (hierarchy.get_type_from(context, name)?, arguments)
+                }
+                OwnedType::Qualified {
+                    module_path,
+                    name,
+                    arguments,
+                } => (
+                    hierarchy.get_type_in(module_path.as_deref(), name)?,
+                    arguments,
+                ),
+                _ => return None,
+            };
+            definition
+                .annotations
+                .iter()
+                .find(|annotation| names.contains(&annotation.name.as_str()))
+                .or_else(|| {
+                    let arguments: Vec<_> = arguments
+                        .iter()
+                        .map(|argument| hierarchy.qualify_type(argument, context))
+                        .collect();
+                    let substitutions = definition
+                        .generic_params
+                        .iter()
+                        .zip(&arguments)
+                        .map(|(parameter, argument)| (parameter.name.as_str(), argument))
+                        .collect();
+                    let body = substitute_owned_type(definition.body.as_ref()?, &substitutions);
+                    visit(
+                        hierarchy,
+                        &body,
+                        names,
+                        definition.module_path.as_deref(),
+                        depth + 1,
+                    )
+                })
+        }
+        visit(self, ty, names, self.current_module.as_deref(), 0)
     }
 
     pub fn remove_module(&mut self, module: &str) {
@@ -1746,11 +1814,10 @@ impl TypeHierarchy {
                     if self.has_trait(constraint) {
                         SemanticDomain::Unknown
                     } else {
-                        self.semantic_domain(
-                            &OwnedType::named(constraint),
-                            constraint_scope.as_deref(),
-                            visiting,
-                        )
+                        self.constraint_type(constraint, constraint_scope.as_deref())
+                            .map_or(SemanticDomain::Unknown, |ty| {
+                                self.semantic_domain(&ty, constraint_scope.as_deref(), visiting)
+                            })
                     }
                 }),
             OwnedType::Named { name, arguments } => {
@@ -2075,6 +2142,16 @@ impl TypeHierarchy {
         let candidate = self
             .evaluate_type(candidate)
             .unwrap_or_else(|_| candidate.clone());
+        if let OwnedType::Generic {
+            constraint: Some(constraint),
+            constraint_scope,
+            ..
+        } = &candidate
+        {
+            if let Some(bound) = self.constraint_type(constraint, constraint_scope.as_deref()) {
+                return self.is_assignable_to(&bound, target);
+            }
+        }
         match &candidate {
             OwnedType::Set(set) if set.values.is_some() => {
                 let sum = literal_set_sum(set).expect("prefilled set");
@@ -2468,7 +2545,23 @@ impl TypeHierarchy {
             })
     }
 
-    /// Checks a concrete or generic candidate against a named type/trait constraint.
+    /// Resolves a type bound in its declaring module, including inline `?T`.
+    fn constraint_type(&self, constraint: &str, context: Option<&str>) -> Option<OwnedType> {
+        let optional = constraint.strip_prefix('?');
+        let key = self.resolve_key(optional.unwrap_or(constraint).trim(), context)?;
+        let ty = OwnedType::Qualified {
+            module_path: key.module_path,
+            name: key.name,
+            arguments: Vec::new(),
+        };
+        Some(if optional.is_some() {
+            optional_type(ty)
+        } else {
+            ty
+        })
+    }
+
+    /// Checks a concrete or generic candidate against a type/trait constraint.
     pub fn satisfies_constraint(
         &self,
         candidate: &OwnedType,
@@ -2478,13 +2571,8 @@ impl TypeHierarchy {
         if let Some(required_trait) = self.get_trait(constraint) {
             self.implements_trait(candidate, &required_trait.name)
         } else {
-            self.integer_literal_fits_named_type(candidate, constraint, constraint_scope)
-                || self.is_type_compatible_in(
-                    candidate,
-                    self.current_module.as_deref(),
-                    constraint,
-                    constraint_scope,
-                )
+            self.constraint_type(constraint, constraint_scope)
+                .is_some_and(|target| self.is_assignable_to(candidate, &target))
         }
     }
 
@@ -2497,19 +2585,10 @@ impl TypeHierarchy {
         if self.get_trait(candidate_constraint).is_some() {
             return false;
         }
-        let Some(candidate_key) = self.resolve_key(candidate_constraint, candidate_scope) else {
+        let Some(candidate) = self.constraint_type(candidate_constraint, candidate_scope) else {
             return false;
         };
-        self.is_type_compatible_inner(
-            &OwnedType::Qualified {
-                module_path: candidate_key.module_path,
-                name: candidate_key.name,
-                arguments: Vec::new(),
-            },
-            candidate_scope,
-            required,
-            &mut HashSet::new(),
-        )
+        self.is_type_compatible_inner(&candidate, candidate_scope, required, &mut HashSet::new())
     }
 
     fn constraint_implies_trait(
@@ -2521,12 +2600,15 @@ impl TypeHierarchy {
         if let Some(candidate_trait) = self.get_trait(candidate_constraint) {
             self.trait_is_or_inherits(&candidate_trait.name, &required.name)
         } else {
-            self.type_implements_trait_inner(
-                &OwnedType::named(candidate_constraint),
-                candidate_scope,
-                required,
-                &mut HashSet::new(),
-            )
+            self.constraint_type(candidate_constraint, candidate_scope)
+                .is_some_and(|candidate| {
+                    self.type_implements_trait_inner(
+                        &candidate,
+                        candidate_scope,
+                        required,
+                        &mut HashSet::new(),
+                    )
+                })
         }
     }
 
@@ -3310,6 +3392,45 @@ mod tests {
                 .expect("named intersection evaluates"),
             OwnedType::named("NEVER")
         );
+    }
+
+    #[test]
+    fn optional_bounds_check_both_cases_and_keep_module_provenance() {
+        let mut hierarchy = utility_hierarchy();
+        hierarchy.register_module("other", vec![]);
+        let alias = |body| TypeDeclarationInfo {
+            transparent_alias: true,
+            ..declaration(body)
+        };
+        hierarchy.insert_declaration(
+            "other",
+            "Opt",
+            alias(optional_type(OwnedType::named("bool"))),
+        );
+        hierarchy.insert_declaration(
+            "test",
+            "Opt",
+            alias(optional_type(OwnedType::named("string"))),
+        );
+        let optional_bool = optional_type(OwnedType::named("bool"));
+        assert!(hierarchy.satisfies_constraint(&optional_bool, "Opt", Some("other")));
+        assert!(!hierarchy.satisfies_constraint(&optional_bool, "Opt", Some("test")));
+        assert!(hierarchy.satisfies_constraint(&optional_bool, "?bool", Some("test")));
+        assert!(hierarchy.satisfies_constraint(&OwnedType::named("bool"), "?bool", Some("test")));
+        assert!(hierarchy.satisfies_constraint(&OwnedType::named("null"), "?bool", Some("test")));
+        assert!(!hierarchy.satisfies_constraint(&optional_bool, "bool", Some("test")));
+        assert!(!hierarchy.satisfies_constraint(
+            &OwnedType::named("string"),
+            "?bool",
+            Some("test")
+        ));
+        let generic = OwnedType::Generic {
+            name: "T".into(),
+            constraint: Some("?bool".into()),
+            constraint_scope: Some("test".into()),
+        };
+        assert!(hierarchy.satisfies_constraint(&generic, "Opt", Some("other")));
+        assert!(!hierarchy.satisfies_constraint(&generic, "bool", Some("test")));
     }
 
     #[test]

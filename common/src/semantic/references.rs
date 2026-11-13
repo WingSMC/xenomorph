@@ -88,7 +88,15 @@ fn declaration_references(declaration: &Declaration, source: &str) -> Vec<TokenD
     let generics = generics.as_deref().unwrap_or_default();
     let mut references: Vec<_> = generics
         .iter()
-        .filter_map(|(_, constraint)| *constraint)
+        .filter_map(|(_, constraint)| {
+            constraint.map(|mut token| {
+                let text = token.text(source);
+                if let Some(inner) = text.strip_prefix('?') {
+                    token.start += (text.len() - inner.trim_start().len()) as u32;
+                }
+                token
+            })
+        })
         .collect();
     references.extend(all_type_references(ty).into_iter().filter(|token| {
         !generics
@@ -141,4 +149,27 @@ pub fn collect_source_type_occurrences(
         _ => None,
     }));
     references
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{lexer::Lexer, parser::Parser};
+
+    #[test]
+    fn optional_bounds_reference_only_the_type_name() {
+        for bound in ["?OptBool", "? OptBool"] {
+            let source = format!("type Box<T: {bound}> = {{ value: T }};");
+            let tokens = Lexer::tokenize(&source).unwrap();
+            let (ast, diagnostics) = Parser::parse(&tokens, &source);
+            assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+            assert_eq!(
+                declaration_dependencies(&ast[0], &source),
+                HashSet::from(["OptBool".into()])
+            );
+            let references = collect_static_type_references(&ast, "OptBool", &source);
+            assert_eq!(references.len(), 1);
+            assert_eq!(references[0].text(&source), "OptBool");
+        }
+    }
 }

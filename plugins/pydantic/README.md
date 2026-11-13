@@ -58,7 +58,7 @@ use a deprecated alias.
 
 ### Optional values
 
-`?T` becomes `T | None`. A struct field whose type is optional gets a `None`
+Without a non-null `@default`, `?T` becomes `T | None`. A struct field whose type is optional gets a `None`
 default. The field can then be absent from the JSON input:
 
 ```xen
@@ -98,7 +98,7 @@ type Server = { port: Port, host: Host };
 
 ```python
 type Port = Annotated[int, Field(ge=0, le=65535, default=8080)]
-type Host = Annotated[str | None, Field(default="localhost")]
+type Host = Annotated[str, Field(default="localhost")]
 
 
 class Server(BaseModel):
@@ -110,8 +110,24 @@ The generator also keeps defaults on model fields: Pydantic does not reliably
 propagate field metadata through PEP 695 named aliases. Some Pydantic versions
 warn about `default` metadata inside named aliases; the field-level default
 ensures that generated models still behave correctly. For nullable aliases,
-defaults wrap the whole union while validation constraints stay on the
-non-null member.
+non-null defaults remove outer `None`: omitted fields receive the default,
+but explicit `None` is rejected. For example, `?bool @default(true)` becomes
+`Annotated[bool, Field(default=True)]`. `@default(null)` is rejected even for
+nullable types. This is target-specific behavior: `@default` does not change
+Xenomorph's type compatibility, and TypeScript retains source optionality.
+
+Use `@defaultIfMissing(value)` to preserve nullability while supplying a
+default on omission. For example, `type A = ?bool @defaultIfMissing(true);`
+generates `Annotated[bool | None, Field(default=True)]`. Fields of type `A`
+default to `True` but accept explicit `None` and preserve it. Validation
+constraints still apply only to the non-null member. `@defaultIfMissing(null)`
+is valid for nullable types.
+
+On a non-nullable type, `@defaultIfMissing` produces a warning suggesting
+`@default`, but still applies the default normally; it does not add `None`.
+Both annotations support alias chains, generic specializations, and structured
+defaults. The nearest default annotation wins (the first matching annotation
+within a declaration).
 
 Lists and dicts render as Python literals; Pydantic copies them per instance.
 A struct default on a model type becomes a factory:

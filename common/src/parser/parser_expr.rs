@@ -181,7 +181,15 @@ impl<'src> DeclarationMethods<'src> for Declaration {
 
                 let constraint = if let Some((TokenVariant::Colon, _)) = parser.peek() {
                     parser.step_forward();
-                    let ident = parse_reference(parser)?;
+                    let optional = if parser.peek_is(TokenVariant::Question) {
+                        Some(parser.expect(TokenVariant::Question)?)
+                    } else {
+                        None
+                    };
+                    let mut ident = parse_reference(parser)?;
+                    if let Some(optional) = optional {
+                        ident.start = optional.start;
+                    }
                     Some(ident)
                 } else {
                     None

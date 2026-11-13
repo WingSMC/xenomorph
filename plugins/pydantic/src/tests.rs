@@ -343,7 +343,10 @@ fn literals_sets_tuples_and_generics() {
         ),
         "{output}"
     );
-    assert!(output.contains("type Users = Page[str]\n"), "{output}");
+    assert!(
+        output.contains("class Users(Page[str]):\n    items: list[str]\n"),
+        "{output}"
+    );
 }
 
 #[test]
@@ -413,6 +416,151 @@ assert flags.some_flag is True
 assert Flags(describe_images=True, some_flag=False).model_dump() == {
     'describe_images': True, 'some_flag': False,
 }
+"#,
+    );
+}
+
+#[test]
+fn defaulted_optional_aliases_accept_omission_but_reject_none() {
+    let output = generate(concat!(
+        "pub type DefaultFalse = ?bool @default(false); ",
+        "pub type A = ?bool @default(true); ",
+        "type OptBool = ?bool; ",
+        "type CsvOptionsOf<Enabled: OptBool> = { csv_enable: Enabled }; ",
+        "type CsvOptions = CsvOptionsOf<DefaultFalse>; ",
+        "type Flags = { enabled: DefaultFalse, explicit: ?DefaultFalse, affirmative: A, plain: OptBool };",
+    ));
+    assert!(
+        output.contains("type DefaultFalse = Annotated[bool, Field(default=False)]\n"),
+        "{output}"
+    );
+    assert!(
+        output.contains("type A = Annotated[bool, Field(default=True)]\n"),
+        "{output}"
+    );
+    assert_python(
+        &output,
+        r#"
+from pydantic import TypeAdapter, ValidationError
+assert CsvOptions().csv_enable is False
+assert Flags().enabled is False
+assert Flags().explicit is False
+assert Flags().affirmative is True
+assert Flags().plain is None
+assert Flags(plain=None).plain is None
+assert CsvOptions(csv_enable=True).csv_enable is True
+assert TypeAdapter(A).validate_python(False) is False
+try:
+    TypeAdapter(A).validate_python(None)
+except ValidationError:
+    pass
+else:
+    raise AssertionError('defaulted alias accepted None')
+for model, payload in [(CsvOptions, {'csv_enable': None}), (Flags, {'enabled': None}), (Flags, {'explicit': None}), (Flags, {'affirmative': None})]:
+    try:
+        model.model_validate(payload)
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError(f'accepted None: {payload!r}')
+"#,
+    );
+}
+
+#[test]
+fn default_if_missing_preserves_none_and_applies_on_omission() {
+    for bound in ["?bool", "OptBool"] {
+        let output = generate(&format!(
+            "type OptBool = ?bool; \
+             type Missing = ?bool @defaultIfMissing(true); \
+             type Copy = Missing; \
+             type Plain = bool @defaultIfMissing(false); \
+             type NullDefault = ?bool @defaultIfMissing(null); \
+             type CsvOptionsOf<Enabled: {bound}> = {{ csv_enable: Enabled }}; \
+             type CsvOptions = CsvOptionsOf<Copy>; \
+             type Flags = {{ enabled: Copy, explicit: ?Missing, plain: Plain, empty: NullDefault }};"
+        ));
+        assert!(
+            output.contains("type Missing = Annotated[bool | None, Field(default=True)]\n"),
+            "{output}"
+        );
+        assert!(output.contains("    enabled: Copy = True\n"), "{output}");
+        assert!(
+            output.contains("    explicit: Missing | None = True\n"),
+            "{output}"
+        );
+        assert_python(
+            &output,
+            r#"
+from pydantic import TypeAdapter, ValidationError
+assert Flags().model_dump() == {'enabled': True, 'explicit': True, 'plain': False, 'empty': None}
+assert Flags(enabled=None, explicit=None).enabled is None
+assert Flags(enabled=None, explicit=None).explicit is None
+assert Flags(enabled=False).enabled is False
+assert Flags(empty=None).empty is None
+assert CsvOptions().csv_enable is True
+assert CsvOptions(csv_enable=None).csv_enable is None
+assert CsvOptions(csv_enable=False).csv_enable is False
+assert TypeAdapter(Missing).validate_python(None) is None
+try:
+    Flags(plain=None)
+except ValidationError:
+    pass
+else:
+    raise AssertionError('defaultIfMissing must not make a required type nullable')
+"#,
+        );
+    }
+}
+
+#[test]
+fn nearest_default_annotation_wins_across_both_kinds() {
+    let output = generate(concat!(
+        "type Base = bool @default(false); ",
+        "type Missing = ?Base @defaultIfMissing(true); ",
+        "type Copy = Missing; ",
+        "type FirstMissing = ?bool @defaultIfMissing(false) @default(true); ",
+        "type FirstDefault = ?bool @default(true) @defaultIfMissing(false); ",
+        "type Model = { value: Copy, first_missing: FirstMissing, first_default: FirstDefault };",
+    ));
+    assert_python(
+        &output,
+        r#"
+from pydantic import ValidationError
+assert Model().value is True
+assert Model(value=None).value is None
+assert Model(value=False).value is False
+assert Model().first_missing is False
+assert Model(first_missing=None).first_missing is None
+assert Model().first_default is True
+try:
+    Model(first_default=None)
+except ValidationError:
+    pass
+else:
+    raise AssertionError('the first default annotation must determine nullability')
+"#,
+    );
+}
+
+#[test]
+fn default_if_missing_copies_mutable_values_and_preserves_optional_models() {
+    let output = generate(concat!(
+        "type Tags = ?string[] @defaultIfMissing([\"a\"]); ",
+        "type Options = { debug: ?bool } @defaultIfMissing({ debug: true }); ",
+        "type Model = { tags: Tags, options: ?Options };",
+    ));
+    assert_python(
+        &output,
+        r#"
+first, second = Model(), Model()
+assert first.tags == ['a']
+assert first.options.debug is True
+first.tags.append('b')
+first.options.debug = False
+assert second.tags == ['a']
+assert second.options.debug is True
+assert Model(tags=None, options=None).model_dump() == {'tags': None, 'options': None}
 "#,
     );
 }
@@ -552,7 +700,7 @@ assert event.model_dump(exclude={'label'}) == {'created': event.created, 'time_s
 #[test]
 fn nullable_and_structured_defaults_remain_in_alias_metadata() {
     let output = generate(concat!(
-        "type MaybePort = ?u16 @default(null); ",
+        "type MaybePort = ?u16 @defaultIfMissing(null); ",
         "type Host = ?string @minlen(1) @default(\"localhost\"); ",
         "type Tags = string[] @default([\"a\"]); ",
         "type Env = Dict<string, integer> @default({ x: 1 }); ",
@@ -560,7 +708,10 @@ fn nullable_and_structured_defaults_remain_in_alias_metadata() {
         "type Model = { port: MaybePort, host: Fallback, tags: Tags, env: Env };",
     ));
     assert!(output.contains("type MaybePort = Annotated[Annotated[int, Field(ge=0, le=65535)] | None, Field(default=None)]\n"), "{output}");
-    assert!(output.contains("type Host = Annotated[Annotated[str, Field(min_length=1)] | None, Field(default=\"localhost\")]\n"), "{output}");
+    assert!(
+        output.contains("type Host = Annotated[str, Field(min_length=1, default=\"localhost\")]\n"),
+        "{output}"
+    );
     assert!(
         output.contains("type Tags = Annotated[list[str], Field(default=[\"a\"])]\n"),
         "{output}"
@@ -576,6 +727,7 @@ assert MaybePort.__value__.__metadata__[0].default is None
 assert Host.__value__.__metadata__[0].default == 'localhost'
 first, second = Model(), Model()
 assert first.port is None
+assert Model(port=None).port is None
 assert first.host == 'localhost'
 assert first.tags == ['a']
 assert first.env == {'x': 1}
@@ -583,7 +735,13 @@ first.tags.append('b')
 first.env['x'] = 2
 assert second.tags == ['a']
 assert second.env == {'x': 1}
-assert Model(host=None).host is None
+from pydantic import ValidationError
+try:
+    Model(host=None)
+except ValidationError:
+    pass
+else:
+    raise AssertionError('non-null default must not admit None')
 "#,
     );
 }
@@ -695,7 +853,7 @@ fn default_annotation_sets_field_defaults() {
         "type Host = string @default(\"localhost\"); ",
         "type Ratio = f64 @default(0.5); ",
         "type Debug = bool @default(false); ",
-        "type MaybePort = ?u16 @default(null); ",
+        "type MaybePort = ?u16 @defaultIfMissing(null); ",
         "type ServerPort = Port; ",
         "type Name = string @default(\"x\") @deprecated(\"Use Host.\"); ",
         "type S = { port: Port, host: ?Host, ratio: Ratio, debug: Debug, other: MaybePort, server: ServerPort, name: Name, plain: ?string };",
@@ -706,7 +864,7 @@ fn default_annotation_sets_field_defaults() {
     );
     assert!(output.contains("    port: Port = 8080\n"), "{output}");
     assert!(
-        output.contains("    host: Host | None = \"localhost\"\n"),
+        output.contains("    host: Host = \"localhost\"\n"),
         "{output}"
     );
     assert!(output.contains("    ratio: Ratio = 0.5\n"), "{output}");
@@ -748,7 +906,7 @@ fn structured_defaults_render_lists_dicts_and_model_factories() {
     );
     assert!(
         output.contains(
-            "    named: Named | None = Field(default_factory=lambda: Named.model_validate({\"name\": \"x\"}))\n"
+            "    named: Named = Field(default_factory=lambda: Named.model_validate({\"name\": \"x\"}))\n"
         ),
         "{output}"
     );

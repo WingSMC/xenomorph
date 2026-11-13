@@ -121,7 +121,10 @@ impl ScopeInfo {
 
     /// Returns true for either a visible type or a globally registered trait.
     pub fn has_constraint(&self, name: &str) -> bool {
-        self.has_type(name) || self.type_hierarchy.has_trait(name)
+        match name.strip_prefix('?') {
+            Some(inner) => self.has_type(inner.trim()),
+            None => self.has_type(name) || self.type_hierarchy.has_trait(name),
+        }
     }
 
     pub fn is_static_type(&self, name: &str) -> bool {
@@ -1055,5 +1058,61 @@ mod tests {
         assert!(!scope.type_implements_trait(&outer_string, &NUMERIC));
         assert!(scope.type_implements_trait(&outer_integer, &NUMERIC));
         assert!(!scope.type_implements_trait(&outer_integer, &HAS_LENGTH));
+    }
+
+    #[test]
+    fn default_metadata_does_not_change_optional_generic_constraints() {
+        for bound in ["OptBool", "?bool"] {
+            let source = format!(
+                "pub type DefaultFalse = ?bool @default(false); \
+                 pub type OptBool = ?bool; \
+                 pub type CsvOptionsOf<Enabled: {bound}> = {{ csv_enable: Enabled }}; \
+                 pub type CsvOptions = CsvOptionsOf<DefaultFalse>; \
+                 pub type Plain = CsvOptionsOf<OptBool>;"
+            );
+            let tokens = crate::lexer::Lexer::tokenize(&source).unwrap();
+            let (ast, diagnostics) = crate::parser::Parser::parse(&tokens, &source);
+            assert!(diagnostics.is_empty(), "{bound}: {diagnostics:#?}");
+            let declarations = ast
+                .iter()
+                .filter_map(|declaration| match declaration {
+                    Declaration::Type {
+                        name, generics, ty, ..
+                    } => Some((
+                        name.text(&source).to_string(),
+                        TypeDeclarationInfo::from_ast(generics.as_deref(), &ty.0, &source),
+                    )),
+                    _ => None,
+                })
+                .collect();
+            let mut scope = scope_with_declarations(declarations);
+            scope.insert_metadata(&MetadataGraph::builtins()).unwrap();
+            for declaration in &ast {
+                if let Declaration::Type { name, ty, .. } = declaration {
+                    scope.type_hierarchy.set_declaration_annotations(
+                        "test",
+                        name.text(&source),
+                        super::super::declaration_annotations(&ty.1, &source),
+                    );
+                }
+            }
+            let analyzer = Analyzer::with_metadata(false, MetadataGraph::builtins()).unwrap();
+            let diagnostics = analyzer.run_scope(&ast, &source, &scope, &[]);
+            assert!(
+                diagnostics
+                    .iter()
+                    .all(|d| d.severity != XenoDiagSeverity::Err),
+                "{bound}: {diagnostics:#?}"
+            );
+            assert!(scope
+                .type_hierarchy
+                .is_assignable_to(&OwnedType::named("null"), &OwnedType::named("DefaultFalse"),));
+            assert!(!scope.satisfies_constraint(
+                &OwnedType::named("DefaultFalse"),
+                "bool",
+                Some("test")
+            ));
+            assert!(!scope.has_constraint("?Numeric"));
+        }
     }
 }

@@ -236,7 +236,7 @@ pub static DEPRECATION_REASON_PARAM: XenoParam = XenoParam {
 pub static DEFAULT: XenoAnnotation = XenoAnnotation {
     name: "default",
     documentation: Some(
-        "Declares the default value of a type as metadata. Accepts a value of the annotated type: a literal, `null`, or a list or struct of those such as `[]` or `{}`. Does not affect validation; generators apply it to fields of this type.",
+        "Declares a non-null default value as metadata. Accepts a literal or a list or struct value of the annotated type such as `[]` or `{}`. Rejects `null` even for nullable types; use `@defaultIfMissing(null)` instead. Does not change source type compatibility; targets applying the default remove outer nullability.",
     ),
     kind: XenoAnnotationKind::Meta,
     params: &[&ANY_TARGET_PARAM, &DEFAULT_VALUE_PARAM],
@@ -247,6 +247,16 @@ pub static DEFAULT_VALUE_PARAM: XenoParam = XenoParam {
     name: "value",
     constraint: XenoConstraint::Target,
     optional: false,
+};
+
+pub static DEFAULT_IF_MISSING: XenoAnnotation = XenoAnnotation {
+    name: "defaultIfMissing",
+    documentation: Some(
+        "Supplies a default only when a field is absent, preserving the annotated type's nullability. Explicit null remains valid for nullable types. Accepts the same typed values as `@default` and does not change source type compatibility. For non-nullable types, use `@default` instead.",
+    ),
+    kind: XenoAnnotationKind::Meta,
+    params: &[&ANY_TARGET_PARAM, &DEFAULT_VALUE_PARAM],
+    variadic: false,
 };
 
 pub static IF: XenoAnnotation = XenoAnnotation {
@@ -287,6 +297,7 @@ pub static BUILTIN_ANNOTATIONS: &[&XenoAnnotation] = &[
     &MATCH,
     &DEPRECATED,
     &DEFAULT,
+    &DEFAULT_IF_MISSING,
     &IF,
     &ELSEIF,
     &ELSE,

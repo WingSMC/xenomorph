@@ -248,11 +248,13 @@ impl JsonSchemaGenerator {
         constraint: Option<&str>,
         context: &mut SchemaContext<'_, '_>,
     ) -> Value {
-        let mut schema = constraint
+        let inner =
+            constraint.map(|constraint| constraint.strip_prefix('?').unwrap_or(constraint).trim());
+        let mut schema = inner
             .and_then(trait_constraint_to_schema)
-            .or_else(|| constraint.and_then(builtin_to_schema))
+            .or_else(|| inner.and_then(builtin_to_schema))
             .or_else(|| {
-                constraint
+                inner
                     .filter(|constraint| {
                         self.own_types.contains(*constraint)
                             || self.provider_of(constraint).is_some()
@@ -260,6 +262,10 @@ impl JsonSchemaGenerator {
                     .map(|constraint| self.named_type_to_schema(constraint, None, context))
             })
             .unwrap_or_else(|| json!({}));
+
+        if constraint.is_some_and(|constraint| constraint.starts_with('?')) {
+            schema = json!({ "anyOf": [schema, { "type": "null" }] });
+        }
 
         if let Value::Object(map) = &mut schema {
             map.insert("x-xenomorph-generic-parameter".to_string(), json!(name));
@@ -1453,6 +1459,16 @@ mod tests {
                 "title": "NamesById",
             })
         );
+    }
+
+    #[test]
+    fn optional_generic_bounds_retain_their_present_and_null_cases() {
+        let defs = generate_defs("type Box<T: ?bool> = { value: T };");
+        assert_eq!(
+            defs["Box"]["$defs"]["T"]["anyOf"],
+            json!([{ "type": "boolean" }, { "type": "null" }])
+        );
+        assert_eq!(defs["Box"]["$defs"]["T"]["x-xenomorph-constraint"], "?bool");
     }
 
     #[test]
