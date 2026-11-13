@@ -50,6 +50,52 @@ fn explicit_abstract_schema_config_collects_metadata_without_initialization() {
 
 #[test]
 #[ignore = "Build workspace cdylibs first: cargo build --workspace"]
+fn default_plugin_location_loads_beside_executable_from_another_directory() {
+    let directory = std::env::temp_dir().join(format!(
+        "xenomorph-default-plugin-cli-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir(&directory).unwrap();
+    let config = directory.join("xenomorph.toml");
+    for path in ["", "path = ''\n"] {
+        fs::write(
+            &config,
+            format!(
+                "abstract = true\n[plugins]\n{path}plugins = ['xenomorph_typescript', 'xenomorph_test_plugin']\n"
+            ),
+        )
+        .unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_xeno"))
+            .args(["schema", "--config"])
+            .arg(&config)
+            .current_dir(&directory)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let schema: serde_json::Value = serde_json::from_slice(
+            &fs::read(directory.join(".xenomorph").join("xenomorph.schema.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            schema["properties"]["plugins"]["properties"]["typescript"]["type"],
+            "object"
+        );
+        assert!(!directory.join("events").exists());
+        fs::remove_dir_all(directory.join(".xenomorph")).unwrap();
+    }
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+#[ignore = "Build workspace cdylibs first: cargo build --workspace"]
 fn file_type_requires_config_and_blocks_output_without_it() {
     let directory = std::env::temp_dir().join(format!(
         "xenomorph-file-cli-{}-{}",

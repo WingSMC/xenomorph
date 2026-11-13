@@ -56,6 +56,56 @@ fn plugin_directory() -> PathBuf {
         .to_path_buf()
 }
 
+#[test]
+fn default_plugin_path_uses_the_host_executable_directory() {
+    let workspace = Workspace::new();
+    let executable = std::env::current_exe().unwrap();
+    let expected = executable
+        .parent()
+        .unwrap()
+        .join(lib_filename!("xenomorph_test_plugin"));
+    let mut configs = vec![Config::default_with_workdir(workspace.0.clone())];
+    for source in ["", "[plugins]\nplugins = []\n", "[plugins]\npath = \"\"\n"] {
+        let mut config: Config = toml::from_str(source).unwrap();
+        config.workdir = workspace.0.clone();
+        configs.push(config);
+    }
+
+    for config in configs {
+        assert_eq!(
+            resolve_plugin_path(&config, "xenomorph_test_plugin").unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn explicit_relative_plugin_paths_use_the_workspace_directory() {
+    let workspace = Workspace::new();
+    for directory in [".", "plugins"] {
+        let config = workspace.config(Path::new(directory), &[]);
+        assert_eq!(
+            resolve_plugin_path(&config, "xenomorph_test_plugin").unwrap(),
+            workspace
+                .0
+                .join(directory)
+                .join(lib_filename!("xenomorph_test_plugin"))
+        );
+    }
+}
+
+#[test]
+fn explicit_absolute_plugin_paths_are_preserved() {
+    let workspace = Workspace::new();
+    let directory = workspace.0.join("plugins");
+    let config = workspace.config(&directory, &[]);
+
+    assert_eq!(
+        resolve_plugin_path(&config, "xenomorph_test_plugin").unwrap(),
+        directory.join(lib_filename!("xenomorph_test_plugin"))
+    );
+}
+
 fn wait_for_event(path: &Path, event: &str) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !fs::read_to_string(path).unwrap_or_default().contains(event) {

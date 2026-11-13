@@ -276,6 +276,22 @@ pub fn encode_request(
     })
 }
 
+fn resolve_plugin_path(config: &Config, library_name: &str) -> Result<PathBuf, String> {
+    let directory = if config.plugins.path.is_empty() {
+        let executable = std::env::current_exe()
+            .map_err(|error| format!("Unable to locate executable for plugin loading: {error}"))?;
+        executable
+            .parent()
+            .ok_or_else(|| {
+                "Executable path has no parent directory for plugin loading".to_string()
+            })?
+            .to_path_buf()
+    } else {
+        config.workdir.join(&config.plugins.path)
+    };
+    Ok(directory.join(lib_filename!(library_name)))
+}
+
 pub fn load_plugins(config: &Config, mode: PluginMode) -> Result<Vec<LoadedPlugin>, String> {
     let mut plugins = Vec::new();
     let mut names = std::collections::HashSet::new();
@@ -283,10 +299,7 @@ pub fn load_plugins(config: &Config, mode: PluginMode) -> Result<Vec<LoadedPlugi
     let mut custom_identifiers = std::collections::HashSet::new();
     let mut merged = crate::semantic::MetadataGraph::builtins();
     for library_name in &config.plugins.plugins {
-        let path = config
-            .workdir
-            .join(&config.plugins.path)
-            .join(lib_filename!(library_name));
+        let path = resolve_plugin_path(config, library_name)?;
         let mut runtime = Runtime::open(&path)
             .map_err(|error| format!("Plugin '{library_name}' ({}): {error}", path.display()))?;
         let capabilities = runtime.api().header.capabilities;

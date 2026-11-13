@@ -34,7 +34,7 @@ pub fn build_rc_schema(plugins: &[LoadedPlugin]) -> Value {
         "path".to_string(),
         json!({
             "type": "string",
-            "description": "Directory containing the compiled plugin libraries, relative to the workspace root.",
+            "description": "Directory containing the compiled plugin libraries. Omitted or empty uses the host executable's directory. Relative overrides use the workspace root; absolute paths are used as-is.",
             "default": &defaults.plugins.path
         }),
     );

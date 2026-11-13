@@ -58,11 +58,16 @@ plugins = ["xenomorph_typescript"]
 
 Tables merge recursively from the extended config into the consuming config.
 The consuming config replaces colliding scalar and array values. It keeps
-non-colliding keys and subkeys. Paths used at runtime remain relative to the
-authoritative consuming config's directory. `xeno schema` writes
+non-colliding keys and subkeys. Explicit relative paths used at runtime resolve
+from the authoritative consuming config's directory. `xeno schema` writes
 `.xenomorph/xenomorph.schema.json` beside the deepest extended config. If the
 authoritative config does not extend another file, `xeno schema` writes the
 file beside that config instead.
+
+If `plugins.path` is omitted or empty, plugin libraries are loaded from the same
+folder as the host executable (`xeno` or `xenomorph_lsp`). A non-empty relative
+path overrides this location relative to the workspace root; an absolute path
+is used as-is. Set `path = "."` to load plugins from the workspace root.
 
 The host reports unknown annotations in the selected plugin visibility scope
 as warnings. A TypeScript-only view can therefore tolerate Java-only

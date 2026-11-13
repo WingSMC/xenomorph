@@ -99,6 +99,7 @@ pub type PluginConfigs = HashMap<String, ConfigValue>;
 #[repr(Rust)]
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct PluginsConfig {
+    /// Empty means the host executable's directory; relative overrides use the workspace root.
     #[serde(default = "default_plugins_path")]
     pub path: String,
 
